@@ -1,6 +1,6 @@
 # M0 工程、环境与协议设计
 
-**状态：设计评审中** · **日期：2026-10-10** · **需求基线：** [DEVELOPMENT_PLAN.md v0.6](https://github.com/Reidddddd/etcd-hbase/blob/56bef2b1248d970cd2fe41f36249d96610913ae4/DEVELOPMENT_PLAN.md)
+**状态：设计已批准（[PR #2](https://github.com/Reidddddd/etcd-hbase/pull/2)）** · **日期：2026-10-10** · **需求基线：** [DEVELOPMENT_PLAN.md v0.6](https://github.com/Reidddddd/etcd-hbase/blob/56bef2b1248d970cd2fe41f36249d96610913ae4/DEVELOPMENT_PLAN.md)
 
 > 本文是 M0 的设计规格，描述目标、架构、模块契约、数据与身份边界、兼容要求和未决事项。具体任务分解与执行流程由独立实施计划维护。设计获批前不开始 M0 代码实现。
 
@@ -345,6 +345,7 @@ M0 阶段只有在 J00–J09 对应交付、适用验证、真实目标身份与
 |---|---|
 | 2026-10-10 | 初稿：从 M0 执行清单中提取设计目标、架构契约、候选决策、边界和未决输入，提交评审。 |
 | 2026-10-12 | 按评审澄清 HBase 探针的可见性与 durability 边界、确定性盐的点查/范围查成本，以及 etcd session 与后端身份 provider 的职责。 |
+| 2026-10-12 | PR #2 已批准并合并；更新设计状态，M0 的实现与阶段验收仍按独立任务证据判断。 |
 
 ## 15. 参考
 

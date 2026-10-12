@@ -1,0 +1,919 @@
+{
+  "schema_version": 1,
+  "task": "J00",
+  "audit_date": "2026-10-12",
+  "status": "awaiting-review",
+  "minimum_milvus_version": "v3.0.1",
+  "etcd_version": "v3.5.23",
+  "scope": {
+    "deployment": "new-cluster-external-etcd",
+    "message_queue": "Kafka",
+    "java_baseline": 21,
+    "production_profile": "awaiting-B01-B06-inputs",
+    "runtime_tests_executed": false
+  },
+  "sources": {
+    "milvus": {
+      "repository": "milvus-io/milvus",
+      "tag": "v3.0.1",
+      "commit": "658cbd16899bb715a17d4d6f727531a376678ca6",
+      "files": {
+        "cmd/milvus/mck.go": "c585bc24b507f4ba5c409599a18bd4c63434b1b076d0973d501e62a7a0ffd0f9",
+        "cmd/milvus/util.go": "cfbc2e16a9ec8cc901598fc4c365aad1ca0daa289160610b01cd5ac715095c83",
+        "cmd/tools/migration/backend/etcd.go": "da21385e36ef877b5a593f6b6738a3dce52ef2d1ca849447bfbb736cc8aee203",
+        "cmd/tools/migration/backend/etcd210.go": "021b23f97a12818e98f5666623bd108e9fece1e70f86284dc17236809532d73e",
+        "cmd/tools/migration/migration/runner.go": "b718c026f8efd3c224ec39e067404e9f7293d0ccd16c30dfaa4176a0aa1dc57d",
+        "configs/milvus.yaml": "067bb5c44da47243f221177e1204abcfd6c08ecd2aed0abfa8290b786b476b67",
+        "go.mod": "32620a1c33f9d9c82233d51ed9fe5078d21e26f1b93a6671618b231ba029c7ce",
+        "go.sum": "b93d1f413e9e0c50000ad8ec74a186f8088604e4002d2ad36aff78e0a7bfb3e2",
+        "internal/cdc/controller/controller.go": "456987a029f8af25bae9c0dee4b8a65decf638aa1dcd41453461b66613bf2b7c",
+        "internal/cdc/meta/replicate_meta.go": "f96f5eb1e5017c3a8e2c38d33d5b2a5a13aadb8413932647cb00d6da19d1836c",
+        "internal/cdc/resource/resource.go": "e7e805c2e703f143d8c44b5defdfb9be3d42276f946693da471d2f9f287d7055",
+        "internal/cdc/resource/test_utility.go": "9aa40f3ab804994e498ccb347f335c12f8b5547e62cfe97f3676e649d3a37a16",
+        "internal/coordinator/mix_coord.go": "5ed8a7f71594b9ed541bd5da3ff9704eb2f5735a375221e504ff954023533deb",
+        "internal/datacoord/meta.go": "912f68cb9f2804431cb8f2be5a25fbc60474ed55225daf80b9b4dde9d2bdb213",
+        "internal/datacoord/server.go": "a92fa7babf08e05ae2bb783a92fbd93db644d19f4ca120b235bfe4287f403d57",
+        "internal/datanode/data_node.go": "92ce167f5e6e75e3419f8f4225194feac64d68c5d317928c0ff456de84677876",
+        "internal/distributed/cdc/service.go": "27a693c5e30d16f117a4c610f9e7b45cfafc650efd117bd185359d3ed5f1cd6a",
+        "internal/distributed/datanode/service.go": "29e331d81e5f9de479cafd60008fc340ca83fcb520c29927543c2e4dd009f2dd",
+        "internal/distributed/mixcoord/service.go": "02168448e17dc0e36ea129c7bc7654cc71cf3c6b103ea77cedcca1171d192213",
+        "internal/distributed/proxy/service.go": "cc8b5982b68a41d18f2c54e61737c677de6f7a98ff9b16ea8ad5948e8b83edd7",
+        "internal/distributed/querynode/service.go": "4e9b211bd0c069df128889050322263e19cde6796de613d67c871053310420f5",
+        "internal/distributed/streaming/wal.go": "a75be1a3fa88f1ba8c1b6e6b653116f7f41bc9727affd4b009fb638c17fd1377",
+        "internal/distributed/streamingnode/service.go": "cfd941e336da736cd1f00070321eb5488c474d357a323f6eaa0c7e4ea7a97730",
+        "internal/kv/etcd/embed_etcd_kv.go": "0cbe2525f7899b552aa762aa70f215b27050a19db7ed8f8ee5826e9e8b8a13b9",
+        "internal/kv/etcd/etcd_kv.go": "727ce3c0f75c702c3f394aca1024b2a6f90534862fd5f47ea4f653f0360eb2ac",
+        "internal/kv/etcd/util.go": "c3077fef80cb967295cb5ac72d7505a621570342bcd4c001330aa0589bc7c214",
+        "internal/metastore/kv/datacoord/kv_catalog.go": "b171357f82427dc3a3a3e70f1d609081db5ef11a992dc0acac7e0c7d0ac03adb",
+        "internal/metastore/kv/rootcoord/legacy_snapshot_gc.go": "d4c4c5c0ee0988105efba09a5cf0edcdf7594af4d4b9d4ea6d9d1442fde4de9f",
+        "internal/metastore/kv/rootcoord/legacy_tombstone_gc.go": "efd50e735a27113ae9488c1a979f0bff4df35d20a9e61308d86e9402f710308f",
+        "internal/metastore/kv/streamingcoord/kv_catalog.go": "bc96f0eb3fa324afee9c75b518569da11993601d788b2dbafba17253f0b0c455",
+        "internal/metastore/kv/streamingnode/kv_catalog.go": "459cf6227dd89694e333307e029b975d6b9e0c45c549e2b43f1eab99759dc6b0",
+        "internal/querycoordv2/server.go": "6c37d07b06de376404903de8cc5f64dec70db46ae1d7eacf9489dc3f5c659665",
+        "internal/querynodev2/server.go": "49552b621c56f4e8595a0fe1230ec438dd6acba648647f90ad3421dfe5ea2c2b",
+        "internal/rootcoord/root_coord.go": "845c2cf9d40e6935358ddaf0e9ef8e6f2f80336be2bf831fe4199aafc4b96215",
+        "internal/rootcoord/telemetry/command_store.go": "950b44b502b410ebc37f71f8f777514618ca67d09249a47fdbf05c2d478d594b",
+        "internal/rootcoord/telemetry/manager.go": "33f2863a614e8cf524b72d7da2cf24878773d61c643ca1b7d9162f1207cc39ac",
+        "internal/streamingcoord/client/client.go": "edf57d64fe1177e3e696554672ff562e225e86e3822ddf155a06bda0b561d9b7",
+        "internal/streamingcoord/server/builder.go": "7bc0bfe1ed8ce955a6415f4927c8978b211ef3db4445541ed6043b57c8b064d1",
+        "internal/streamingcoord/server/resource/resource.go": "6b7137d08e6078fc62cf964cd4cb3d64c500de5ab4e4ae14e4b01670c9f9e162",
+        "internal/streamingnode/client/manager/manager_client.go": "c86bec61857f46c3a55037c1085e9f7bc5d2eb054a7cbfa00adb6c32a9aabc96",
+        "internal/streamingnode/server/builder.go": "51aa1af43b89aaa12fa1ebb37dba733004fd59bb96a00eb2cbe2cf87b861a08f",
+        "internal/streamingnode/server/resource/resource.go": "cea5d3f21d826ee878bb15ef7ad24190e6698d316398b636658be989a3c114b4",
+        "internal/streamingnode/server/wal/recovery/recovery_background_task.go": "9649d3ff3bc104261263267dec76f2c52579dd47069d46208b774622e6fb01af",
+        "internal/tso/tso.go": "45991b65440f9d4167de28fb51ccd52bfc7b84c239dc45816fa0e9143b907ed1",
+        "internal/types/types.go": "1b2a62ad51bb0445b702ab29cfd45088914b46c1b83c731d012d3e2a7da0bf01",
+        "internal/util/dependency/kv/kv_client_handler.go": "76bb28ef0580d43f23e3ccc22d18786dc77874ac400fa4c8c1eda2620d529402",
+        "internal/util/proxyutil/proxy_watcher.go": "c53288a9449417b8a5e308b6de662fab35bde3dee2665f31487b0fff29d01a68",
+        "internal/util/sessionutil/session_util.go": "aba4e608dc8a701be9e0b642f3bb322ffb2f1fb9d16df9e14c8fd098e4e15028",
+        "internal/util/streamingutil/service/discoverer/session_discoverer.go": "95b700f2974a1802a1977870f8a07a0b21a6c3678ac01bbf6bdc0f839ef148e1",
+        "internal/util/streamingutil/service/resolver/builder.go": "4dfd95b781cf19758e4e4db787e472fb1889127406a553e1ccf90510ca9f9260",
+        "internal/util/tsoutil/tso.go": "138959a726863f6935edbd95ed9394e3b8b56285d59072d15bd81b3dac7a1d74",
+        "pkg/config/etcd_source.go": "58edc80169b91782c14734fdbedf9285ee0abb91e1bfcf5d4c69bcc8465d2977",
+        "pkg/config/manager.go": "a8b882d09abe537aee0d44f334f7ff5a5fefc34a7a8fbeb1003fddc342d79eab",
+        "pkg/go.mod": "0e97dedeeb379fbb43ef55f64953595db386e8f6b6f4f49e7b8cc9a629a170e5",
+        "pkg/go.sum": "d00562715c0bf2d4508e72b4bb9fdbbf4538b44f28122207773ab44f587b6011",
+        "pkg/kv/kv.go": "76f87d879e6ee568ebeaadf2809d0d7acd402865286bd02b64462b5644ec0884",
+        "pkg/streaming/walimpls/impls/wp/builder.go": "cc0ace058f8b39050e005b8289a5b79e66a57fe9a655ee8f5462f9a1a59fc7e5",
+        "pkg/util/etcd/etcd_server.go": "dc68d1e9adf2e1c8b1432fd8b5106da50e861b923af347f7ee32bfc3dc7b5bff",
+        "pkg/util/etcd/etcd_util.go": "e0c2b36bcef77e65b025860109e2cb381d693e3834c01b43f80abdb4339bf697",
+        "pkg/util/paramtable/base_table.go": "b28f713f17a7c40523166c6e291e13455b527fa28d163af24592a7ac936b18c4",
+        "pkg/util/paramtable/component_param.go": "e447a9baf6ab0c19c3f6fba9c53410a37d3bcd45d001a0b69d8818362347aac8",
+        "pkg/util/paramtable/service_param.go": "9571db91dfbb50a8f182af12d7c481f83530a071e358dc27d5be45a120de3d0f"
+      }
+    },
+    "etcd": {
+      "repository": "etcd-io/etcd",
+      "tag": "v3.5.23",
+      "commit": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+      "files": {
+        "api/authpb/auth.proto": "443e661f9e423d3376d513e76446e957ae0132c6f63fff4510fde3c7a587be05",
+        "api/etcdserverpb/rpc.proto": "7cf0d098aae57522a574bf591145e55539a15212885d43709536553833cd6f40",
+        "api/mvccpb/kv.proto": "76b0d596ecc8dd1b535be683777910a5b4fe0705fb57baccacfcc7d98d11821e",
+        "api/v3rpc/rpctypes/error.go": "e0c48c1555501b654526b606e1bb657da4b20ab14771b4101bd1d8055eace003",
+        "api/v3rpc/rpctypes/metadatafields.go": "2c2b20bf1b1d06aeedabd043510215eec442974093f7b0db1a2bd47d895a8b1b",
+        "client/v3/client.go": "62a7389c7749e8ffa129e42645c0b1b5ed4deeedd120984da3a253975f417c7a",
+        "client/v3/credentials/credentials.go": "02339be2e76d05fe9090d848f36d44d1d417a72a9828f7c5baf2d0671d55cc50",
+        "client/v3/lease.go": "781cf84d7a66688cd3753995f8a638c1eb8093a0d11274d3f37d7925b5213697",
+        "client/v3/op.go": "b36a798c895ca3ad4a227aa391271114660aaa75d2c81bca238d6645d4c942e2",
+        "client/v3/options.go": "a48767bb928dc218addac26bb6e27096729c7e54d6af7136336edd46a39c9861",
+        "client/v3/retry.go": "3dfbcf1fc8ee12fd92eb0553c51079459d7b7da964a9156f6ebbbe3dc27fac9b",
+        "client/v3/retry_interceptor.go": "032280585099aa74330b7d4c6b97c6a6512ec8a9848cd2419528d6f2ac9cc558",
+        "client/v3/watch.go": "de83d63fffe8a1825e091c6e637fcbb1388b2ce4c0f08804741d35f709fc604b",
+        "server/etcdserver/api/v3election/v3electionpb/v3election.proto": "6d55676e5efed036394f5340ead20df9f2f1b0df497400c1dc37641ba3b48207",
+        "server/etcdserver/api/v3lock/v3lockpb/v3lock.proto": "443d343e744139aec7650e127098c92115c9e6cf97137ab0973222ebf37f47a8",
+        "server/etcdserver/apply.go": "b7b07e095523340b6d03a7a64778713b80406c47daf479cadaeba3c0b5891ec6",
+        "server/mvcc/kvstore_txn.go": "a885dbfda8d62886b40a5626cc3c583c5d6ce6fa7eb20d90e2fc7314cce6fb20"
+      }
+    }
+  },
+  "inventory_method": "Tracked non-test Go files with a literal etcd client/v3 import; option tokens are lexical candidates, not a resolved call graph. Catalog/TSO interface consumers are audited separately in the documentation.",
+  "direct_client_imports": [
+    {
+      "path": "cmd/milvus/mck.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "c585bc24b507f4ba5c409599a18bd4c63434b1b076d0973d501e62a7a0ffd0f9",
+      "option_tokens": []
+    },
+    {
+      "path": "cmd/milvus/util.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "cfbc2e16a9ec8cc901598fc4c365aad1ca0daa289160610b01cd5ac715095c83",
+      "option_tokens": []
+    },
+    {
+      "path": "cmd/tools/migration/backend/etcd.go",
+      "scope": "migration-excluded",
+      "sha256": "da21385e36ef877b5a593f6b6738a3dce52ef2d1ca849447bfbb736cc8aee203",
+      "option_tokens": []
+    },
+    {
+      "path": "cmd/tools/migration/backend/etcd210.go",
+      "scope": "migration-excluded",
+      "sha256": "021b23f97a12818e98f5666623bd108e9fece1e70f86284dc17236809532d73e",
+      "option_tokens": [
+        "OpOption",
+        "WithCountOnly",
+        "WithFromKey",
+        "WithLimit",
+        "WithPrefix",
+        "WithRev"
+      ]
+    },
+    {
+      "path": "cmd/tools/migration/migration/runner.go",
+      "scope": "migration-excluded",
+      "sha256": "b718c026f8efd3c224ec39e067404e9f7293d0ccd16c30dfaa4176a0aa1dc57d",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/cdc/controller/controller.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "456987a029f8af25bae9c0dee4b8a65decf638aa1dcd41453461b66613bf2b7c",
+      "option_tokens": [
+        "WithPrefix",
+        "WithPrevKV",
+        "WithRev"
+      ]
+    },
+    {
+      "path": "internal/cdc/meta/replicate_meta.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "f96f5eb1e5017c3a8e2c38d33d5b2a5a13aadb8413932647cb00d6da19d1836c",
+      "option_tokens": [
+        "Compare",
+        "ModRevision",
+        "OpDelete",
+        "OpOption",
+        "WithPrefix",
+        "WithSort"
+      ]
+    },
+    {
+      "path": "internal/cdc/resource/resource.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "e7e805c2e703f143d8c44b5defdfb9be3d42276f946693da471d2f9f287d7055",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/cdc/resource/test_utility.go",
+      "scope": "test-helper-excluded",
+      "sha256": "9aa40f3ab804994e498ccb347f335c12f8b5547e62cfe97f3676e649d3a37a16",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/coordinator/mix_coord.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "5ed8a7f71594b9ed541bd5da3ff9704eb2f5735a375221e504ff954023533deb",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/datacoord/server.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "a92fa7babf08e05ae2bb783a92fbd93db644d19f4ca120b235bfe4287f403d57",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/datanode/data_node.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "92ce167f5e6e75e3419f8f4225194feac64d68c5d317928c0ff456de84677876",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/distributed/cdc/service.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "27a693c5e30d16f117a4c610f9e7b45cfafc650efd117bd185359d3ed5f1cd6a",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/distributed/datanode/service.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "29e331d81e5f9de479cafd60008fc340ca83fcb520c29927543c2e4dd009f2dd",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/distributed/mixcoord/service.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "02168448e17dc0e36ea129c7bc7654cc71cf3c6b103ea77cedcca1171d192213",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/distributed/proxy/service.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "cc8b5982b68a41d18f2c54e61737c677de6f7a98ff9b16ea8ad5948e8b83edd7",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/distributed/querynode/service.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "4e9b211bd0c069df128889050322263e19cde6796de613d67c871053310420f5",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/distributed/streaming/wal.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "a75be1a3fa88f1ba8c1b6e6b653116f7f41bc9727affd4b009fb638c17fd1377",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/distributed/streamingnode/service.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "cfd941e336da736cd1f00070321eb5488c474d357a323f6eaa0c7e4ea7a97730",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/kv/etcd/embed_etcd_kv.go",
+      "scope": "embedded-excluded",
+      "sha256": "0cbe2525f7899b552aa762aa70f215b27050a19db7ed8f8ee5826e9e8b8a13b9",
+      "option_tokens": [
+        "Compare",
+        "OpDelete",
+        "OpGet",
+        "OpOption",
+        "OpPut",
+        "Version",
+        "WithCountOnly",
+        "WithCreatedNotify",
+        "WithLease",
+        "WithLimit",
+        "WithPrefix",
+        "WithPrevKV",
+        "WithRange",
+        "WithRev",
+        "WithSort"
+      ]
+    },
+    {
+      "path": "internal/kv/etcd/etcd_kv.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "727ce3c0f75c702c3f394aca1024b2a6f90534862fd5f47ea4f653f0360eb2ac",
+      "option_tokens": [
+        "Compare",
+        "OpDelete",
+        "OpGet",
+        "OpOption",
+        "OpPut",
+        "Version",
+        "WithCountOnly",
+        "WithCreatedNotify",
+        "WithLease",
+        "WithLimit",
+        "WithPrefix",
+        "WithPrevKV",
+        "WithRange",
+        "WithRev",
+        "WithSort"
+      ]
+    },
+    {
+      "path": "internal/kv/etcd/util.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "c3077fef80cb967295cb5ac72d7505a621570342bcd4c001330aa0589bc7c214",
+      "option_tokens": [
+        "Compare",
+        "Value"
+      ]
+    },
+    {
+      "path": "internal/querycoordv2/server.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "6c37d07b06de376404903de8cc5f64dec70db46ae1d7eacf9489dc3f5c659665",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/querynodev2/server.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "49552b621c56f4e8595a0fe1230ec438dd6acba648647f90ad3421dfe5ea2c2b",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/rootcoord/root_coord.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "845c2cf9d40e6935358ddaf0e9ef8e6f2f80336be2bf831fe4199aafc4b96215",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/rootcoord/telemetry/command_store.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "950b44b502b410ebc37f71f8f777514618ca67d09249a47fdbf05c2d478d594b",
+      "option_tokens": [
+        "OpOption",
+        "WithPrefix"
+      ]
+    },
+    {
+      "path": "internal/rootcoord/telemetry/manager.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "33f2863a614e8cf524b72d7da2cf24878773d61c643ca1b7d9162f1207cc39ac",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/streamingcoord/client/client.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "edf57d64fe1177e3e696554672ff562e225e86e3822ddf155a06bda0b561d9b7",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/streamingcoord/server/builder.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "7bc0bfe1ed8ce955a6415f4927c8978b211ef3db4445541ed6043b57c8b064d1",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/streamingcoord/server/resource/resource.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "6b7137d08e6078fc62cf964cd4cb3d64c500de5ab4e4ae14e4b01670c9f9e162",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/streamingnode/client/manager/manager_client.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "c86bec61857f46c3a55037c1085e9f7bc5d2eb054a7cbfa00adb6c32a9aabc96",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/streamingnode/server/builder.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "51aa1af43b89aaa12fa1ebb37dba733004fd59bb96a00eb2cbe2cf87b861a08f",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/streamingnode/server/resource/resource.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "cea5d3f21d826ee878bb15ef7ad24190e6698d316398b636658be989a3c114b4",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/types/types.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "1b2a62ad51bb0445b702ab29cfd45088914b46c1b83c731d012d3e2a7da0bf01",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/util/dependency/kv/kv_client_handler.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "76bb28ef0580d43f23e3ccc22d18786dc77874ac400fa4c8c1eda2620d529402",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/util/proxyutil/proxy_watcher.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "c53288a9449417b8a5e308b6de662fab35bde3dee2665f31487b0fff29d01a68",
+      "option_tokens": [
+        "WithCreatedNotify",
+        "WithPrefix",
+        "WithPrevKV",
+        "WithRev",
+        "WithSort"
+      ]
+    },
+    {
+      "path": "internal/util/sessionutil/session_util.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "aba4e608dc8a701be9e0b642f3bb322ffb2f1fb9d16df9e14c8fd098e4e15028",
+      "option_tokens": [
+        "Compare",
+        "OpPut",
+        "Value",
+        "Version",
+        "WithCountOnly",
+        "WithLease",
+        "WithPrefix",
+        "WithPrevKV",
+        "WithRev",
+        "WithSort"
+      ]
+    },
+    {
+      "path": "internal/util/streamingutil/service/discoverer/session_discoverer.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "95b700f2974a1802a1977870f8a07a0b21a6c3678ac01bbf6bdc0f839ef148e1",
+      "option_tokens": [
+        "OpOption",
+        "WithPrefix",
+        "WithRev",
+        "WithSerializable"
+      ]
+    },
+    {
+      "path": "internal/util/streamingutil/service/resolver/builder.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "4dfd95b781cf19758e4e4db787e472fb1889127406a553e1ccf90510ca9f9260",
+      "option_tokens": []
+    },
+    {
+      "path": "internal/util/tsoutil/tso.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "138959a726863f6935edbd95ed9394e3b8b56285d59072d15bd81b3dac7a1d74",
+      "option_tokens": []
+    },
+    {
+      "path": "pkg/config/etcd_source.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "58edc80169b91782c14734fdbedf9285ee0abb91e1bfcf5d4c69bcc8465d2977",
+      "option_tokens": [
+        "OpOption",
+        "WithPrefix",
+        "WithSerializable"
+      ]
+    },
+    {
+      "path": "pkg/config/manager.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "a8b882d09abe537aee0d44f334f7ff5a5fefc34a7a8fbeb1003fddc342d79eab",
+      "option_tokens": [
+        "Compare",
+        "CreateRevision",
+        "OpDelete",
+        "OpPut"
+      ]
+    },
+    {
+      "path": "pkg/kv/kv.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "76f87d879e6ee568ebeaadf2809d0d7acd402865286bd02b64462b5644ec0884",
+      "option_tokens": []
+    },
+    {
+      "path": "pkg/streaming/walimpls/impls/wp/builder.go",
+      "scope": "woodpecker-excluded",
+      "sha256": "cc0ace058f8b39050e005b8289a5b79e66a57fe9a655ee8f5462f9a1a59fc7e5",
+      "option_tokens": []
+    },
+    {
+      "path": "pkg/util/etcd/etcd_server.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "dc68d1e9adf2e1c8b1432fd8b5106da50e861b923af347f7ee32bfc3dc7b5bff",
+      "option_tokens": []
+    },
+    {
+      "path": "pkg/util/etcd/etcd_util.go",
+      "scope": "first-party-audit-entry",
+      "sha256": "e0c2b36bcef77e65b025860109e2cb381d693e3834c01b43f80abdb4339bf697",
+      "option_tokens": []
+    }
+  ],
+  "rpc_proto_files": [
+    "api/etcdserverpb/rpc.proto",
+    "server/etcdserver/api/v3lock/v3lockpb/v3lock.proto",
+    "server/etcdserver/api/v3election/v3electionpb/v3election.proto"
+  ],
+  "rpc_catalog": [
+    {
+      "path": "/etcdserverpb.KV/Range",
+      "request": "RangeRequest",
+      "response": "RangeResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 16
+    },
+    {
+      "path": "/etcdserverpb.KV/Put",
+      "request": "PutRequest",
+      "response": "PutResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 26
+    },
+    {
+      "path": "/etcdserverpb.KV/DeleteRange",
+      "request": "DeleteRangeRequest",
+      "response": "DeleteRangeResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 36
+    },
+    {
+      "path": "/etcdserverpb.KV/Txn",
+      "request": "TxnRequest",
+      "response": "TxnResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 47
+    },
+    {
+      "path": "/etcdserverpb.KV/Compact",
+      "request": "CompactionRequest",
+      "response": "CompactionResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 57
+    },
+    {
+      "path": "/etcdserverpb.Watch/Watch",
+      "request": "WatchRequest",
+      "response": "WatchResponse",
+      "client_streaming": true,
+      "server_streaming": true,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 71
+    },
+    {
+      "path": "/etcdserverpb.Lease/LeaseGrant",
+      "request": "LeaseGrantRequest",
+      "response": "LeaseGrantResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 83
+    },
+    {
+      "path": "/etcdserverpb.Lease/LeaseRevoke",
+      "request": "LeaseRevokeRequest",
+      "response": "LeaseRevokeResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 91
+    },
+    {
+      "path": "/etcdserverpb.Lease/LeaseKeepAlive",
+      "request": "LeaseKeepAliveRequest",
+      "response": "LeaseKeepAliveResponse",
+      "client_streaming": true,
+      "server_streaming": true,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 104
+    },
+    {
+      "path": "/etcdserverpb.Lease/LeaseTimeToLive",
+      "request": "LeaseTimeToLiveRequest",
+      "response": "LeaseTimeToLiveResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 112
+    },
+    {
+      "path": "/etcdserverpb.Lease/LeaseLeases",
+      "request": "LeaseLeasesRequest",
+      "response": "LeaseLeasesResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 124
+    },
+    {
+      "path": "/etcdserverpb.Cluster/MemberAdd",
+      "request": "MemberAddRequest",
+      "response": "MemberAddResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 138
+    },
+    {
+      "path": "/etcdserverpb.Cluster/MemberRemove",
+      "request": "MemberRemoveRequest",
+      "response": "MemberRemoveResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 146
+    },
+    {
+      "path": "/etcdserverpb.Cluster/MemberUpdate",
+      "request": "MemberUpdateRequest",
+      "response": "MemberUpdateResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 154
+    },
+    {
+      "path": "/etcdserverpb.Cluster/MemberList",
+      "request": "MemberListRequest",
+      "response": "MemberListResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 162
+    },
+    {
+      "path": "/etcdserverpb.Cluster/MemberPromote",
+      "request": "MemberPromoteRequest",
+      "response": "MemberPromoteResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 170
+    },
+    {
+      "path": "/etcdserverpb.Maintenance/Alarm",
+      "request": "AlarmRequest",
+      "response": "AlarmResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 180
+    },
+    {
+      "path": "/etcdserverpb.Maintenance/Status",
+      "request": "StatusRequest",
+      "response": "StatusResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 188
+    },
+    {
+      "path": "/etcdserverpb.Maintenance/Defragment",
+      "request": "DefragmentRequest",
+      "response": "DefragmentResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 196
+    },
+    {
+      "path": "/etcdserverpb.Maintenance/Hash",
+      "request": "HashRequest",
+      "response": "HashResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 209
+    },
+    {
+      "path": "/etcdserverpb.Maintenance/HashKV",
+      "request": "HashKVRequest",
+      "response": "HashKVResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 218
+    },
+    {
+      "path": "/etcdserverpb.Maintenance/Snapshot",
+      "request": "SnapshotRequest",
+      "response": "SnapshotResponse",
+      "client_streaming": false,
+      "server_streaming": true,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 226
+    },
+    {
+      "path": "/etcdserverpb.Maintenance/MoveLeader",
+      "request": "MoveLeaderRequest",
+      "response": "MoveLeaderResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 234
+    },
+    {
+      "path": "/etcdserverpb.Maintenance/Downgrade",
+      "request": "DowngradeRequest",
+      "response": "DowngradeResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 244
+    },
+    {
+      "path": "/etcdserverpb.Auth/AuthEnable",
+      "request": "AuthEnableRequest",
+      "response": "AuthEnableResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 254
+    },
+    {
+      "path": "/etcdserverpb.Auth/AuthDisable",
+      "request": "AuthDisableRequest",
+      "response": "AuthDisableResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 262
+    },
+    {
+      "path": "/etcdserverpb.Auth/AuthStatus",
+      "request": "AuthStatusRequest",
+      "response": "AuthStatusResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 270
+    },
+    {
+      "path": "/etcdserverpb.Auth/Authenticate",
+      "request": "AuthenticateRequest",
+      "response": "AuthenticateResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 278
+    },
+    {
+      "path": "/etcdserverpb.Auth/UserAdd",
+      "request": "AuthUserAddRequest",
+      "response": "AuthUserAddResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 286
+    },
+    {
+      "path": "/etcdserverpb.Auth/UserGet",
+      "request": "AuthUserGetRequest",
+      "response": "AuthUserGetResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 294
+    },
+    {
+      "path": "/etcdserverpb.Auth/UserList",
+      "request": "AuthUserListRequest",
+      "response": "AuthUserListResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 302
+    },
+    {
+      "path": "/etcdserverpb.Auth/UserDelete",
+      "request": "AuthUserDeleteRequest",
+      "response": "AuthUserDeleteResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 310
+    },
+    {
+      "path": "/etcdserverpb.Auth/UserChangePassword",
+      "request": "AuthUserChangePasswordRequest",
+      "response": "AuthUserChangePasswordResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 318
+    },
+    {
+      "path": "/etcdserverpb.Auth/UserGrantRole",
+      "request": "AuthUserGrantRoleRequest",
+      "response": "AuthUserGrantRoleResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 326
+    },
+    {
+      "path": "/etcdserverpb.Auth/UserRevokeRole",
+      "request": "AuthUserRevokeRoleRequest",
+      "response": "AuthUserRevokeRoleResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 334
+    },
+    {
+      "path": "/etcdserverpb.Auth/RoleAdd",
+      "request": "AuthRoleAddRequest",
+      "response": "AuthRoleAddResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 342
+    },
+    {
+      "path": "/etcdserverpb.Auth/RoleGet",
+      "request": "AuthRoleGetRequest",
+      "response": "AuthRoleGetResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 350
+    },
+    {
+      "path": "/etcdserverpb.Auth/RoleList",
+      "request": "AuthRoleListRequest",
+      "response": "AuthRoleListResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 358
+    },
+    {
+      "path": "/etcdserverpb.Auth/RoleDelete",
+      "request": "AuthRoleDeleteRequest",
+      "response": "AuthRoleDeleteResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 366
+    },
+    {
+      "path": "/etcdserverpb.Auth/RoleGrantPermission",
+      "request": "AuthRoleGrantPermissionRequest",
+      "response": "AuthRoleGrantPermissionResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 374
+    },
+    {
+      "path": "/etcdserverpb.Auth/RoleRevokePermission",
+      "request": "AuthRoleRevokePermissionRequest",
+      "response": "AuthRoleRevokePermissionResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "api/etcdserverpb/rpc.proto",
+      "line": 382
+    },
+    {
+      "path": "/v3lockpb.Lock/Lock",
+      "request": "LockRequest",
+      "response": "LockResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "server/etcdserver/api/v3lock/v3lockpb/v3lock.proto",
+      "line": 21
+    },
+    {
+      "path": "/v3lockpb.Lock/Unlock",
+      "request": "UnlockRequest",
+      "response": "UnlockResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "server/etcdserver/api/v3lock/v3lockpb/v3lock.proto",
+      "line": 31
+    },
+    {
+      "path": "/v3electionpb.Election/Campaign",
+      "request": "CampaignRequest",
+      "response": "CampaignResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "line": 20
+    },
+    {
+      "path": "/v3electionpb.Election/Proclaim",
+      "request": "ProclaimRequest",
+      "response": "ProclaimResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "line": 27
+    },
+    {
+      "path": "/v3electionpb.Election/Leader",
+      "request": "LeaderRequest",
+      "response": "LeaderResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "line": 34
+    },
+    {
+      "path": "/v3electionpb.Election/Observe",
+      "request": "LeaderRequest",
+      "response": "LeaderResponse",
+      "client_streaming": false,
+      "server_streaming": true,
+      "source": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "line": 42
+    },
+    {
+      "path": "/v3electionpb.Election/Resign",
+      "request": "ResignRequest",
+      "response": "ResignResponse",
+      "client_streaming": false,
+      "server_streaming": false,
+      "source": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "line": 50
+    }
+  ],
+  "validation_cases": {
+    "defined": 33,
+    "executed": 0
+  }
+}
