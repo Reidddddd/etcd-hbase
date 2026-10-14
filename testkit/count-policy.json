@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "protocol": "etcd-v3.5.23",
+  "rules": [
+    {
+      "id": "exact_get",
+      "request": "Range exact key, count_only=false, limit=0",
+      "count": "len(Kvs), exactly 0 or 1",
+      "more": "false",
+      "case_ids": [
+        "C01"
+      ]
+    },
+    {
+      "id": "unlimited_range",
+      "request": "Range with no positive limit and count_only=false",
+      "count": "len(all visible Kvs)",
+      "more": "false",
+      "case_ids": [
+        "C02"
+      ]
+    },
+    {
+      "id": "limited_range",
+      "request": "Range with limit>0 and count_only=false",
+      "count": "len(Kvs in this page)",
+      "more": "true iff a next visible matching KV exists",
+      "case_ids": [
+        "C03"
+      ]
+    },
+    {
+      "id": "exact_count_only",
+      "request": "Range exact key, count_only=true",
+      "count": "real existence 0 or 1; Kvs is empty",
+      "more": "false",
+      "case_ids": [
+        "C04"
+      ]
+    },
+    {
+      "id": "prefix_count_only_limit_one",
+      "request": "Range prefix/range, count_only=true, limit=1",
+      "count": "real existence 0 or 1; Kvs is empty",
+      "more": "false",
+      "case_ids": [
+        "C05"
+      ]
+    },
+    {
+      "id": "other_range_count_only",
+      "request": "Range non-exact count_only=true except the limit=1 accepted form",
+      "count": "not produced",
+      "more": "not produced",
+      "error": "UNIMPLEMENTED",
+      "case_ids": [
+        "C05"
+      ]
+    }
+  ],
+  "accepted_difference": {
+    "method": "etcdserverpb.KV/Range",
+    "case_id": "C05",
+    "field": "Count",
+    "scope": "Range CountOnly with Limit=1 reports existence 0/1 instead of total matching keys",
+    "preserved_fields": [
+      "Kvs",
+      "More",
+      "Header",
+      "revision",
+      "errors"
+    ]
+  }
+}
