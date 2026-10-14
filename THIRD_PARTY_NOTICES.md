@@ -12,9 +12,15 @@
 | Protocol Buffers Java / protoc | 4.36.2 | [BSD 3-Clause](https://github.com/protocolbuffers/protobuf/blob/main/LICENSE) |
 | etcd API proto sources | v3.5.23 | [Apache License 2.0](https://github.com/etcd-io/etcd/blob/v3.5.23/LICENSE) |
 | gogo proto options | v1.3.2 | [BSD 3-Clause](https://github.com/gogo/protobuf/blob/v1.3.2/LICENSE) |
+| Go etcd API / client / server modules | v3.5.23 | [Apache License 2.0](https://github.com/etcd-io/etcd/blob/v3.5.23/LICENSE) |
+| Go etcd compatibility client | v2.305.23 | [Apache License 2.0](https://github.com/etcd-io/etcd/blob/v3.5.23/LICENSE) |
+| gRPC-Go | 1.79.3 | [Apache License 2.0](https://github.com/grpc/grpc-go/blob/v1.79.3/LICENSE); [NOTICE](https://github.com/grpc/grpc-go/blob/v1.79.3/NOTICE.txt) |
+| Go Protocol Buffers / compatibility runtime | 1.36.10 / 1.5.4 | [BSD 3-Clause](https://github.com/protocolbuffers/protobuf-go/blob/v1.36.10/LICENSE) / [BSD 3-Clause](https://github.com/golang/protobuf/blob/v1.5.4/LICENSE) |
+| bbolt | 1.3.12 | [MIT License](https://github.com/etcd-io/bbolt/blob/v1.3.12/LICENSE) |
+| Kubernetes sigs YAML | 1.2.0 | [MIT License](https://github.com/kubernetes-sigs/yaml/blob/v1.2.0/LICENSE) |
 | Google API proto imports | pinned commit in protocol source lock | [Apache License 2.0](https://github.com/googleapis/googleapis/blob/34bb7a118468a6ec56deb31842525971e41be2ac/LICENSE) |
 | Guava | 33.7.2-jre | [Apache License 2.0](https://github.com/google/guava/blob/master/COPYING) |
-| SLF4J | 2.0.20 | [MIT License](https://www.slf4j.org/license.html) |
+| SLF4J API / reload4j binding | 2.0.20 | [MIT License](https://www.slf4j.org/license.html) |
 | Jackson / SnakeYAML | 2.22.3 / 2.7 | [Apache License 2.0](https://github.com/FasterXML/jackson/blob/2.22/LICENSE) / [Apache License 2.0](https://bitbucket.org/snakeyaml/snakeyaml/src/master/LICENSE.txt) |
 | JUnit / Mockito / AssertJ | 6.1.3 / 5.24.0 / 3.27.7 | [EPL 2.0](https://github.com/junit-team/junit5/blob/main/LICENSE.md) / [MIT](https://github.com/mockito/mockito/blob/main/LICENSE) / [Apache 2.0](https://github.com/assertj/assertj/blob/main/LICENSE) |
 

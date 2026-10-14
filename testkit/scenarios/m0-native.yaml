@@ -1,0 +1,30 @@
+schema_version: 1
+id: m0-native-v1
+protocol: etcd-v3.5.23
+steps:
+  - case_id: C01
+    id: binary-put-get
+  - case_id: C03
+    id: prefix-limit-more
+  - case_id: C05
+    id: prefix-count-only-limit-one
+  - case_id: C11
+    id: txn-compare-success-branch
+  - case_id: C12
+    id: txn-compare-failure-branch
+  - case_id: C09
+    id: delete-prev-kv
+  - case_id: C15
+    id: lease-grant
+  - case_id: C16
+    id: put-with-lease
+  - case_id: C17
+    id: lease-keepalive-stream
+  - case_id: C18
+    id: lease-revoke-and-key-removal
+  - case_id: C19
+    id: list-revision-then-watch-r-plus-one
+  - case_id: C14
+    id: compact
+  - case_id: C06
+    id: old-revision-after-compact
