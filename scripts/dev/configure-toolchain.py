@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -53,8 +54,14 @@ def main() -> None:
     if not re.search(r"Temurin|Adoptium", output, re.IGNORECASE):
         fail("selected JDK must be an Eclipse Temurin/Adoptium build")
     runtime_version = re.search(r"java\.runtime\.version\s*=\s*(\S+)", output)
-    if not runtime_version or not runtime_version.group(1).startswith("21.0.12.1+1"):
-        fail("selected JDK must match the locked Temurin 21.0.12.1+1 release")
+    try:
+        lock = json.loads((ROOT / "build" / "dependency-lock.json").read_text(encoding="utf-8"))
+        expected_runtime = lock["jdk"]["release"]
+    except (KeyError, OSError, TypeError, json.JSONDecodeError):
+        fail("could not read the locked JDK release from build/dependency-lock.json")
+    actual_runtime = runtime_version.group(1) if runtime_version else None
+    if actual_runtime not in {expected_runtime, f"{expected_runtime}-LTS"}:
+        fail(f"selected JDK runtime must match the locked release {expected_runtime}")
 
     if OUTPUT.is_symlink():
         fail(f"refusing to write through symlink: {OUTPUT}")

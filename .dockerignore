@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.artifacts
+docs
+**/target
+.mvn/toolchains.xml
+.mvn/local-toolchains.xml
+**/toolchains.local.xml
+config/local
+**/.env
+**/.env.*
+**/*credentials.local.*
+**/*secrets.local.*
+**/*.keytab

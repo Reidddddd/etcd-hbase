@@ -1,0 +1,53 @@
+FROM eclipse-temurin:21.0.12.1_1-jdk-noble@sha256:b468c3fc688b14450571494f588bd939378e7fd542ed5a73f8efc13f17872a87 AS build
+
+WORKDIR /workspace
+COPY . .
+
+RUN mkdir -p /opt/m0/dist/lib /opt/m2 /opt/m0/toolchains && \
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<toolchains>' \
+      '  <toolchain>' \
+      '    <type>jdk</type>' \
+      '    <provides><version>21</version><vendor>temurin</vendor></provides>' \
+      '    <configuration><jdkHome>/opt/java/openjdk</jdkHome></configuration>' \
+      '  </toolchain>' \
+      '</toolchains>' > /opt/m0/toolchains/toolchains.xml && \
+    ./mvnw --batch-mode --no-transfer-progress \
+      --settings build/maven-settings-public.xml \
+      --toolchains /opt/m0/toolchains/toolchains.xml \
+      -Dmaven.repo.local=/opt/m2 \
+      -DskipTests -DskipITs -pl server -am clean install && \
+    ./mvnw --batch-mode --no-transfer-progress \
+      --settings build/maven-settings-public.xml \
+      --toolchains /opt/m0/toolchains/toolchains.xml \
+      -Dmaven.repo.local=/opt/m2 \
+      -f server/pom.xml \
+      -DincludeScope=runtime \
+      -DoutputDirectory=/opt/m0/dist/lib \
+      org.apache.maven.plugins:maven-dependency-plugin:3.11.0:copy-dependencies && \
+    for module in protocol spi core hbase grpc server; do \
+      jar="$(find "$module/target" -maxdepth 1 -type f -name "$module-*.jar" \
+        ! -name '*-sources.jar' ! -name '*-javadoc.jar' -print -quit)"; \
+      test -n "$jar"; \
+      cp "$jar" /opt/m0/dist/lib/; \
+    done && \
+    sed \
+      -e '0,/^    port: 0$/s//    port: 2379/' \
+      config/examples/m0/server-skeleton.yaml > /opt/m0/dist/server.yaml
+
+FROM eclipse-temurin:21.0.12.1_1-jre-noble@sha256:000fd431958bc81a24abe1e8e5f0f0fd3ae365a594bd50aadb20696805f9408c
+
+RUN groupadd --system --gid 10001 etcd-hbase && \
+    useradd --system --uid 10001 --gid 10001 --home-dir /nonexistent \
+      --shell /usr/sbin/nologin etcd-hbase && \
+    install -d --owner=10001 --group=10001 /opt/etcd-hbase/lib /etc/etcd-hbase
+
+COPY --from=build --chown=10001:10001 /opt/m0/dist/lib/ /opt/etcd-hbase/lib/
+COPY --from=build --chown=10001:10001 /opt/m0/dist/server.yaml /etc/etcd-hbase/server.yaml
+
+WORKDIR /opt/etcd-hbase
+USER 10001:10001
+EXPOSE 2379
+ENTRYPOINT ["java", "-cp", "/opt/etcd-hbase/lib/*", "io.etcdhbase.server.Bootstrap"]
+CMD ["--config", "/etc/etcd-hbase/server.yaml"]

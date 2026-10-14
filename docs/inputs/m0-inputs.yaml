@@ -1,0 +1,116 @@
+schema_version: 1
+project: etcd-hbase
+phase: M0
+updated: 2026-10-14
+credential_values_included: false
+
+inputs:
+  - id: B01
+    state: missing-input
+    required_fact: 目标盐算法、输入字节编码、桶数、预分区边界和校验样例
+    value: null
+    source: none
+    evidence_files:
+      - docs/storage/m0-salt-profile.md
+      - docs/storage/m0-table-candidates.md
+      - docs/acceptance-targets.md
+    responsible_role: HBase 存储设计维护者
+    affected_steps: [WP07.target, WP17.target, J05, J10]
+    resolution: 提供已批准的格式与边界样例；与公开候选分别版本化，再运行目标向量和初始化计划检查。
+    blocks_m0_exit: true
+
+  - id: B02
+    state: missing-input
+    required_fact: 目标 HBase、client、Hadoop 版本及 JDK 21 兼容组合和访问地址
+    value: null
+    source: none
+    evidence_files:
+      - docs/build/m0-toolchain.md
+      - docs/architecture/m0-auth-hbase.md
+      - docs/acceptance-targets.md
+    responsible_role: HBase 平台维护者
+    affected_steps: [WP02.target, WP15.target, WP16.target, J01, J04]
+    resolution: 提供目标发行版、client/Hadoop 依赖、JDK 要求和专用测试环境连接方式；据此锁定并验证目标组合。
+    public_candidate_status: 当前锁定的 HBase 2.6.6-hadoop3 public-local 探针已完成真实 Get/Put/CAS/Scan，但不代表 Apache 官方 Java 21 支持或目标兼容。官方矩阵的 2.6 线门槛为 2.6.8+；2026-10-13 官方下载页当前列出的 2.6 GA 为 2.6.7。待 B02 给出目标版本后再选择 target 依赖。
+    public_sources:
+      - https://hbase.apache.org/docs/configuration/basic-prerequisites/
+      - https://hbase.apache.org/downloads/
+    blocks_m0_exit: true
+
+  - id: B03
+    state: missing-input
+    required_fact: Authenticate 凭据如何建立目标 HBase 授权身份、专用测试账号权限、跨副本/后台身份和轮换约束
+    value: null
+    source: none
+    evidence_files:
+      - docs/architecture/m0-auth-hbase.md
+      - docs/acceptance-targets.md
+    responsible_role: 身份平台与 HBase 安全维护者
+    affected_steps: [WP15.target, WP16.target, J04, J50, J51]
+    resolution: 提供认证流程和授权范围、专用账号权限及安全凭据引用；通过受控渠道交接凭据，不将秘密写入仓库、报告或日志。
+    blocks_m0_exit: true
+
+  - id: B04
+    state: missing-input
+    required_fact: 应用提交、读屏障和续租排队的正式负载验收 profile
+    value: null
+    source: none
+    evidence_files:
+      - docs/acceptance-targets.md
+      - DEVELOPMENT_PLAN.md
+    responsible_role: 服务与容量评估负责人
+    affected_steps: [WP05.follow-up, J29, M2]
+    resolution: 按后续阶段提供目标规模、延迟和判定口径；M0 保留分类初稿，不据此宣称性能达标。
+    blocks_m0_exit: false
+
+  - id: B05
+    state: missing-input
+    required_fact: KV/value/版本/请求及新集群规模分布与容量预算
+    value: null
+    source: none
+    evidence_files:
+      - docs/acceptance-targets.md
+      - DEVELOPMENT_PLAN.md
+    responsible_role: Milvus 业务与容量评估负责人
+    affected_steps: [WP05.follow-up, J17, J70, J71, J76]
+    resolution: 按后续阶段提供经确认的数据分布、规模和预算；M0 保留目标类别与公开 smoke profile。
+    blocks_m0_exit: false
+
+  - id: B06
+    state: missing-input
+    required_fact: 目标环境 TLS、凭据安全交接、部署监控和本轮测试访问规范
+    value: null
+    source: none
+    evidence_files:
+      - docs/architecture/m0-auth-hbase.md
+      - docs/acceptance-targets.md
+    responsible_role: 安全与平台运维维护者
+    affected_steps: [WP15.target, WP16.target, J04, J50, J56]
+    resolution: 确认专用测试环境访问方式、TLS/证书引用、凭据交接和可执行操作范围后，再安排目标探针。
+    blocks_m0_exit: true
+
+  - id: I07
+    state: missing-input
+    required_fact: 项目许可证决定及源码、生成代码、proto、依赖和发行包的审查结论
+    value: null
+    source: none
+    evidence_files:
+      - docs/build/open-source-policy.md
+      - THIRD_PARTY_NOTICES.md
+    responsible_role: 项目维护者
+    affected_steps: [WP04.license, J09]
+    resolution: 维护者确认许可证后，审阅来源和通知清单并补齐正式 LICENSE/发行 NOTICE；Apache-2.0 目前只是候选。
+    blocks_m0_exit: true
+
+  - id: I08
+    state: missing-input
+    required_fact: 公开 artifact 坐标/命名、发布位置及维护者授权规则
+    value: null
+    source: none
+    evidence_files:
+      - docs/build/open-source-policy.md
+      - pom.xml
+    responsible_role: 项目维护者
+    affected_steps: [WP04.artifact, J09]
+    resolution: 维护者确认公开坐标和目的地后更新发布规则；当前仅使用本地 SNAPSHOT 坐标，不发布制品。
+    blocks_m0_exit: true

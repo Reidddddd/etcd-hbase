@@ -8,6 +8,14 @@
     <relativePath>../pom.xml</relativePath>
   </parent>
   <artifactId>admin</artifactId>
+  <build>
+    <testResources>
+      <testResource>
+        <directory>${project.basedir}/../config/examples/m0</directory>
+        <targetPath>m0-examples</targetPath>
+      </testResource>
+    </testResources>
+  </build>
   <dependencies>
     <dependency>
       <groupId>io.etcdhbase</groupId>
@@ -19,5 +27,51 @@
       <artifactId>spi</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <dependency>
+      <groupId>io.etcdhbase</groupId>
+      <artifactId>server</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hbase</groupId>
+      <artifactId>hbase-testing-util</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
+  <profiles>
+    <profile>
+      <id>m0-hbase-local</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <failIfNoTests>true</failIfNoTests>
+              <includes>
+                <include>**/InitializeTablesIT.java</include>
+              </includes>
+              <additionalClasspathElements>
+                <additionalClasspathElement>${maven.multiModuleProjectDirectory}/hbase/target/test-classes</additionalClasspathElement>
+              </additionalClasspathElements>
+            </configuration>
+            <executions>
+              <execution>
+                <id>m0-admin-local-initialize</id>
+                <goals>
+                  <goal>integration-test</goal>
+                  <goal>verify</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

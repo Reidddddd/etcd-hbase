@@ -1,8 +1,10 @@
 # etcd-hbase 开发计划与进度记录
 
-> 文档版本：0.6（补充执行顺序；J00 进度更新） · 更新日期：2026-10-12 · 开发基线：**JDK 21**
+> 文档版本：0.9（M0 review 与公开验证进度更新） · 更新日期：2026-10-15 · 开发基线：**JDK 21**
 >
-> 当前状态：开发计划及 M0 设计已批准，进入 M0；J00 调用基线、能力矩阵与分类目标初稿已交付，静态审计验证通过，待评审。尚无 Java 运行实现或端到端验证。本文中的类、表结构和算法为拟定方案；勾选任务必须附实现、验证和评审证据。
+> 当前状态：开发计划及 M0 设计已批准；J00 调用基线、能力矩阵与分类目标初稿已于 2026-10-12 经评审并合并。十层交付对应 PR #3 与 PR #5–#13；PR #4 已按要求关闭。PR #3、#5、#6 已合并，PR #7–#13 仍开放，均以 upstream `main` `4b2864ac3e75c7940da76cc6628286fe9566e245` 为 base，head 位于 `Huginn-kio/etcd-hbase` fork。
+> 当前实现与验证：PR #7–#13 当前 heads 分别为 `5ab5a14`、`c3745b9`、`1caae6c`、`4c56e90`、`9178f91`、`3675ba5`、`51b6271`。PR #13 exact-head public run `20261014T203249Z-7695` 在 `51b6271bf261713de0637ecb564726de388f769a` 通过 132 tests / 26 suites，0 failures/errors/skips；9 个 public 步骤通过，runtime-image 因本机缺 Docker CLI 有原因地跳过，target HBase 因缺输入未运行。该 head 的 fork Actions run `38632902232` 为 5/5 jobs success。执行方案和逐步进度报告仅保留本地。
+> 待完成：PR #7–#13 仍待正式 review decision；PR #7 有维护者逐条意见及作者修复回复，尚待复审。指定 reviewer `reidchan@apache.org` 在上游只有 read 权限，GitHub 仍拒绝正式指派（HTTP 422），未替换人选。B01/B02/B03/B06、I07/I08 仍待用户或维护者提供；target HBase 尚未验收，M0 阶段保持未验收。本文中的类、表结构和算法为拟定方案；勾选任务必须附实现、验证和评审证据。
 
 ## 1. 评审摘要
 
@@ -35,7 +37,7 @@
 
 补充设计前提：目标 HBase 平台具备充足容量与成熟运维能力。以此开展实现，容量数据用于确定兼容层调度、资源消耗和实际收益；不预设 HBase 总体容量不足。应用副本以无本地持久化、可在 K8s 替换和扩展为部署目标，具体验收见第 3.5 节。
 
-开发状态：**已完成 0 / 78，未完成 78 / 78；已验收阶段 0 / 9。** 每次更新任务状态后，同步第 2 节汇总。
+开发状态：**已完成 2 / 78，未完成 76 / 78；已验收阶段 0 / 9。** 每次更新任务状态后，同步第 2 节汇总。
 
 ### 1.3 评审需要形成的结论
 
@@ -70,7 +72,7 @@
 
 | 阶段 | 目标 | 总任务 | 已完成 | 未完成 | 阶段状态 | 负责人 | 计划/实际完成日期 | 验收记录 |
 |---|---|---:|---:|---:|---|---|---|---|
-| M0 | 工程、运行环境与协议基线 | 10 | 0 | 10 | 进行中 | Codex（J00） | — / — | J00 待评审，阶段未验收 |
+| M0 | 工程、运行环境与协议基线 | 10 | 2 | 8 | 进行中 | Codex（J00） | — / — | J00、J02 已完成；目标输入、CI 与其余评审未齐，阶段未验收 |
 | M1 | HBase 存储、盐桶扫描与预算 | 10 | 0 | 10 | 未开始 | 待分配 | — / — | — |
 | M2 | 提交、MVCC、恢复与热点可行性 | 10 | 0 | 10 | 未开始 | 待分配 | — / — | — |
 | M3 | KV / Range / Txn | 7 | 0 | 7 | 未开始 | 待分配 | — / — | — |
@@ -79,17 +81,18 @@
 | M6 | Milvus 新集群接入 | 8 | 0 | 8 | 未开始 | 待分配 | — / — | — |
 | M7 | HBase 压力、故障与长期运行 | 8 | 0 | 8 | 未开始 | 待分配 | — / — | — |
 | M8 | 新集群灰度与交付 | 7 | 0 | 7 | 未开始 | 待分配 | — / — | — |
-| **合计** | | **78** | **0** | **78** | **进行中** | | | |
+| **合计** | | **78** | **2** | **76** | **进行中** | | | |
 
 ### 2.3 已完成 / 未完成记录
 
-**已完成任务：暂无。** 完成后在下表追加简要记录，原任务及证据仍保留在所属阶段。
+**已完成任务：2 项。** 原任务及证据仍保留在所属阶段。
 
 | 完成日期 | 任务 ID | 交付内容 | PR / commit | 验证报告 | 评审人 |
 |---|---|---|---|---|---|
-| — | — | 暂无已完成任务 | — | — | — |
+| 2026-10-12 | J00 | 固化 Milvus v3.0.1 调用基线、API 矩阵与分类验收目标初稿；仅交付静态基线 | PR [#3](https://github.com/Reidddddd/etcd-hbase/pull/3)，合并 commit `e73d02e1279eb31c0820bf2033a0fc34d9893b62` | [J00 静态审计](docs/reports/j00-baseline-audit.md) | Huginn-kio，APPROVED（限静态基线范围） |
+| 2026-10-14 | J02 | 固定 etcd v3.5.23 proto 来源、Java 生成配置、descriptor 与 wire 守卫 | PR [#6](https://github.com/Reidddddd/etcd-hbase/pull/6)，reviewed head `24610b89`，合并 commit `4b2864ac3e75c7940da76cc6628286fe9566e245` | PR #6 review 记录；Java 21 protocol clean verify 报告 13 项测试通过 | Reidddddd，APPROVED（限协议来源、生成和 wire baseline） |
 
-**未完成任务：第 8 节全部 78 项。** 每个任务的状态、负责人和证据直接写在任务下面；不要另建一份重复任务清单。
+**未完成任务：第 8 节其余 76 项。** 每个任务的状态、负责人和证据直接写在任务下面；不要另建一份重复任务清单。
 
 建议每个任务使用独立 PR 或可审查的提交，PR 标明任务 ID。完成一个任务时同时更新：任务勾选、跟踪字段、阶段计数、完成记录。阶段验收另留报告，不能仅根据完成数判断阶段通过。
 
@@ -477,46 +480,46 @@ J02/J03/J07 等基础交付按所需工程输入推进，不能等待 J00 的全
 
 ## 8. 分阶段开发任务
 
-每项包含实现与完成标准；跟踪字段用于日常更新。验证用例是未来开发交付要求，本次仅编写计划，没有执行实现测试。
+每项包含实现与完成标准；跟踪字段用于日常更新。本计划定义验证用例，M0 十层交付对应 PR #3 与 PR #5–#13；PR #4 已关闭，PR #3、#5、#6 已合并，PR #7–#13 仍开放。任务状态分别依据当前代码、本地 public run、fork 当前 head 的 CI、目标环境输入及真实评审记录；本地 smoke 不替代 target HBase 或 M0 阶段验收。PR #7–#13 均以 upstream `main` `4b2864ac3e75c7940da76cc6628286fe9566e245` 为 base。PR #13 当前代码 head `51b6271bf261713de0637ecb564726de388f769a` 的完整 public run `20261014T203249Z-7695` 通过 132 tests / 26 suites，0 failures/errors/skips，9 个步骤通过；runtime-image 仅因本机缺 Docker CLI 跳过，target HBase 因 B02/B03/B06 缺失未运行。详细 evidence index 保留在本地 `.artifacts/m0/`。
 
 ### M0：工程、运行环境与协议基线
 
-**状态：进行中｜已完成 0 / 10｜未完成 10｜负责人：Codex（J00）｜计划/实际日期：— / —**
+**状态：进行中｜已完成 2 / 10｜未完成 8｜负责人：Codex（J00）｜计划/实际日期：— / —**
 
 **进入条件：** 以公开技术范围和集成调用分析开始；B01–B06 按具体任务关闭，默认实现使用公开可复现环境。
 
 **阶段交付：** docs/api-matrix.md、docs/milvus-etcd-usage.md、依赖锁定/CI、环境与容量输入报告。
 
-- [ ] **J00｜固化当前 Milvus 请求选项、API 范围与 Count 差异**
+- [x] **J00｜固化当前 Milvus 请求选项、API 范围与 Count 差异**
   - 依赖：已有调用分析与初步技术/协议基线；负载目标按 J00.3 单独完善。
   - 完成标准：交付 docs/api-matrix.md、docs/milvus-etcd-usage.md 与分类目标报告；固定可公开引用的版本、具体区间、响应/错误消费者、全部首版能力和 Count 差异，不引入迁移工具。
   - 子任务 / 交付物（各项记录状态、负责人、日期、PR 与证据）：
-    - [ ] **J00.1** 调用/版本审计：固定 Milvus tag/commit、Go client、etcd 协议与部署方式，记录扫描/更新范围和实际消费路径。
-      - 状态：待评审；证据：[调用基线](docs/milvus-etcd-usage.md)、[固定源码摘要与 RPC 清单](docs/baselines/j00-source-baseline.json)。
-    - [ ] **J00.2** 能力矩阵：覆盖首版全部功能、参数组合、响应字段、错误行为、Count 消费者和原已明确不支持项。
-      - 状态：待评审；证据：[API 矩阵与 33 项用例定义](docs/api-matrix.md)，行为用例尚未执行。
-    - [ ] **J00.3** 负载与目标：按第 6.2 节分类建初稿，按任务需要完善；不阻塞 J01/J09 和基础协议工程。
-      - 状态：待评审；证据：[分类目标及 8 项负载 profile 初稿](docs/acceptance-targets.md)，实际环境/目标仍待 B01–B06 输入。
+    - [x] **J00.1** 调用/版本审计：固定 Milvus tag/commit、Go client、etcd 协议与部署方式，记录扫描/更新范围和实际消费路径。
+      - 状态：已完成；评审范围为静态基线；证据：[调用基线](docs/milvus-etcd-usage.md)、[固定源码摘要与 RPC 清单](docs/baselines/j00-source-baseline.json)。
+    - [x] **J00.2** 能力矩阵：覆盖首版全部功能、参数组合、响应字段、错误行为、Count 消费者和原已明确不支持项。
+      - 状态：已完成；证据：[API 矩阵与 33 项用例定义](docs/api-matrix.md)。WP20 已在两个独立的原生 etcd 实例运行清单中的 13 个步骤；这只验证原生 testkit 子集，不代表 Java 服务或完整 C01–C33 行为验收通过。
+    - [x] **J00.3** 负载与目标：按第 6.2 节分类建初稿，按任务需要完善；不阻塞 J01/J09 和基础协议工程。
+      - 状态：已完成初稿；目标环境/生产输入仍待 B01–B06 补齐；证据：[分类目标及 8 项负载 profile 初稿](docs/acceptance-targets.md)。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=待评审；负责人=Codex；分支=codex/j00-baseline；完成日期=—；PR/commit=—；验证报告=[J00 静态审计](docs/reports/j00-baseline-audit.md)；评审人/结论=—。
+  - 跟踪：状态=已完成；负责人=Codex；分支=codex/j00-baseline；完成日期=2026-10-12；PR/commit=[PR #3](https://github.com/Reidddddd/etcd-hbase/pull/3)、`e73d02e1279eb31c0820bf2033a0fc34d9893b62`；验证报告=[J00 静态审计](docs/reports/j00-baseline-audit.md)；评审人/结论=Huginn-kio APPROVED，限静态调用基线/API/目标初稿；不代表运行验证或 M0 验收。
 
 - [ ] **J01｜Maven 模块、Wrapper、Java 21 toolchain、release=21、CI 和依赖锁定**
   - 依赖：已确认的 JDK 21、模块及初步协议基线；不等待 J00 全部交付。
   - 完成标准：开发/CI/镜像 Java 基线统一 21，可重复构建；protobuf/Netty/Guava/Hadoop 冲突及解决方式有记录。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=进行中（公开工程和 CI 已验证；目标支持组合待 B02）；负责人=Codex；分支=codex/m0-02-toolchain；PR/commit=[PR #5](https://github.com/Reidddddd/etcd-hbase/pull/5)、merge commit `fe55cedfd2682d91e23245dd5929157b5317f073`；`test_maven_lock.py` 14/14、Maven 参数用例 8/8、metadata 9 POM/12 插件 pin 均通过；根 profile 和模块 profile 对锁定版本的覆盖被拒绝，PR #5 已合并。public run `20261014T110040Z-14139` 在 PR #13 代码 head `2824433` 通过 126 tests / 26 suites，fork Actions run `38554552912` 在该 head 上 5/5 jobs 成功；本机 runtime-image 因缺少 Docker CLI 未执行。公开候选为 HBase `2.6.6-hadoop3`，public-local 探针已运行；Apache 矩阵要求 HBase 2.6.8+ 才标记 Java 21 支持，且目标 B02 未提供，因此不宣称官方 Java 21 或 target 兼容。
 
-- [ ] **J02｜vendoring etcd proto 和 Java 生成配置**
+- [x] **J02｜vendoring etcd proto 和 Java 生成配置**
   - 依赖：J01 的生成模块构建基础可用；其余依赖锁定按对应接入任务验收。
   - 完成标准：服务路径及字段编号与 v3.5.23 对照。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=已完成；负责人=Codex；分支=codex/m0-03-protocol；PR/commit=[PR #6](https://github.com/Reidddddd/etcd-hbase/pull/6)、reviewed head `24610b89`、merge commit `4b2864ac`；验证报告=public run `20261014T043255Z-47871` 的 protocol/descriptor/wire 步骤通过；两项 P2 和 nested Txn round-trip 建议均已修复，reviewer 于 2026-10-14 APPROVED 并合并。此结论限固定协议来源、生成、descriptor 和 wire 守卫，不代表完整 Java 服务等价。
 
 - [ ] **J03｜KV/Watch/Lease/Auth 等 gRPC 骨架与 Header/Error 工厂**
   - 依赖：J02。
   - 完成标准：Go client 能完成最小请求/流和错误识别。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=待评审；负责人=Codex；分支=codex/m0-08-grpc-protocol（PR #11 head `9178f911`）、codex/m0-09-grpc-skeleton（PR #12 head `3675ba57`）；PR #13 当前累计验证 run `20261014T203249Z-7695` 在 head `51b6271` 通过 Go/Java wire 10 条 trace、骨架与错误映射测试；PR #12 exact-head fork Actions `38632845058` 5/5 jobs 成功；正式评审待进行。
 
 - [ ] **J04｜实际后端身份接入与基础 HBase 操作**
   - 依赖：J01 的实际接入构建基础；B02/B03 的身份/访问输入，子项按第 7.3 节推进。
@@ -525,7 +528,7 @@ J02/J03/J07 等基础交付按所需工程输入推进，不能等待 J00 的全
     - [ ] **J04.1** 确认实际认证机制与 BackendIdentityProvider/HBase 连接适配边界，记录跨副本与后台身份所需输入。
     - [ ] **J04.2** 完成基础连接及 Get/Put/CAS/Scan，记录身份隔离、认证失败、超时和关闭行为。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=阻塞（target）；负责人=Codex；分支=codex/m0-06-request-hbase-identity、codex/m0-07-hbase-init；PR #9 head `1caae6c4`、PR #10 head `4c56e900`；异步身份契约、连接隔离/关闭和 public-local HBase Get/Put/CAS/Scan 已实现验证；PR #13 exact-head public run `20261014T203249Z-7695` 包含探针与初始化 IT。目标版本/身份/TLS 输入 B02/B03/B06 缺失，真实目标身份操作及 target 负例未执行。
 
 - [ ] **J05｜盐 profile、候选表配置与初始化 CLI 原型**
   - 依赖：B01 的编码输入；候选表配置不等待完整 B05 负载目标。
@@ -535,7 +538,7 @@ J02/J03/J07 等基础交付按所需工程输入推进，不能等待 J00 的全
     - [ ] **J05.2** 候选表配置：列族、版本/TTL/删除行为、schema 和表组配置；支持两种历史存储原型。
     - [ ] **J05.3** 初始化 CLI 原型：空表组创建、配置校验和重复操作保护；正式启动/恢复归 J55。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=阻塞（目标盐）；负责人=Codex；分支=codex/m0-04-spi-config（PR #7 head `5ab5a14b`）、codex/m0-07-hbase-init（PR #10 head `4c56e900`）；公开盐向量、两种表布局和 CLI 已验证；两种 `init plan` 命令均输出预期 fingerprint 且未连接 HBase。目标盐规则 B01 缺失，目标初始化未运行。
 
 - [ ] **J06｜配置 schema、日志、指标、deadline/取消上下文**
   - 依赖：J01。
@@ -545,25 +548,25 @@ J02/J03/J07 等基础交付按所需工程输入推进，不能等待 J00 的全
     - [ ] **J06.2** 基础日志/指标：请求、排队、提交、流和资源记录，凭据不进入日志或标签。
     - [ ] **J06.3** 请求上下文：deadline、取消传播与释放；已发布提交继续由服务恢复上下文持有。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=待评审；负责人=Codex；PR #7 head `5ab5a14b`、PR #9 head `1caae6c4`、PR #11 head `9178f911`；配置、取消/资源清理、trace ID 和有限类别请求完成指标均有 Java 21 测试；PR #13 exact-head public run `20261014T203249Z-7695` 通过，外部评审待进行。
 
 - [ ] **J07｜原生 etcd 对照 testkit、Go 请求驱动与历史记录格式**
   - 依赖：J02。
   - 完成标准：固定 etcd v3.5.23、请求和结果格式；只允许已接受的 Count 差异，Lease ID 身份映射不能掩盖事件或版本错误。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=待评审；负责人=Codex；PR #8 head `c3745b93`、PR #12 head `3675ba57`；Go 驱动、原生 etcd 13 步 manifest 子集及 Go/Java unary/stream/error 互通已在 PR #13 exact-head public run `20261014T203249Z-7695` 验证。重复 JSON key、symlink 路径逃逸、未锁定 Go 直接依赖和 trace 总量/记录数均有回归保护；完整 C01–C33 和 Java 业务等价未覆盖；外部评审仍待进行。
 
 - [ ] **J08｜公开扩展 SPI 与内部 port 边界**
   - 依赖：J01 和初步需求基线；J00.2 完善时核对能力。
   - 完成标准：明确公开 API 最小范围、内部存储/提交模型边界及 provider ID/版本/生命周期；先验证盐/身份/连接和装配需求，再稳定配置/指标/绑定接口；内核不变量不能通过扩展绕过。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=待评审；负责人=Codex；PR #7 head `5ab5a14b`；公开 SPI、模块边界、身份 DTO、并发/阻塞和 provider 生命周期契约已有实现与测试；维护者已提出意见并收到作者修复回复，最新正式复审仍待进行。
 
 - [ ] **J09｜开源仓库规范、许可证与公开构建边界**
   - 依赖：已确认的开源交付要求；构建规则随 J01 完善，不等待 J00 完整审计。
   - 完成标准：维护者确认许可证；记录 LICENSE/NOTICE、协议与依赖来源要求；提供贡献/问题/变更模板，固定 artifact 命名与发布位置；建立仅使用公开依赖、占位配置及公开可获取资源的 CI 规则。
   - 验证层次：工程/环境；涉及客户端互通的部分另记 L2。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=阻塞；负责人=Codex；分支=codex/m0-02-toolchain、codex/m0-04-spi-config；PR/commit=[PR #5](https://github.com/Reidddddd/etcd-hbase/pull/5)、[PR #7](https://github.com/Reidddddd/etcd-hbase/pull/7)；公开许可证/制品策略及来源台账已提交；维护者许可证 I07 和公开制品 I08 决定缺失，J09 尚未满足完成标准。
 
 **退出条件：** JDK 21 依赖和实际 HBase 认证可用，盐规则/预分区及目标已记录；Go client 最小协议/流/错误互通。原型不代表完整业务语义。公开 SPI、许可证/仓库规则及公共构建边界已评审。
 
@@ -1224,11 +1227,13 @@ KV 一致性与 Watch 的顺序、完整性及恢复分别验证，再验证联�
 | B01 | 盐算法、编码、桶数、预分区边界 | J05/J10 生产编码 | 待分配 | 规则及示例校验数据确认 | 待安排 | 待输入 |
 | B02 | HBase/client/Hadoop 版本及 JDK 21 允许组合 | J01/J04 | 待分配 | 实际版本、依赖、启动参数确认 | 待安排 | 待输入 |
 | B03 | Authenticate 提供的 HBase 账号密码如何转换实际后端认证，跨副本/启动/后台身份及轮换流程 | J04/J50/J51/J56 | 待分配 | 实际 client 认证机制、身份激活与安全交接/轮换流程验证 | 待安排 | 待输入 |
-| B04 | 应用提交、读屏障及续租排队的验收 profile | J29 负载报告与调度选型 | 服务开发 | 目标请求规模、延迟与报告判定口径明确；不阻塞基础实现 | 待安排 | 待输入 |
-| B05 | 真实 KV/版本/请求与新集群数量分布 | J17/J70–J77 | 待分配 | 第 6.2 节目标和负载数据冻结 | 待安排 | 待输入 |
+| B04 | 应用提交、读屏障及续租排队的验收 profile | J29 负载报告与调度选型 | 服务开发 | 目标请求规模、延迟与报告判定口径明确；不阻塞 M0 | 后续容量验收前 | 待输入（不阻塞 M0） |
+| B05 | 真实 KV/版本/请求与新集群数量分布 | J17/J70–J77 | 待分配 | 第 6.2 节目标和负载数据冻结；不阻塞 M0 | 后续容量验收前 | 待输入（不阻塞 M0） |
 | B06 | TLS、token/凭据安全交接、部署、监控与 RPO/RTO 规范 | J50/J56/J57/J80 | 待分配 | 规范与验收负责人确认 | 待安排 | 待输入 |
+| I07 | 项目许可证选择及源码、生成代码、proto、依赖和发行包审查结论 | J09 | 项目维护者 | 维护者确认许可证，审阅来源/通知并补齐正式许可文件 | M0 退出前 | 待输入 |
+| I08 | 公开 artifact 坐标、命名、发布位置及授权规则 | J09 | 项目维护者 | 维护者确认公开坐标和目的地；更新发行规则 | M0 退出前 | 待输入 |
 
-这些输入阻塞对应能力冻结或生产验收；不阻塞其余已具备条件的工程任务。
+这些输入阻塞对应能力冻结或生产验收；B04/B05 的生产数值按后续容量工作包收集，不阻塞 M0。其余已具备条件的工程任务继续推进。
 
 ### 10.3 决策登记
 
@@ -1272,7 +1277,42 @@ KV 一致性与 Watch 的顺序、完整性及恢复分别验证，再验证联�
 | 2026-10-09 | 开源规划 | 无开发任务完成 | 通用化文档；补公开 SPI、默认实现、独立扩展及发布任务 | D10 确认，RV07 待评审；R11/R12 未关闭 | 第 3.1.1–3.1.3 节；无实现验证报告 |
 | 2026-10-09 | 评审反馈修订 | 无开发任务完成 | 固定首版范围、拆子任务、调整依赖/检查点，补原生多版本原型与 K8s 多副本 | D05/D06 更新；D13/D14、R13/R14 新增；风险未因文档修改关闭 | PR #1 首轮反馈；本版文档，无实现验证报告 |
 | 2026-10-09 | 二轮建议补充 | 无开发任务完成 | 明确 C1 成熟度，补第一批启动顺序与实际前置 | F07/F08 文档已处理；首版范围与开发计数保持 | PR #1 二轮方案评论；第 7.2/7.3 节，无实现验证报告 |
-| 2026-10-12 | Codex | 无已评审完成任务，计数仍为 0/78 | J00.1–J00.3 本地交付待评审；下一项 J01 | Milvus 最低 v3.0.1 已确认；etcd 仍为 v3.5.23；TSO 吞错风险保留；B01–B06 待输入 | [J00 审计报告](docs/reports/j00-baseline-audit.md)；静态验证通过，未执行运行验证 |
+| 2026-10-12 | Codex | J00 完成并合并（计数 1/78） | 开始 J01–J09 分层实现 | B01–B06 待输入；Milvus v3.0.1、etcd v3.5.23 固定 | [J00 审计报告](docs/reports/j00-baseline-audit.md)；PR #3 静态评审通过，不包含运行验收 |
+| 2026-10-13 | Codex | J00 状态按 PR #3 合并评审更新；M0 public 实现与状态台账已提交 PR #5–#13，PR #5 的两轮 P2 已修复；本地 public run 109/109 tests 通过 | 完成 WP23 本地证据索引；跟进 PR #5 复审和 #6–#13 外部评审；收集 target 输入 | B01/B02/B03/B06、I07/I08 缺失；fork Actions run `38358687871` 对应 head `d06b87c` 且 5 个 job 成功；M0 阶段未验收 | PR #3/#5–#13；[fork CI run 38358687871](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38358687871)；本地 run `20261013T063622Z-60974`；外部输入台账 `docs/inputs/m0-inputs.yaml` |
+| 2026-10-13 | Codex | HBase connection factory 自查修复 future completion under lock；本地 public run 110/110 tests 通过 | 推送 PR #9–#13 重基后的关联 heads，获取新 CI；跟进 PR #5 复审和其余外部评审；收集 target 输入 | B01/B02/B03/B06、I07/I08 缺失；最新已完成 fork Actions run `38360415811` 仍对应修复前 head `c822b6c`；M0 阶段未验收 | 本地 run `20261013T072209Z-82530`（代码 head `499eeb9`）；[前一 fork CI run 38360415811](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38360415811)；PR #9 review-fix commit `ee6f8df` |
+| 2026-10-13 | Codex | PR #9 修复连接发布与 shutdown 竞态；public 验证 111 tests / 25 suites 通过；后续加固并验证竞态测试；PR #12/#13 最新 heads 的 fork Actions 均 5/5 jobs 成功 | 跟进 PR #5 复审和其他 PR 评审；等待用户提供 target 输入并完成目标 HBase 验收 | B01/B02/B03/B06、I07/I08 待输入；M0 阶段未验收 | public run `20261013T080617Z-7860`（代码 head `90865e0`）；后续 Java 21 SPI/core/HBase reactor 30 tests 通过；PR #9 commits `808956b`、`258f307`；[PR #12 Actions 38370630366](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38370630366)（head `ffe6359`）；[PR #13 Actions 38370657581](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38370657581)（head `d52e516`）；本地报告 run `20261013T080617Z-7860` |
+| 2026-10-13 | Codex | 修复 PR #5 第三项 P2，并自查补齐 active-by-default profile 属性覆盖拒绝；针对性测试 10/10、Java 21 Maven `-N validate` 通过；PR #6–#13 分支重基并推送；PR #12/#13 最新代码 heads 的 Actions 各 5/5 jobs 成功 | 跟进 PR #5 复审及其余 PR review；等待用户稍后提供 B01/B02/B03/B06/I07/I08，再完成目标验收 | PR #5 最新 head `0432b66` 等待复审；目标输入待提供；M0 阶段未验收 | [PR #5](https://github.com/Reidddddd/etcd-hbase/pull/5)；[PR #12 Actions 38375189025](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38375189025)（head `6aab9cd`）；[PR #13 Actions 38375200476](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38375200476)（head `ff5c16e`）；`test_maven_lock.py` 10/10；Java 21 `mvn21.sh -N validate` |
+| 2026-10-13 | Codex | 修复 PR #5 根 POM active-by-default profile 覆盖锁定版本的 P2；11 项锁校验、8 项 Maven 仓库参数用例及 pinned Java 21 `-N validate` 通过；PR #6–#13 顺序重基、推送到 fork | 跟进 PR #5 正式 review state、其他 PR review；等待用户提供 B01/B02/B03/B06/I07/I08，再完成目标验收 | Reidddddd 已评论确认根 profile P2 关闭、无新问题；PR #5 尚无 formal review state；目标输入待提供；M0 阶段未验收 | [PR #5](https://github.com/Reidddddd/etcd-hbase/pull/5) 最新评审评论（2026-10-13 09:57 UTC）；[PR #12 Actions 38377923057](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38377923057)（code head `f921f00`）；[PR #13 Actions 38378933651](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38378933651)（docs head `69b1e1a`）；定向用例 `11/11`、`8/8`，Java 21 `-N validate` |
+| 2026-10-13 | Codex | Reidddddd 复核 PR #5 head `dfc1754`，确认根 POM profile P2 已修复且无新增问题；独立运行 11/11 锁校验、8 项 Maven 参数、metadata 和 shell 检查均通过 | 更新主计划/评审记录；继续等待 PR #5 formal review state、其他 PR feedback 及 target 输入 | 本次结论来自 issue-level comment，PR #5 尚无正式 review state；B01/B02/B03/B06/I07/I08 待提供；M0 阶段未验收 | [PR #5 最新 review comment](https://github.com/Reidddddd/etcd-hbase/pull/5)（2026-10-13 09:57 UTC）；head `dfc1754`；[PR #12 CI 38377923057](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38377923057)；[PR #13 CI 38378933651](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38378933651) |
+| 2026-10-13 | Codex | PR #5 已于 10:16 UTC 合并为 `fe55ced`；PR #6–#13 顺序 rebase 至最新上游 `main` 并以精确 lease 推送；PR #12/#13 rebase 后的 Actions 各 5/5 jobs 成功 | 更新主计划与本地恢复记录；继续处理 PR #6–#13 评审及 M0 可独立推进项 | B01/B02/B03/B06/I07/I08 待提供；M0 阶段未验收 | PR #5 merge commit `fe55cedfd2682d91e23245dd5929157b5317f073`；PR #6–#13 当前 fork heads；[PR #12 run](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38382737972)；[PR #13 run](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38382743748) |
+| 2026-10-13 | Codex | 修复并推送 PR #6 的 Maven 依赖锁、proto 来源摘要守卫和递归 Txn round-trip review findings；修复 PR #7 小数整数配置截断；本地 public run 113/113 tests、26 suites 通过；最新 PR #12/#13 fork CI 各 5/5 jobs 成功 | 等待 PR #6 reviewer 复核及 PR #7–#13 review；B01/B02/B03/B06/I07/I08 到齐后完成目标验收 | PR #6 修复待复核，指定 `reidchan` reviewer 因非上游 collaborator 无法添加；目标输入待提供，M0 阶段未验收 | PR #6 commits `c72094e`、`8b4952e`、`24610b8`；PR #7 commit `17c2922`；本地 public report run `20261013T112151Z-97213`（执行报告仅存本地）；[PR #12 CI 38390829046](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38390829046)；[PR #13 CI 38390833115](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38390833115) |
+| 2026-10-13 | Codex | 自查修复 PR #8 native artifact symlink 路径逃逸（commit `b7a617e`），并将修复重放至 PR #9–#13；本地 public run `20261013T121300Z-25385` 在代码验证 head `222df150` 上 113/113 tests、26 suites 通过，8 个模块 JAR 可重复；PR #12/#13 当前验证 heads 的 CI 各 5/5 jobs 成功 | 跟进 PR #6 复核及 PR #8–#13 外部 review；等待 B01/B02/B03/B06/I07/I08 并完成 target 验收 | 当前 PR #8–#13 未见正式 review/行内意见；指定 `reidchan` reviewer 因非上游 collaborator 无法添加；target 输入待提供，M0 阶段未验收 | [PR #8](https://github.com/Reidddddd/etcd-hbase/pull/8) head `b7a617e`；[PR #12 CI 38396422940](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38396422940) head `78a23ced`；[PR #13 CI 38396428426](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38396428426) code head `222df150`；public report run `20261013T121300Z-25385`（执行报告保留本地）；target 缺口 B01/B02/B03/B06/I07/I08 |
+| 2026-10-13 | Codex | PR #6 的两项 P2 和递归 Txn 建议已在 head `24610b8` 修复；重新运行 Maven lock 14/14、Maven 参数 8/8、协议 13/13，proto 注释变更负向检查按预期失败，并在 [PR #6 follow-up](https://github.com/Reidddddd/etcd-hbase/pull/6#issuecomment-6147548058) 请求复核。PR #13 同步前一层的 shutdown probe 超时测试，head `832e79e` 的 Actions 5/5 jobs 成功；最新 public run 为 113 tests / 26 suites。 | 等待 PR #6 reviewer 复核和 PR #7–#13 外部评审；等待 B01/B02/B03/B06/I07/I08 后完成 target 验收 | PR #6–#13 均以 `main` 为 base；`reidchan` 无法加入且未替换 reviewer；target 输入仍缺，M0 未验收 | [PR #6 follow-up](https://github.com/Reidddddd/etcd-hbase/pull/6#issuecomment-6147548058)；[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[Actions 38412514696](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38412514696)；public run `20261013T135801Z-75492` |
+| 2026-10-13 | Codex | 在 PR #13 head `f33e0640` 上重新核实 public run `20261013T150055Z-10063`：113 tests / 26 suites，无失败、错误或跳过测试；9 个 public 步骤通过，runtime-image 因本机缺 Docker CLI 跳过。相同 head 的 Actions run `38418348538` 5/5 jobs 成功（含 packaged runtime image）。PR #6–#13 仍全部开放且以 `main` 为 base；#6 修复说明已发，尚无新 reviewer 结论；#7–#13 暂无评审意见。 | 继续跟进 PR review；等待 B01/B02/B03/B06/I07/I08 后完成 target 验收 | 本地 public HBase 和 CI 不构成 target 身份/权限/TLS 或目标版本验收；M0 阶段保持未验收 | [PR #6 follow-up](https://github.com/Reidddddd/etcd-hbase/pull/6#issuecomment-6147548058)；[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[Actions 38418348538](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38418348538)；本地 INDEX `.artifacts/m0/public/20261013T150055Z-10063/INDEX.json` |
+
+| 2026-10-14 | Codex | PR #6 的 review findings 已获 reviewer APPROVED 并合并到 `main` `4b2864a`；PR #7 的维护者两轮评论中列出的配置、listener 地址和列族边界问题均已在 head `f91bdcc` 修复。对 exact head 隔离运行锁定 JDK 21 `clean verify`：9 模块、60 测试通过，0 failures/errors/skips；SPI 边界及 diff 检查通过。正式复审仍待维护者回复。PR #8 exact head `327228d` 的 Go 测试、vet、模块锁、API 矩阵、native oracle 和 diff 检查通过；PR #8–#12 描述已同步当前 head/base/验证结果。累计代码 head `3480733` 上 public run `20261014T035523Z-28482` 通过 123 tests / 26 suites，9 个 public steps 通过，8 个模块 JAR 两次 clean build 一致；runtime-image 本机跳过原因是无 Docker CLI。 | 更新 PR #13 的状态/验收描述并重新生成 exact-head public 证据索引；继续所有可独立推进的 M0 步骤 | PR #7 有评论式复审但没有正式 approval；PR #7–#13 尚无 GitHub status checks；`reidchan` 不可添加且未替换 reviewer。B01/B02/B03/B06、I07/I08 待提供；target HBase 未验收，M0 阶段未通过 | [PR #6](https://github.com/Reidddddd/etcd-hbase/pull/6)；[PR #7](https://github.com/Reidddddd/etcd-hbase/pull/7)；[PR #8](https://github.com/Reidddddd/etcd-hbase/pull/8)；[PR #9–#13](https://github.com/Reidddddd/etcd-hbase/pull/13)；public INDEX `.artifacts/m0/public/20261014T035523Z-28482/INDEX.json` |
+| 2026-10-14 | Codex | PR #8 自查发现 Go module-lock verifier 未拒绝未锁定的直接依赖；新增 direct-module guard 和 2 项回归测试，并由既有 verifier 入口自动执行。PR #9–#13 已依次重基并推送。PR #13 code head `356a3e2` 的 public run `20261014T063513Z-9230` 通过：123 tests / 26 suites、0 failures/errors/skips、9 个 public 步骤通过；runtime-image 本机因缺 Docker CLI 跳过。相同 code head 的 fork Actions run `38522999130` 为 5/5 jobs success。 | 跟进 PR #7–#13 外部评审；等待 B01/B02/B03/B06/I07/I08 后完成 target 验收；继续维护 exact-head 报告 | PR #7 仍待维护者复审；PR #8–#13 尚无正式 review/comments；指定 `reidchan` 因非上游 collaborator 无法加入且未替换 reviewer。B01/B02/B03/B06、I07/I08 待提供；target HBase 未验收，M0 阶段未通过 | PR #8 commits `41e09ac`、`02d28b4`；PR #8–#13 heads: `02d28b4`、`ec311f2`、`2ded43c`、`9d51776`、`b495c6d`、`356a3e2`；[PR #13 Actions 38522999130](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38522999130)；public INDEX `.artifacts/m0/public/20261014T063513Z-9230/INDEX.json` |
+| 2026-10-14 | Codex | PR #7 exact head `e980896` 以锁定 Temurin JDK 21 完整 `clean verify`：9 个模块、60 tests、0 failures/errors/skips；SPI boundary verifier 和 diff check 通过，维护者复审待回复。PR #12 head `2781589` 补充 7 个外部 Lock/Election RPC 的 `UNIMPLEMENTED` 终止验证。PR #13 head `64031d4` 的 public run `20261014T074811Z-19194` 通过 124 tests / 26 suites、9 个 public steps；runtime-image 本机因无 Docker CLI 跳过，匹配 fork Actions `38531431790` 为 5/5 jobs success | 更新主计划与本地报告的 exact-head 验收证据；继续跟进 PR #7–#13 review 和可独立推进事项；收到 B01/B02/B03/B06/I07/I08 后完成 target 验收 | PR #7 尚无最新正式 approval；PR #8–#13 review 待处理；`reidchan` 不可添加且未替换 reviewer。B01/B02/B03/B06、I07/I08 待提供；target HBase 未验收，M0 阶段未通过 | [PR #7](https://github.com/Reidddddd/etcd-hbase/pull/7) head `e980896`；[PR #12](https://github.com/Reidddddd/etcd-hbase/pull/12) head `2781589`；[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13) head `64031d4`；[PR #13 Actions 38531431790](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38531431790)；public INDEX `.artifacts/m0/public/20261014T074811Z-19194/INDEX.json` |
+| 2026-10-14 | Codex | PR #9 exact head `ec311f2` 在隔离工作树以锁定 Temurin JDK 21 执行 `-pl core,grpc,server,hbase -am clean verify`：7 个 reactor 模块、91 tests、0 failures/errors/skips；Maven 锁 14/14、参数 8/8、元数据 9 POM/12 plugin pins、39 个缓存制品摘要、SPI 边界和 diff 检查通过。刚 fetch 的上游 `main` 仍为 `4b2864a` 且是该 head 祖先；PR 描述已更新为 exact-head 结果。PR #13 exact head `c65580d` 的 public run `20261014T083930Z-46113` 通过 124 tests / 26 suites、0 failures/errors/skips，9 个 public 步骤通过；本机 runtime-image 因无 Docker CLI 跳过；对应 fork Actions `38536644242` 为 5/5 jobs 成功 | 继续完成 PR #7–#13 的自查与外部 review 闭环；收到 B01/B02/B03/B06/I07/I08 后完成 target 验收 | PR #7 等待维护者复审；PR #8–#13 尚无维护者正式复审，其中 PR #9 当前无 review 和 status checks。`reidchan` 不可添加且未替换 reviewer。B01/B02/B03/B06、I07/I08 待提供；target HBase 未验收，M0 阶段未通过 | [PR #9](https://github.com/Reidddddd/etcd-hbase/pull/9) exact head `ec311f2`；[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13) head `c65580d`；[PR #13 Actions 38536644242](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38536644242)；public INDEX `.artifacts/m0/public/20261014T083930Z-46113/INDEX.json` |
+
+| 2026-10-14 | Codex | PR #10 review 自查发现 apply 阶段后端 `IOException` 会被误分类为配置读取失败；现已收窄异常边界并加入双路径回归测试，修复提交 `204ee93f`。锁定 Temurin JDK 21 下 PR #10 的 8 模块 `admin -am verify -Pm0-hbase-local` 成功：12 个 admin 单测、admin 初始化 IT、HBase 本地 probe 均通过。PR #11–#13 已依次重放；当前 heads 为 `f3fcfa8`、`aa10f36`、`2cb05b9`，均以 upstream `main` `4b2864a` 为祖先并以 `main` 为 PR base。PR #13 public run `20261014T091207Z-64119` 通过 125 tests / 26 suites、0 failures/errors/skips、9 个 public 步骤；8 个模块 JAR 两次 clean build SHA-256 一致；本机 runtime-image 因无 Docker CLI 跳过 | 跟进 PR #7–#13 外部评审；等待 B01/B02/B03/B06/I07/I08 后完成 target 验收；更新 exact-head 证据 | 最新 PR #13 head 尚无 fork Actions 结果；target HBase 未验收，M0 阶段未通过 | [PR #10](https://github.com/Reidddddd/etcd-hbase/pull/10) head `204ee93f`；[PR #11](https://github.com/Reidddddd/etcd-hbase/pull/11) head `f3fcfa8`；[PR #12](https://github.com/Reidddddd/etcd-hbase/pull/12) head `aa10f36`；[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13) head `2cb05b9`；public INDEX `.artifacts/m0/public/20261014T091207Z-64119/INDEX.json` |
+| 2026-10-14 | Codex | PR #10 apply 阶段后端 `IOException` 分类修复及 admin 验证已完成；PR #8 trace writer/error self-review fix 已推至 exact head `1a86a9f9`，Go 全部 package tests 与 vet 通过。当前 PR #7–#13 heads 为 `e9808967`、`1a86a9f9`、`5004362a`、`37897943`、`c0fd5ffb`、`24e13cd2`、`f104f2b1`，均以 upstream `main` `4b2864a` 为 base。PR #13 exact-head public run `20261014T094800Z-82346` 通过 125 tests / 26 suites、0 failures/errors/skips、9 个 public steps；runtime-image 本机因无 Docker CLI 跳过。PR #12/#13 当前 head 的 fork Actions 分别为 5/5 jobs success。PR #6 已 approved/merged；PR #7 的 maintainer 发现项均有修复回复但当前 head 尚无 formal approval；PR #8–#13 无 formal reviews。 | 对 PR #9–#13 最新层继续独立代码审查；同步 PR 描述的 exact head 与验证范围；等待 B01/B02/B03/B06/I07/I08 后执行 target 验收 | PR #7–#13 仍开放；指定 `reidchan` 无法添加且未选择替代 reviewer；B01/B02/B03/B06、I07/I08 待输入；target HBase 未验收，M0 阶段未通过 | [PR #7](https://github.com/Reidddddd/etcd-hbase/pull/7)–[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #12 Actions 38544929939](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38544929939)；[PR #13 Actions 38544970951](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38544970951)；public INDEX `.artifacts/m0/public/20261014T094800Z-82346/INDEX.json` |
+| 2026-10-14 | Codex | PR #13 WP23 文档状态更新已推送到 fork head `dd2f9d8ef7b6f01c0df060a2a1cb46e98d8b77a3`，包含本地/公开验证结果、目标输入台账和当前 PR 状态；PR base 仍是 upstream `main` `4b2864ac3e75c7940da76cc6628286fe9566e245`。精确提交 public run `20261014T101800Z-93360` 通过 125 tests / 26 suites、0 failures/errors/skips、9 个 public steps；本机 runtime-image 因无 Docker CLI 跳过，target HBase 因 B02/B03/B06 未运行。fork Actions run `38549964256` 在同一提交 5/5 jobs 成功。PR #7–#13 均仍开放；尚无正式 reviewer decision 或未解决行内 thread，PR #7 的维护者复审请求仍待回应。 | 继续 PR #7–#13 外部 review 闭环和可独立推进工作；等待 B01/B02/B03/B06/I07/I08 后完成 target 验收 | `reidchan` 仍无法添加且未替换 reviewer；B01/B02/B03/B06、I07/I08 缺失；target HBase 未验收，M0 阶段未通过 | [PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[fork Actions 38549964256](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38549964256)；public INDEX `.artifacts/m0/public/20261014T101800Z-93360/INDEX.json` |
+
+| 2026-10-14 | Codex | PR #7 cross-layer self-review 修复了 `localhost` 与显式 loopback listener 使用相同固定端口时可能被误判为不同地址的问题；增加 IPv4/IPv6 回归测试并更新配置文档。PR #7 exact head `d5f1331` 的锁定 Temurin JDK 21 `clean verify`：9 模块、61 tests、0 failures/errors/skips。修复已沿栈重放并推送，#7–#13 heads 为 `d5f1331`、`0698e72`、`d3aee99`、`e032b30`、`b1ea58b`、`b817e65`、`2824433`，均以 upstream `main` `4b2864a` 为祖先且 base 为 `main`。PR #13 exact-head public run `20261014T110040Z-14139` 通过 126 tests / 26 suites、0 failures/errors/skips、9 个 public steps；runtime-image 本机因无 Docker CLI 跳过。PR #12/#13 精确 head 的 fork Actions 分别 `38554533741`、`38554552912`，均 5/5 jobs 成功。 | 继续逐层处理新 review；等待 B01/B02/B03/B06/I07/I08 后执行目标验收 | PR #7–#13 仍开放且尚无正式 approval；指定 `reidchan` 无法添加且未替换 reviewer。target HBase 未验收，M0 未通过 | [PR #7](https://github.com/Reidddddd/etcd-hbase/pull/7)–[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #12 Actions 38554533741](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38554533741)；[PR #13 Actions 38554552912](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38554552912)；public INDEX `.artifacts/m0/public/20261014T110040Z-14139/INDEX.json` |
+| 2026-10-14 | Codex | 复核 upstream `main` 仍为 `4b2864ac3e75c7940da76cc6628286fe9566e245`，PR #7–#13 均以该提交为 base 的 `main` 并保留 fork head。PR #13 本地候选 `5eb302e8de584a2af17bfd945a9cd307ccf57ef6` 的最终 public run `20261014T111615Z-22697` 通过 126 tests / 26 suites、0 failures/errors/skips、9 个 public steps；8 个模块 JAR 两次 clean build 摘要一致。runtime-image 因缺 Docker CLI 跳过；target HBase 因 B02/B03/B06 缺失未运行。此 head 的 fork Actions 待推送后验证；上一个 head `2824433` 的 Actions `38554552912` 为 5/5 jobs 成功 | 继续逐层独立代码复核、同步 PR 描述与 exact-head 证据、处理新 review；收到 B01/B02/B03/B06/I07/I08 后执行 target 验收 | PR #7–#13 仍开放；#7 尚无正式复审结论，#8–#13 尚无正式 review；指定 `reidchan` 不能加入且未替换 reviewer。target HBase 未验收，M0 未通过 | [PR #7](https://github.com/Reidddddd/etcd-hbase/pull/7)–[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #13 Actions 38554552912](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38554552912)；public INDEX `.artifacts/m0/public/20261014T111615Z-22697/INDEX.json` |
+| 2026-10-14 | Codex | PR #7 跨层自查发现引号形式的 `"*"` 会被 loader 当作 host 接受，但 Java 21 `InetAddress.getByName("*")` 抛 `UnknownHostException`。提交 `5ab5a14` 使配置 validator 和 JSON Schema 均拒绝该 token，并覆盖 listener/quorum 两条路径；锁定 Temurin JDK 21 `clean verify` 9 模块、62 tests、0 failures/errors/skips，SPI boundary 与 diff 检查通过。随后将 PR #8–#12 顺序重放至新 #7 head，并将 PR #13 文档分支重放至新 #12 head。PR #8–#13 推送与新栈完整 public run 尚待执行。| 完成新栈完整 public 验证、同步精确进度报告并推送重放后的 PR #8–#13；继续等待各层复审与目标输入 | PR #7 维护者复审待回复；B01/B02/B03/B06、I07/I08 缺失，target HBase 与 M0 验收未完成 | [PR #7](https://github.com/Reidddddd/etcd-hbase/pull/7) head `5ab5a14`；本地候选 #8–#13：`a36f5a9`、`406110d`、`4905e8c`、`7a3530a`、`3084883`、PR13 pending
+| 2026-10-14 | Codex | 在 PR #7 host-token 修复后的累计栈运行 `20261014T124505Z-68255`，提交 `273569eddc77f93b001cebdb6c2e44f4cb43aa92` 的 public 验证通过：127 tests / 26 suites、0 failures/errors/skips，9 项通过，runtime-image 因无 Docker CLI 跳过；8 个模块 JAR 两次 clean build 摘要一致，42 个缓存制品摘要通过、3 个未缓存。Go `test ./...`、`vet ./...`、API matrix（41 descriptor methods、7 external methods、33 cases、48 inventory rows）、SPI boundary 检查均通过。PR #8–#12 已按最新 upstream `main` 逐层重放并安全推送；#13 候选仅待同步本条文档状态后推送。Target HBase 缺 B02/B03/B06，I07/I08 决策也未提供；M0 未验收 | 更新 PR #13 状态并推送所有精确 heads，核对 exact-head CI 和 review；收到 B01/B02/B03/B06/I07/I08 后完成目标验收 | PR #7 维护者复审待回复，PR #8–#12 尚无正式 review，#13 当前为本地候选；runtime-image 本地未运行；target HBase 未运行 | [PR #7](https://github.com/Reidddddd/etcd-hbase/pull/7)–[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；public INDEX `.artifacts/m0/public/20261014T124505Z-68255/INDEX.json` |
+| 2026-10-14 | Codex | PR #8 cross-layer 自查发现 raw apiv3 返回 typed-nil response 时 `response != nil` 成立，导致 response snapshot 失败并丢失原始 gRPC 错误。提交 `1520b88` 将 typed-nil 编码为 JSON `null` 并保留错误 trace，新增回归测试；PR #8–#13 已按依赖顺序推送，heads 为 `1520b88`、`d136287`、`bed2f5b`、`caefdd0`、`ccfb25f`、`663db39`，base 均为 upstream `main` `4b2864ac3e75c7940da76cc6628286fe9566e245`；每次 push 前重新 fetch 并用 lease 核对旧 head。PR #13 exact-head `663db398b670a106b1f3c406aac3d03c6d2615df` 的 public run `20261014T140026Z-8642` 通过 127 tests / 26 suites、0 failures/errors/skips；9 个 public 步骤通过，runtime-image 因 `docker-cli-unavailable` 跳过。独立 `go test ./...`、`go vet ./...`、API matrix（41 descriptor methods、7 external methods、33 cases、48 inventory rows）、SPI boundary 验证通过；wire 记录 10 条 trace，native etcd 两次运行通过，public-local HBase 探针通过，8 个模块 JAR 两次 clean build SHA-256 一致，42 个缓存制品摘要通过、3 个未缓存。PR #12 exact-head Actions run `38577992422` 和 PR #13 exact-head run `38578002688` 均为 5/5 jobs 成功。PR 描述已同步 #8–#12 当前 head 与验证范围；#13 描述待最终同步。PR #7–#13 均以 upstream `main` 为 base。Target HBase 缺 B02/B03/B06；B01/I07/I08 待输入，M0 未验收 | 更新 PR #13 描述与主计划状态，推送最后的文档状态提交后核对新 exact-head CI；继续处理后续 review 并等待 target/maintainer 输入 | PR #7 待维护者复审；PR #8–#13 无正式 review；`reidchan` 因非上游 collaborator 无法添加且未替换 reviewer；target HBase 未运行 | [PR #8](https://github.com/Reidddddd/etcd-hbase/pull/8)–[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #12 Actions 38577992422](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38577992422)；[PR #13 Actions 38578002688](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38578002688)；public INDEX `.artifacts/m0/public/20261014T140026Z-8642/INDEX.json` |
+| 2026-10-14 | Codex | PR #9 自查补齐了异步建连失败的 timeout/cancellation 分类：先以回归测试复现 `TimeoutException → UNAVAILABLE`，再由 `2bd379e` 映射到 `TIMEOUT`，并将 `CancellationException`/`InterruptedException` 映射到 `CANCELLED`。PR #9 的 Java 21 HBase 验证通过 14 tests；PR #10–#12 顺序 rebase 并推送，heads 为 `10d8d8d`、`8dbd7d0`、`ddc6df6`，均以 upstream `main` `4b2864ac3e75c7940da76cc6628286fe9566e245` 为祖先。PR #12 exact-head Actions `38582434528` 5/5 jobs 成功。累计栈源码父提交 `780a120` 的 public run `20261014T144239Z-26439` 通过 128 tests / 26 suites、0 failures/errors/skips，9 个 public 步骤通过；runtime-image 因本机缺 Docker CLI 跳过，target HBase 因 B02/B03/B06 缺失未运行。Go tests/vet、API matrix（41 descriptor methods、7 external methods、33 cases、48 inventory rows）、SPI boundary 检查及 `git diff --check` 均通过。PR #13 状态提交已包含该源码状态，精确当前 head 的证据索引随后在本地刷新 | 推送 PR #13 最终状态 head；更新 PR #9–#13 描述与验证结果；继续等待 PR #7–#13 正式 review 及 B01/B02/B03/B06/I07/I08 | PR #7 维护者复审待回复；PR #8–#13 无正式 review；`reidchan` 仍无法添加且未替换 reviewer；target HBase 未验收，M0 未通过 | [PR #9](https://github.com/Reidddddd/etcd-hbase/pull/9)–[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #12 Actions 38582434528](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38582434528)；public INDEX `.artifacts/m0/public/20261014T144239Z-26439/INDEX.json` |
+| 2026-10-14 | Codex | PR #9–#12 当前 head 与描述已刷新；PR #13 源码/状态 head `d03c3af` exact-head public run `20261014T145109Z-35787` 通过 128 tests / 26 suites、0 failures/errors/skipped tests，9 个 public 步骤通过；同 head fork Actions `38585352486` 5/5 jobs 成功。runtime-image 本机因 Docker CLI 缺失跳过；target HBase 因 B02/B03/B06 缺失未运行 | 更新 PR #13 描述并继续等待 PR #7–#13 review；收到 B01/B02/B03/B06/I07/I08 后完成 target 验收 | PR #7 等维护者复审；PR #8–#13 无正式 review；`reidchan` 仍无法添加且未替换 reviewer；target HBase 未验收，M0 未通过 | [PR #7–#13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #12 Actions 38582434528](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38582434528)；[PR #13 Actions 38585352486](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38585352486)；public INDEX `.artifacts/m0/public/20261014T145109Z-35787/INDEX.json` |
+| 2026-10-15 | Codex | PR #10 cross-layer review 修复完整表组在 region split 后重试失败：`b91d14a` 保留计划描述符校验、跳过运行期 region 边界冲突；另修复 HBase 临时集群的 readiness race：`c48d227` 在返回 client-ready 前执行 `listNamespaces()` 并对瞬时连接失败做 60 秒有界重试。两次 Java 21 focused reactor 验证通过，HBase probe 与 admin initializer IT 均通过。三个 readiness 修复前的 PR #13 public INDEX 保持失败：`20261014T165204Z-88129` 最终 HBase ZK GET 超时；`20261014T170337Z-96110` reproducibility build 中 `InitializeTablesIT` 首次 apply 失败；`20261014T170953Z-804` 八个 JAR 可重复构建通过，但最终 HBase GET 再次超时。 | 在修复后的 PR #13 head 完成全量 public run 和 report-index，刷新 PR 描述与 Actions 状态；继续处理逐层 review | PR #7–#13 正式 review 待定；`reidchan` 在上游权限为 read，GitHub 不接受其 reviewer 请求。B01/B02/B03/B06、I07/I08 未提供；target HBase 未验收，M0 阶段未通过 | [PR #10](https://github.com/Reidddddd/etcd-hbase/pull/10) `c48d227`；[PR #11](https://github.com/Reidddddd/etcd-hbase/pull/11) `33172f2`；[PR #12](https://github.com/Reidddddd/etcd-hbase/pull/12) `03265a6`；[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13) `f4b5900`；failed INDEX `.artifacts/m0/public/20261014T165204Z-88129/INDEX.json`, `.artifacts/m0/public/20261014T170337Z-96110/INDEX.json`, `.artifacts/m0/public/20261014T170953Z-804/INDEX.json` |
+
+| 2026-10-15 | Codex | PR #10 修复临时 HBase 集群 READY 早于客户端可用的竞态：`c48d227` 在启动后以 `listNamespaces()` 探测并做 60 秒有界重试。PR #13 候选 head `17f4cc13b9f12c77421dbeeb94d4907cc3d36288` 的 public run `20261014T172952Z-13189` 通过：130 tests / 26 suites、0 failures/errors/skips，9 项通过，8 个模块 JAR 两次 clean build 摘要相同；runtime-image 因本机无 Docker CLI 合理跳过，target HBase 因 B02/B03/B06 未提供未运行。PR #6 收到维护者 APPROVED，两个 P2 与 nested Txn 测试建议已修复并合并。当前 PR #10–#13 heads 为 `c48d227`、`33172f2`、`03265a6`、`17f4cc1`，均以 upstream `main` `4b2864ac3e75c7940da76cc6628286fe9566e245` 为祖先。 | 同步本次 exact-head 验证索引及 PR 描述；继续逐层等待正式 review；收到 B01/B02/B03/B06/I07/I08 后完成目标验收 | PR #7–#13 无正式 review decision；指定 reviewer `reidchan@apache.org` 当前在上游仅有 read 权限，GitHub 不接受 reviewer 请求。Target HBase 和 M0 阶段验收未完成 | [PR #6](https://github.com/Reidddddd/etcd-hbase/pull/6)；[PR #10](https://github.com/Reidddddd/etcd-hbase/pull/10)；[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；public INDEX `.artifacts/m0/public/20261014T172952Z-13189/INDEX.json` |
+| 2026-10-15 | Codex | PR #8 cross-layer review 新增 trace 输入上限：总大小 256 MiB、最多 10,000 条，避免单记录上限无法约束整体内存消耗；`go test ./...`、`go vet ./...` 和 native etcd oracle 通过。PR #8–#13 顺序 rebase 并推送，heads 为 `92821ef`、`cce99c4`、`4828afa`、`b74d63d`、`753c7b1`、`5c0fb4a`，全部以 upstream `main` `4b2864ac3e75c7940da76cc6628286fe9566e245` 为祖先，PR base 均为 `main`。PR #13 exact-head public run `20261014T183216Z-51688` 通过 130 tests / 26 suites、0 failures/errors/skips，9 个 public 步骤通过；runtime-image 因本机缺 Docker CLI 跳过，8 个模块 JAR 两次 clean build SHA-256 一致。相同 head 的 fork Actions run `38615992276` 为 5/5 jobs 成功，`report-index.py` 校验通过。Target HBase 缺 B02/B03/B06，I07/I08 待提供，M0 未验收。 | 继续逐层处理外部 review；等待 B01/B02/B03/B06/I07/I08 输入后执行目标验收 | PR #7–#13 无正式 review decision/request；指定 reviewer `reidchan@apache.org` 在上游仅有 read 权限。Target HBase 与 M0 阶段验收未完成 | [PR #8](https://github.com/Reidddddd/etcd-hbase/pull/8)–[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #13 Actions 38615992276](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38615992276)；public INDEX `.artifacts/m0/public/20261014T183216Z-51688/INDEX.json` |
+| 2026-10-15 | Codex | PR #13 已推送文档状态 head `6c3a291da2055ed2d4a204f6ead5e18b1a80ae7c`。完整本地 `scripts/verify/m0.sh --scope public` 在源代码状态 `901af3dfba26bb0828c2d04d28e15418e9d618dc` 通过：run `20261014T190213Z-65562`，130 tests / 26 suites，0 failures/errors/skips，9 个步骤通过；runtime-image 因本机无 Docker CLI 跳过；协议、Go module lock、native etcd、Go/Java wire、public-local HBase、admin init、依赖检查和 8 个模块 JAR 可重复构建通过。`report-index.py` 与 `git diff --check` 在该源代码状态通过。PR #13 head `6c3a291` 的 fork Actions run `38621513936` 于 2026-10-14 19:14:58 UTC 完成，5/5 jobs 成功。尝试请求指定 reviewer `reidchan` 的 PR #7 review 返回 HTTP 422（仅允许 collaborator），没有创建请求。 | 更新 PR #13 描述和验证状态；继续处理 PR #7–#13 的 review；收到 B01/B02/B03/B06/I07/I08 后完成目标验收 | PR #7–#13 无正式 review decision/request；`reidchan@apache.org` 仍不能正式指派，未替换人选。Target HBase 与 M0 阶段验收未完成 | [PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #13 Actions 38621513936](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38621513936)；public INDEX `.artifacts/m0/public/20261014T190213Z-65562/INDEX.json` |
+
+| 2026-10-15 | Codex | PR #8 的 protobuf snapshot trace envelope 校验修复已推送，Go 全量测试/vet、native etcd oracle、API matrix 与最终 public 验证均通过。PR #7–#13 当前 heads 为 `5ab5a14`、`c3745b9`、`1caae6c`、`4c56e90`、`9178f91`、`3675ba5`、`51b6271`，均以 upstream `main` `4b2864ac3e75c7940da76cc6628286fe9566e245` 为祖先且 base 为 `main`。PR #13 exact-head public run `20261014T203249Z-7695`（head `51b6271`）通过 132 tests / 26 suites、0 failures/errors/skips，9 步通过；本机 runtime-image 因 Docker CLI 不可用有原因地跳过，fork Actions run `38632902232` 5/5 jobs success。 | 同步本次公开验证、更新 PR #8–#13 描述；继续处理正式 review；等待 B01/B02/B03/B06/I07/I08 后完成相应目标验收 | PR #7–#13 无正式 review decision/request；PR #7 维护者复审待回复；`reidchan@apache.org` 仍不能指派（上游权限 read、HTTP 422），未替换人选；target HBase 未验收，M0 未通过 | [PR #8](https://github.com/Reidddddd/etcd-hbase/pull/8)–[PR #13](https://github.com/Reidddddd/etcd-hbase/pull/13)；[PR #13 Actions 38632902232](https://github.com/Huginn-kio/etcd-hbase/actions/runs/38632902232)；public INDEX `.artifacts/m0/public/20261014T203249Z-7695/INDEX.json` |
 
 ### 11.2 单任务完成记录
 
@@ -1370,7 +1410,7 @@ Milvus 最低支持版本已确认 v3.0.1。J00 固定审计该 tag 的 `658cbd1
 
 集成验证需要同时核对所选版本的设计文档与源码；升级版本时重新核对调用清单、错误消费和恢复顺序，并记录可公开引用的依据。
 
-J00 已交付 [API 矩阵](docs/api-matrix.md)、[调用基线](docs/milvus-etcd-usage.md) 与 [分类目标初稿](docs/acceptance-targets.md)，包含区间、调用选项、响应/错误消费者和验证用例定义。交付目前待评审，不能记录为已完成任务或运行兼容性已通过。
+J00 已交付 [API 矩阵](docs/api-matrix.md)、[调用基线](docs/milvus-etcd-usage.md) 与 [分类目标初稿](docs/acceptance-targets.md)，包含区间、调用选项、响应/错误消费者和验证用例定义。PR #3 已于 2026-10-12 由 Huginn-kio APPROVED 并合并，范围仅限静态基线；这不代表运行兼容性或 M0 阶段验收通过。
 
 ### 13.2 官方协议与接口资料
 

@@ -1,0 +1,133 @@
+name: M0 public verification
+
+on:
+  push:
+    branches:
+      - main
+      - 'codex/m0-*'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m0-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  protocol-and-build:
+    name: Protocol and Java 21 build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the locked Temurin JDK
+        run: python3 scripts/dev/download-locked-jdk.py --output "$RUNNER_TEMP/m0-temurin-jdk.tar.gz"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: jdkfile
+          java-version: '21'
+          jdk-file: ${{ runner.temp }}/m0-temurin-jdk.tar.gz
+          cache: maven
+      - name: Verify pinned protocol and descriptor
+        run: ETCD_HBASE_JDK21_HOME="$JAVA_HOME" scripts/verify/protocol.sh
+      - name: Run Java 21 reactor and public HBase probe
+        run: ETCD_HBASE_JDK21_HOME="$JAVA_HOME" scripts/dev/mvn21.sh -B -ntp -Pm0-hbase-local clean verify
+      - name: Capture effective POM
+        run: >-
+          ETCD_HBASE_JDK21_HOME="$JAVA_HOME" scripts/dev/mvn21.sh -B -ntp
+          -f server/pom.xml
+          -Doutput=.artifacts/m0/ci/effective-pom.xml
+          org.apache.maven.plugins:maven-help-plugin:3.5.2:effective-pom
+      - name: Capture server dependency tree
+        run: >-
+          ETCD_HBASE_JDK21_HOME="$JAVA_HOME" scripts/dev/mvn21.sh -B -ntp
+          -pl server -am -Dverbose
+          -DoutputFile=.artifacts/m0/ci/server-dependency-tree.txt
+          org.apache.maven.plugins:maven-dependency-plugin:3.11.0:tree
+      - name: Check repeatable Java 21 build
+        run: ETCD_HBASE_JDK21_HOME="$JAVA_HOME" python3 scripts/verify/maven-reproducible-build.py --profile m0-hbase-local
+
+  native-etcd:
+    name: Go toolchain and native etcd oracle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+          check-latest: false
+          cache: false
+      - name: Verify locked Go graph
+        run: python3 scripts/verify/go-module-lock.py
+      - name: Compare deterministic native etcd traces
+        run: scripts/verify/native-oracle.sh --artifact-root .artifacts/m0/ci/native
+
+  wire-interoperability:
+    name: Go and Java wire interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the locked Temurin JDK
+        run: python3 scripts/dev/download-locked-jdk.py --output "$RUNNER_TEMP/m0-temurin-jdk.tar.gz"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: jdkfile
+          java-version: '21'
+          jdk-file: ${{ runner.temp }}/m0-temurin-jdk.tar.gz
+          cache: maven
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+          check-latest: false
+          cache: false
+      - name: Run Go and Java protocol smoke
+        run: >-
+          ETCD_HBASE_JDK21_HOME="$JAVA_HOME" scripts/verify/wire.sh
+          --cases testkit/cases/m0-wire.json
+          --artifact-root .artifacts/m0/ci/wire
+
+  public-hbase:
+    name: Public unauthenticated HBase probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the locked Temurin JDK
+        run: python3 scripts/dev/download-locked-jdk.py --output "$RUNNER_TEMP/m0-temurin-jdk.tar.gz"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: jdkfile
+          java-version: '21'
+          jdk-file: ${{ runner.temp }}/m0-temurin-jdk.tar.gz
+          cache: maven
+      - name: Run exactly one non-skipped public HBase integration probe
+        run: ETCD_HBASE_JDK21_HOME="$JAVA_HOME" scripts/verify/hbase-probe.sh --profile public-local
+
+  runtime-image:
+    name: Packaged Java 21 runtime image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+          check-latest: false
+          cache: false
+      - name: Build and smoke the pinned non-root runtime image
+        run: scripts/verify/runtime-image.sh --artifact-root .artifacts/m0/ci/runtime-image

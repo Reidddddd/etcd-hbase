@@ -24,6 +24,7 @@ SUPPORTED_LIBRARY_ENTRIES = {
     "guava",
     "hadoop",
     "hbase",
+    "hbaseTestingUtil",
     "jackson",
     "javaxAnnotation",
     "protobuf",
@@ -235,7 +236,15 @@ def collect_artifacts(lock: dict[str, object]) -> list[Artifact]:
 
     libraries = lock.get("libraries", {})
     if isinstance(libraries, dict):
-        for name in ("hbase", "hadoop", "guava", "slf4j", "snakeYaml", "javaxAnnotation"):
+        for name in (
+            "hbase",
+            "hadoop",
+            "hbaseTestingUtil",
+            "guava",
+            "slf4j",
+            "snakeYaml",
+            "javaxAnnotation",
+        ):
             record = libraries.get(name)
             if isinstance(record, dict):
                 add_artifact(artifacts, str(record.get("coordinate", "")), record.get("sha256"))
@@ -355,7 +364,15 @@ def validate_metadata(lock: dict[str, object], root_pom: Path) -> int:
             if any(actual_version != version for actual_version in versions):
                 errors.append(f"{label} has a module override for managed version {version}: {versions}")
 
-    for name in ("hbase", "hadoop", "guava", "slf4j", "snakeYaml", "javaxAnnotation"):
+    for name in (
+        "hbase",
+        "hadoop",
+        "hbaseTestingUtil",
+        "guava",
+        "slf4j",
+        "snakeYaml",
+        "javaxAnnotation",
+    ):
         record = libraries.get(name)
         if isinstance(record, dict) and record.get("coordinate"):
             require_managed(str(record["coordinate"]), f"libraries.{name}")
