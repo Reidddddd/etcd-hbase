@@ -79,6 +79,11 @@
         <version>${slf4j.version}</version>
       </dependency>
       <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-reload4j</artifactId>
+        <version>${slf4j.version}</version>
+      </dependency>
+      <dependency>
         <groupId>org.apache.hbase</groupId>
         <artifactId>hbase-shaded-client-byo-hadoop</artifactId>
         <version>${hbase.version}</version>

@@ -1,0 +1,3056 @@
+{
+  "schema_version": 1,
+  "protocol": "etcd-v3.5.23",
+  "source_revision": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+  "descriptor_methods": [
+    {
+      "method": "etcdserverpb.Auth/AuthDisable",
+      "request_type": "etcdserverpb.AuthDisableRequest",
+      "response_type": "etcdserverpb.AuthDisableResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/AuthEnable",
+      "request_type": "etcdserverpb.AuthEnableRequest",
+      "response_type": "etcdserverpb.AuthEnableResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/AuthStatus",
+      "request_type": "etcdserverpb.AuthStatusRequest",
+      "response_type": "etcdserverpb.AuthStatusResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "enabled",
+          "number": 2,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "authRevision",
+          "number": 3,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/Authenticate",
+      "request_type": "etcdserverpb.AuthenticateRequest",
+      "response_type": "etcdserverpb.AuthenticateResponse",
+      "request_fields": [
+        {
+          "name": "name",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "password",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "token",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U09",
+        "U16"
+      ],
+      "tasks": [
+        "J04",
+        "J50",
+        "J51"
+      ],
+      "case_ids": [
+        "C29",
+        "C30"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Auth/RoleAdd",
+      "request_type": "etcdserverpb.AuthRoleAddRequest",
+      "response_type": "etcdserverpb.AuthRoleAddResponse",
+      "request_fields": [
+        {
+          "name": "name",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/RoleDelete",
+      "request_type": "etcdserverpb.AuthRoleDeleteRequest",
+      "response_type": "etcdserverpb.AuthRoleDeleteResponse",
+      "request_fields": [
+        {
+          "name": "role",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/RoleGet",
+      "request_type": "etcdserverpb.AuthRoleGetRequest",
+      "response_type": "etcdserverpb.AuthRoleGetResponse",
+      "request_fields": [
+        {
+          "name": "role",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "perm",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "authpb.Permission",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/RoleGrantPermission",
+      "request_type": "etcdserverpb.AuthRoleGrantPermissionRequest",
+      "response_type": "etcdserverpb.AuthRoleGrantPermissionResponse",
+      "request_fields": [
+        {
+          "name": "name",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "perm",
+          "number": 2,
+          "type": "message",
+          "label": "optional",
+          "type_name": "authpb.Permission",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/RoleList",
+      "request_type": "etcdserverpb.AuthRoleListRequest",
+      "response_type": "etcdserverpb.AuthRoleListResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "roles",
+          "number": 2,
+          "type": "string",
+          "label": "repeated",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/RoleRevokePermission",
+      "request_type": "etcdserverpb.AuthRoleRevokePermissionRequest",
+      "response_type": "etcdserverpb.AuthRoleRevokePermissionResponse",
+      "request_fields": [
+        {
+          "name": "role",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "key",
+          "number": 2,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "range_end",
+          "number": 3,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/UserAdd",
+      "request_type": "etcdserverpb.AuthUserAddRequest",
+      "response_type": "etcdserverpb.AuthUserAddResponse",
+      "request_fields": [
+        {
+          "name": "name",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "password",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "options",
+          "number": 3,
+          "type": "message",
+          "label": "optional",
+          "type_name": "authpb.UserAddOptions",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "hashedPassword",
+          "number": 4,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/UserChangePassword",
+      "request_type": "etcdserverpb.AuthUserChangePasswordRequest",
+      "response_type": "etcdserverpb.AuthUserChangePasswordResponse",
+      "request_fields": [
+        {
+          "name": "name",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "password",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "hashedPassword",
+          "number": 3,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/UserDelete",
+      "request_type": "etcdserverpb.AuthUserDeleteRequest",
+      "response_type": "etcdserverpb.AuthUserDeleteResponse",
+      "request_fields": [
+        {
+          "name": "name",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/UserGet",
+      "request_type": "etcdserverpb.AuthUserGetRequest",
+      "response_type": "etcdserverpb.AuthUserGetResponse",
+      "request_fields": [
+        {
+          "name": "name",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "roles",
+          "number": 2,
+          "type": "string",
+          "label": "repeated",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/UserGrantRole",
+      "request_type": "etcdserverpb.AuthUserGrantRoleRequest",
+      "response_type": "etcdserverpb.AuthUserGrantRoleResponse",
+      "request_fields": [
+        {
+          "name": "user",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "role",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/UserList",
+      "request_type": "etcdserverpb.AuthUserListRequest",
+      "response_type": "etcdserverpb.AuthUserListResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "users",
+          "number": 2,
+          "type": "string",
+          "label": "repeated",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Auth/UserRevokeRole",
+      "request_type": "etcdserverpb.AuthUserRevokeRoleRequest",
+      "response_type": "etcdserverpb.AuthUserRevokeRoleResponse",
+      "request_fields": [
+        {
+          "name": "name",
+          "number": 1,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "role",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "conditional",
+      "usage_ids": [],
+      "tasks": [
+        "J51"
+      ],
+      "case_ids": [
+        "C31"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED until B03-backed auth mapping and its permission behavior are verified; no anonymous fallback"
+    },
+    {
+      "method": "etcdserverpb.Cluster/MemberAdd",
+      "request_type": "etcdserverpb.MemberAddRequest",
+      "response_type": "etcdserverpb.MemberAddResponse",
+      "request_fields": [
+        {
+          "name": "peerURLs",
+          "number": 1,
+          "type": "string",
+          "label": "repeated",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "isLearner",
+          "number": 2,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "member",
+          "number": 2,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.Member",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "members",
+          "number": 3,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.Member",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Cluster/MemberList",
+      "request_type": "etcdserverpb.MemberListRequest",
+      "response_type": "etcdserverpb.MemberListResponse",
+      "request_fields": [
+        {
+          "name": "linearizable",
+          "number": 1,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "members",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.Member",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U16"
+      ],
+      "tasks": [
+        "J54",
+        "J67"
+      ],
+      "case_ids": [
+        "C28"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Cluster/MemberPromote",
+      "request_type": "etcdserverpb.MemberPromoteRequest",
+      "response_type": "etcdserverpb.MemberPromoteResponse",
+      "request_fields": [
+        {
+          "name": "ID",
+          "number": 1,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "members",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.Member",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Cluster/MemberRemove",
+      "request_type": "etcdserverpb.MemberRemoveRequest",
+      "response_type": "etcdserverpb.MemberRemoveResponse",
+      "request_fields": [
+        {
+          "name": "ID",
+          "number": 1,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "members",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.Member",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Cluster/MemberUpdate",
+      "request_type": "etcdserverpb.MemberUpdateRequest",
+      "response_type": "etcdserverpb.MemberUpdateResponse",
+      "request_fields": [
+        {
+          "name": "ID",
+          "number": 1,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "peerURLs",
+          "number": 2,
+          "type": "string",
+          "label": "repeated",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "members",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.Member",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.KV/Compact",
+      "request_type": "etcdserverpb.CompactionRequest",
+      "response_type": "etcdserverpb.CompactionResponse",
+      "request_fields": [
+        {
+          "name": "revision",
+          "number": 1,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "physical",
+          "number": 2,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [],
+      "tasks": [
+        "J52"
+      ],
+      "case_ids": [
+        "C14"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.KV/DeleteRange",
+      "request_type": "etcdserverpb.DeleteRangeRequest",
+      "response_type": "etcdserverpb.DeleteRangeResponse",
+      "request_fields": [
+        {
+          "name": "key",
+          "number": 1,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "range_end",
+          "number": 2,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "prev_kv",
+          "number": 3,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "deleted",
+          "number": 2,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "prev_kvs",
+          "number": 3,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "mvccpb.KeyValue",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U04",
+        "U11",
+        "U15"
+      ],
+      "tasks": [
+        "J33",
+        "J43",
+        "J44"
+      ],
+      "case_ids": [
+        "C09",
+        "C10",
+        "C18",
+        "C27"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.KV/Put",
+      "request_type": "etcdserverpb.PutRequest",
+      "response_type": "etcdserverpb.PutResponse",
+      "request_fields": [
+        {
+          "name": "key",
+          "number": 1,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "value",
+          "number": 2,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "lease",
+          "number": 3,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "prev_kv",
+          "number": 4,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "ignore_value",
+          "number": 5,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "ignore_lease",
+          "number": 6,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "prev_kv",
+          "number": 2,
+          "type": "message",
+          "label": "optional",
+          "type_name": "mvccpb.KeyValue",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U04",
+        "U05",
+        "U12",
+        "U14",
+        "U15"
+      ],
+      "tasks": [
+        "J30",
+        "J41",
+        "J66"
+      ],
+      "case_ids": [
+        "C01",
+        "C07",
+        "C08",
+        "C16",
+        "C24",
+        "C26",
+        "C27"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.KV/Range",
+      "request_type": "etcdserverpb.RangeRequest",
+      "response_type": "etcdserverpb.RangeResponse",
+      "request_fields": [
+        {
+          "name": "key",
+          "number": 1,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "range_end",
+          "number": 2,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "limit",
+          "number": 3,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "revision",
+          "number": 4,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "sort_order",
+          "number": 5,
+          "type": "enum",
+          "label": "optional",
+          "type_name": "etcdserverpb.RangeRequest.SortOrder",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "sort_target",
+          "number": 6,
+          "type": "enum",
+          "label": "optional",
+          "type_name": "etcdserverpb.RangeRequest.SortTarget",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "serializable",
+          "number": 7,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "keys_only",
+          "number": 8,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "count_only",
+          "number": 9,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "min_mod_revision",
+          "number": 10,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "max_mod_revision",
+          "number": 11,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "min_create_revision",
+          "number": 12,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "max_create_revision",
+          "number": 13,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "kvs",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "mvccpb.KeyValue",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "more",
+          "number": 3,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "count",
+          "number": 4,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U01",
+        "U02",
+        "U03",
+        "U05",
+        "U07",
+        "U08",
+        "U09",
+        "U10",
+        "U13",
+        "U14",
+        "U15",
+        "U16"
+      ],
+      "tasks": [
+        "J14",
+        "J15",
+        "J25",
+        "J34",
+        "J35",
+        "J36",
+        "J63"
+      ],
+      "case_ids": [
+        "C01",
+        "C02",
+        "C03",
+        "C04",
+        "C05",
+        "C06",
+        "C23",
+        "C26",
+        "C27",
+        "C28"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.KV/Txn",
+      "request_type": "etcdserverpb.TxnRequest",
+      "response_type": "etcdserverpb.TxnResponse",
+      "request_fields": [
+        {
+          "name": "compare",
+          "number": 1,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.Compare",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "success",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.RequestOp",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "failure",
+          "number": 3,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.RequestOp",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "succeeded",
+          "number": 2,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "responses",
+          "number": 3,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.ResponseOp",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U04",
+        "U05",
+        "U12",
+        "U13"
+      ],
+      "tasks": [
+        "J31",
+        "J32",
+        "J41",
+        "J43",
+        "J44"
+      ],
+      "case_ids": [
+        "C11",
+        "C12",
+        "C13",
+        "C16",
+        "C24",
+        "C25"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Lease/LeaseGrant",
+      "request_type": "etcdserverpb.LeaseGrantRequest",
+      "response_type": "etcdserverpb.LeaseGrantResponse",
+      "request_fields": [
+        {
+          "name": "TTL",
+          "number": 1,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "ID",
+          "number": 2,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "ID",
+          "number": 2,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "TTL",
+          "number": 3,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "error",
+          "number": 4,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U05"
+      ],
+      "tasks": [
+        "J40"
+      ],
+      "case_ids": [
+        "C08",
+        "C15",
+        "C16"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Lease/LeaseKeepAlive",
+      "request_type": "etcdserverpb.LeaseKeepAliveRequest",
+      "response_type": "etcdserverpb.LeaseKeepAliveResponse",
+      "request_fields": [
+        {
+          "name": "ID",
+          "number": 1,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "ID",
+          "number": 2,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "TTL",
+          "number": 3,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": true,
+      "server_streaming": true,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U06"
+      ],
+      "tasks": [
+        "J42"
+      ],
+      "case_ids": [
+        "C17"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Lease/LeaseLeases",
+      "request_type": "etcdserverpb.LeaseLeasesRequest",
+      "response_type": "etcdserverpb.LeaseLeasesResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "leases",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.LeaseStatus",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [],
+      "tasks": [
+        "J40"
+      ],
+      "case_ids": [
+        "C15"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Lease/LeaseRevoke",
+      "request_type": "etcdserverpb.LeaseRevokeRequest",
+      "response_type": "etcdserverpb.LeaseRevokeResponse",
+      "request_fields": [
+        {
+          "name": "ID",
+          "number": 1,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U06"
+      ],
+      "tasks": [
+        "J41",
+        "J43"
+      ],
+      "case_ids": [
+        "C18"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Lease/LeaseTimeToLive",
+      "request_type": "etcdserverpb.LeaseTimeToLiveRequest",
+      "response_type": "etcdserverpb.LeaseTimeToLiveResponse",
+      "request_fields": [
+        {
+          "name": "ID",
+          "number": 1,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "keys",
+          "number": 2,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "ID",
+          "number": 2,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "TTL",
+          "number": 3,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "grantedTTL",
+          "number": 4,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "keys",
+          "number": 5,
+          "type": "bytes",
+          "label": "repeated",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U06"
+      ],
+      "tasks": [
+        "J40"
+      ],
+      "case_ids": [
+        "C15",
+        "C18"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Maintenance/Alarm",
+      "request_type": "etcdserverpb.AlarmRequest",
+      "response_type": "etcdserverpb.AlarmResponse",
+      "request_fields": [
+        {
+          "name": "action",
+          "number": 1,
+          "type": "enum",
+          "label": "optional",
+          "type_name": "etcdserverpb.AlarmRequest.AlarmAction",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "memberID",
+          "number": 2,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "alarm",
+          "number": 3,
+          "type": "enum",
+          "label": "optional",
+          "type_name": "etcdserverpb.AlarmType",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "alarms",
+          "number": 2,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "etcdserverpb.AlarmMember",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "mixed",
+      "usage_ids": [
+        "U16"
+      ],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C28",
+        "C32"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Alarm GET is a future supported query; ACTIVATE and DEACTIVATE return UNIMPLEMENTED unless explicitly mapped"
+    },
+    {
+      "method": "etcdserverpb.Maintenance/Defragment",
+      "request_type": "etcdserverpb.DefragmentRequest",
+      "response_type": "etcdserverpb.DefragmentResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Maintenance/Downgrade",
+      "request_type": "etcdserverpb.DowngradeRequest",
+      "response_type": "etcdserverpb.DowngradeResponse",
+      "request_fields": [
+        {
+          "name": "action",
+          "number": 1,
+          "type": "enum",
+          "label": "optional",
+          "type_name": "etcdserverpb.DowngradeRequest.DowngradeAction",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "version",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "version",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Maintenance/Hash",
+      "request_type": "etcdserverpb.HashRequest",
+      "response_type": "etcdserverpb.HashResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "hash",
+          "number": 2,
+          "type": "uint32",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Maintenance/HashKV",
+      "request_type": "etcdserverpb.HashKVRequest",
+      "response_type": "etcdserverpb.HashKVResponse",
+      "request_fields": [
+        {
+          "name": "revision",
+          "number": 1,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "hash",
+          "number": 2,
+          "type": "uint32",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "compact_revision",
+          "number": 3,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Maintenance/MoveLeader",
+      "request_type": "etcdserverpb.MoveLeaderRequest",
+      "response_type": "etcdserverpb.MoveLeaderResponse",
+      "request_fields": [
+        {
+          "name": "targetID",
+          "number": 1,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Maintenance/Snapshot",
+      "request_type": "etcdserverpb.SnapshotRequest",
+      "response_type": "etcdserverpb.SnapshotResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "remaining_bytes",
+          "number": 2,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "blob",
+          "number": 3,
+          "type": "bytes",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": true,
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED in the first release"
+    },
+    {
+      "method": "etcdserverpb.Maintenance/Status",
+      "request_type": "etcdserverpb.StatusRequest",
+      "response_type": "etcdserverpb.StatusResponse",
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "version",
+          "number": 2,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "dbSize",
+          "number": 3,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "leader",
+          "number": 4,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "raftIndex",
+          "number": 5,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "raftTerm",
+          "number": 6,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "raftAppliedIndex",
+          "number": 7,
+          "type": "uint64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "errors",
+          "number": 8,
+          "type": "string",
+          "label": "repeated",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "dbSizeInUse",
+          "number": 9,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "isLearner",
+          "number": 10,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": false,
+      "server_streaming": false,
+      "first_release_disposition": "supported",
+      "usage_ids": [],
+      "tasks": [
+        "J54",
+        "J67"
+      ],
+      "case_ids": [
+        "C32"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    },
+    {
+      "method": "etcdserverpb.Watch/Watch",
+      "request_type": "etcdserverpb.WatchRequest",
+      "response_type": "etcdserverpb.WatchResponse",
+      "request_fields": [
+        {
+          "name": "create_request",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.WatchCreateRequest",
+          "oneof": "request_union",
+          "proto3_optional": false
+        },
+        {
+          "name": "cancel_request",
+          "number": 2,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.WatchCancelRequest",
+          "oneof": "request_union",
+          "proto3_optional": false
+        },
+        {
+          "name": "progress_request",
+          "number": 3,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.WatchProgressRequest",
+          "oneof": "request_union",
+          "proto3_optional": false
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "header",
+          "number": 1,
+          "type": "message",
+          "label": "optional",
+          "type_name": "etcdserverpb.ResponseHeader",
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "watch_id",
+          "number": 2,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "created",
+          "number": 3,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "canceled",
+          "number": 4,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "compact_revision",
+          "number": 5,
+          "type": "int64",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "cancel_reason",
+          "number": 6,
+          "type": "string",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "fragment",
+          "number": 7,
+          "type": "bool",
+          "label": "optional",
+          "type_name": null,
+          "oneof": null,
+          "proto3_optional": false
+        },
+        {
+          "name": "events",
+          "number": 11,
+          "type": "message",
+          "label": "repeated",
+          "type_name": "mvccpb.Event",
+          "oneof": null,
+          "proto3_optional": false
+        }
+      ],
+      "client_streaming": true,
+      "server_streaming": true,
+      "first_release_disposition": "supported",
+      "usage_ids": [
+        "U07",
+        "U08",
+        "U13"
+      ],
+      "tasks": [
+        "J44",
+        "J45",
+        "J46",
+        "J47"
+      ],
+      "case_ids": [
+        "C19",
+        "C20",
+        "C21",
+        "C22"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "Return the etcd v3.5.23-defined error/status for invalid input, missing state, deadline, cancellation, and backend failure; M0 skeleton returns UNIMPLEMENTED"
+    }
+  ],
+  "additional_methods": [
+    {
+      "method": "v3lockpb.Lock/Lock",
+      "source_revision": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+      "source_path": "server/etcdserver/api/v3lock/v3lockpb/v3lock.proto",
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED; the public v3 API descriptor does not include this server-side service",
+      "request_type": "external",
+      "response_type": "external",
+      "request_fields": [],
+      "response_fields": [],
+      "client_streaming": false,
+      "server_streaming": false
+    },
+    {
+      "method": "v3lockpb.Lock/Unlock",
+      "source_revision": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+      "source_path": "server/etcdserver/api/v3lock/v3lockpb/v3lock.proto",
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED; the public v3 API descriptor does not include this server-side service",
+      "request_type": "external",
+      "response_type": "external",
+      "request_fields": [],
+      "response_fields": [],
+      "client_streaming": false,
+      "server_streaming": false
+    },
+    {
+      "method": "v3electionpb.Election/Campaign",
+      "source_revision": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+      "source_path": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED; the public v3 API descriptor does not include this server-side service",
+      "request_type": "external",
+      "response_type": "external",
+      "request_fields": [],
+      "response_fields": [],
+      "client_streaming": false,
+      "server_streaming": false
+    },
+    {
+      "method": "v3electionpb.Election/Proclaim",
+      "source_revision": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+      "source_path": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED; the public v3 API descriptor does not include this server-side service",
+      "request_type": "external",
+      "response_type": "external",
+      "request_fields": [],
+      "response_fields": [],
+      "client_streaming": false,
+      "server_streaming": false
+    },
+    {
+      "method": "v3electionpb.Election/Leader",
+      "source_revision": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+      "source_path": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED; the public v3 API descriptor does not include this server-side service",
+      "request_type": "external",
+      "response_type": "external",
+      "request_fields": [],
+      "response_fields": [],
+      "client_streaming": false,
+      "server_streaming": false
+    },
+    {
+      "method": "v3electionpb.Election/Observe",
+      "source_revision": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+      "source_path": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED; the public v3 API descriptor does not include this server-side service",
+      "request_type": "external",
+      "response_type": "external",
+      "request_fields": [],
+      "response_fields": [],
+      "client_streaming": true,
+      "server_streaming": true
+    },
+    {
+      "method": "v3electionpb.Election/Resign",
+      "source_revision": "1cf4bc40111fd95d1e14a90a09a146357b15eb13",
+      "source_path": "server/etcdserver/api/v3election/v3electionpb/v3election.proto",
+      "first_release_disposition": "unsupported",
+      "usage_ids": [],
+      "tasks": [
+        "J54"
+      ],
+      "case_ids": [
+        "C33"
+      ],
+      "m0_behavior": "UNIMPLEMENTED",
+      "error_policy": "UNIMPLEMENTED; the public v3 API descriptor does not include this server-side service",
+      "request_type": "external",
+      "response_type": "external",
+      "request_fields": [],
+      "response_fields": [],
+      "client_streaming": false,
+      "server_streaming": false
+    }
+  ],
+  "cases": [
+    {
+      "id": "C01",
+      "description": "空/存在/更新 key、bytes、0xff/零字节、不存在与后端失败；准确元数据",
+      "usage_ids": [
+        "U01",
+        "U04"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Put",
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C02",
+      "description": "深层 Prefix、相邻前缀、FromKey/全 key 范围、空桶和无 Limit 完整响应；跨桶相同 ReadView",
+      "usage_ids": [
+        "U01",
+        "U07",
+        "U08",
+        "U09",
+        "U10",
+        "U13",
+        "U15"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C03",
+      "description": "升/降序 L=1、边界页、L+1、墓碑/过滤、下一页起点；本页 Count、More 正确，不默认 N×L 预取",
+      "usage_ids": [
+        "U02"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C04",
+      "description": "精确 CountOnly 的存在/不存在、Kvs 空、失败不为零",
+      "usage_ids": [
+        "U03",
+        "U05"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C05",
+      "description": "Prefix CountOnly+Limit=1 的 0/1/多个匹配；Count 豁免但单独对照 More；其他范围 CountOnly 明确拒绝",
+      "usage_ids": [
+        "U03"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C06",
+      "description": "历史读取、删除/重建、KeysOnly、四项 revision 过滤边界、压缩/未来 revision、预算错误",
+      "usage_ids": [
+        "U01"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C07",
+      "description": "Put 创建/更新/PrevKV；Version/Create/ModRevision；ignore 标志的明示支持或拒绝",
+      "usage_ids": [
+        "U04",
+        "U05",
+        "U12",
+        "U14",
+        "U15"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Put"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C08",
+      "description": "有效/未知 Lease、lease=0、A→B 换绑；原子可见性",
+      "usage_ids": [
+        "U05",
+        "U06"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Put",
+        "etcdserverpb.Lease/LeaseGrant"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C09",
+      "description": "点删/不存在点删、真实 deleted/PrevKvs、重复删除与真实事件",
+      "usage_ids": [
+        "U04",
+        "U11",
+        "U15"
+      ],
+      "methods": [
+        "etcdserverpb.KV/DeleteRange"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C10",
+      "description": "跨桶区间删除、大计划、准备失败与取消，不能部分成功",
+      "usage_ids": [
+        "U04",
+        "U11"
+      ],
+      "methods": [
+        "etcdserverpb.KV/DeleteRange"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C11",
+      "description": "多 key Compare、Then/Else、读取/修改混合、纯读、失败分支、一次 revision、响应顺序",
+      "usage_ids": [
+        "U04",
+        "U05",
+        "U12",
+        "U13"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Txn"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C12",
+      "description": "五种 compare 目标/四种结果、缺失 key、空范围和边界；CDC 迟到删除不删新版本",
+      "usage_ids": [
+        "U04",
+        "U05",
+        "U13"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Txn"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C13",
+      "description": "nested/重复/重叠读写操作组合，原生接受或拒绝及原子可见性",
+      "usage_ids": [],
+      "methods": [
+        "etcdserverpb.KV/Txn"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C14",
+      "description": "Compact 边界、physical 请求、活跃读/Watcher/GC 竞争、真实压缩错误",
+      "usage_ids": [],
+      "methods": [
+        "etcdserverpb.KV/Compact"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C15",
+      "description": "Grant 自动/显式 ID、TTL、碰撞、TTL keys、LeaseLeases、到期/不存在",
+      "usage_ids": [
+        "U05",
+        "U06"
+      ],
+      "methods": [
+        "etcdserverpb.Lease/LeaseGrant",
+        "etcdserverpb.Lease/LeaseLeases",
+        "etcdserverpb.Lease/LeaseTimeToLive"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C16",
+      "description": "主体/三个角色同 Lease 与不带 Lease 的 version key 单事务，CAS false/部分准备失败",
+      "usage_ids": [
+        "U05",
+        "U12"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Put",
+        "etcdserverpb.KV/Txn",
+        "etcdserverpb.Lease/LeaseGrant"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C17",
+      "description": "KeepAlive 多 ID、TTL/3、已承诺续租后的切换和重连；不增加 KV revision/事件",
+      "usage_ids": [
+        "U06"
+      ],
+      "methods": [
+        "etcdserverpb.Lease/LeaseKeepAlive"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C18",
+      "description": "到期/Revoke 与续租/换绑/重建竞争；TTL<=0/lease sentinel 的真实消费者",
+      "usage_ids": [
+        "U06"
+      ],
+      "methods": [
+        "etcdserverpb.KV/DeleteRange",
+        "etcdserverpb.Lease/LeaseRevoke",
+        "etcdserverpb.Lease/LeaseTimeToLive"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C19",
+      "description": "Watch 创建/cancel、多个 ID、重复 ID、精确/Prefix/FromKey；client 识别 created",
+      "usage_ids": [
+        "U07",
+        "U08",
+        "U13"
+      ],
+      "methods": [
+        "etcdserverpb.Watch/Watch"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C20",
+      "description": "Get R→Watch R+1 与直接 Watch R 均按 inclusive 请求执行，交接期间写入无遗漏",
+      "usage_ids": [
+        "U07",
+        "U08",
+        "U13"
+      ],
+      "methods": [
+        "etcdserverpb.Watch/Watch"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C21",
+      "description": "progress、filter、完整 revision/fragment、慢消费、断流/取消/重连与客户端重组",
+      "usage_ids": [
+        "U07",
+        "U08",
+        "U13"
+      ],
+      "methods": [
+        "etcdserverpb.Watch/Watch"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C22",
+      "description": "DELETE PrevKV、compact_revision、token 错误→列表重建/rewatch；无幽灵 session",
+      "usage_ids": [
+        "U07",
+        "U08",
+        "U13"
+      ],
+      "methods": [
+        "etcdserverpb.Watch/Watch"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C23",
+      "description": "5 秒 Serializable 配置轮询与线性化写后刷新，错误不清空配置，身份/视图缓存隔离",
+      "usage_ids": [
+        "U08",
+        "U09"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C24",
+      "description": "子元数据写成功→salvage checkpoint→consume checkpoint，逐步失败/重启仍保序",
+      "usage_ids": [
+        "U12"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Put",
+        "etcdserverpb.KV/Txn"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C25",
+      "description": "CDC 列表/事件/revision、MOD 条件删除和重复/迟到任务",
+      "usage_ids": [
+        "U13"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Txn"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C26",
+      "description": "TSO/ID 高水位读取后端失败的真实错误链；修复调用方或验证隔离方案后证明不回退初始化",
+      "usage_ids": [
+        "U14"
+      ],
+      "methods": [
+        "etcdserverpb.KV/Put",
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C27",
+      "description": "全局 Telemetry 前缀和 point key、root 前缀外 key；失败消费与 best-effort 删除记录",
+      "usage_ids": [
+        "U15"
+      ],
+      "methods": [
+        "etcdserverpb.KV/DeleteRange",
+        "etcdserverpb.KV/Put",
+        "etcdserverpb.KV/Range"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C28",
+      "description": "MemberList 非空可达 ClientURLs→health Get→Alarm GET，全副本及失败路径",
+      "usage_ids": [
+        "U16"
+      ],
+      "methods": [
+        "etcdserverpb.Cluster/MemberList",
+        "etcdserverpb.KV/Range",
+        "etcdserverpb.Maintenance/Alarm"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C29",
+      "description": "Authenticate 实际身份/权限/TLS→token→后续 RPC，密码不入输出",
+      "usage_ids": [
+        "U09",
+        "U16"
+      ],
+      "methods": [
+        "etcdserverpb.Auth/Authenticate"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C30",
+      "description": "A 登录 B 请求、全 Pod 重建、token 刷新/后端身份失效/轮换及后台任务接管",
+      "usage_ids": [
+        "U09",
+        "U16"
+      ],
+      "methods": [
+        "etcdserverpb.Auth/Authenticate"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C31",
+      "description": "每项 Auth 管理 RPC 的真实映射或明确拒绝，输入字段与错误客户端可识别",
+      "usage_ids": [],
+      "methods": [
+        "etcdserverpb.Auth/AuthDisable",
+        "etcdserverpb.Auth/AuthEnable",
+        "etcdserverpb.Auth/AuthStatus",
+        "etcdserverpb.Auth/RoleAdd",
+        "etcdserverpb.Auth/RoleDelete",
+        "etcdserverpb.Auth/RoleGet",
+        "etcdserverpb.Auth/RoleGrantPermission",
+        "etcdserverpb.Auth/RoleList",
+        "etcdserverpb.Auth/RoleRevokePermission",
+        "etcdserverpb.Auth/UserAdd",
+        "etcdserverpb.Auth/UserChangePassword",
+        "etcdserverpb.Auth/UserDelete",
+        "etcdserverpb.Auth/UserGet",
+        "etcdserverpb.Auth/UserGrantRole",
+        "etcdserverpb.Auth/UserList",
+        "etcdserverpb.Auth/UserRevokeRole"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C32",
+      "description": "Status 与 Alarm 每字段真实来源/投影、适用预算及负向请求",
+      "usage_ids": [
+        "U16"
+      ],
+      "methods": [
+        "etcdserverpb.Maintenance/Alarm",
+        "etcdserverpb.Maintenance/Status"
+      ],
+      "verification_state": "planned"
+    },
+    {
+      "id": "C33",
+      "description": "全部已明确不支持的 Cluster/Maintenance/Lock/Election 方法，无伪成功；M0 未实现方法亦明确失败",
+      "usage_ids": [],
+      "methods": [
+        "etcdserverpb.Cluster/MemberAdd",
+        "etcdserverpb.Cluster/MemberPromote",
+        "etcdserverpb.Cluster/MemberRemove",
+        "etcdserverpb.Cluster/MemberUpdate",
+        "etcdserverpb.Maintenance/Defragment",
+        "etcdserverpb.Maintenance/Downgrade",
+        "etcdserverpb.Maintenance/Hash",
+        "etcdserverpb.Maintenance/HashKV",
+        "etcdserverpb.Maintenance/MoveLeader",
+        "etcdserverpb.Maintenance/Snapshot",
+        "v3electionpb.Election/Campaign",
+        "v3electionpb.Election/Leader",
+        "v3electionpb.Election/Observe",
+        "v3electionpb.Election/Proclaim",
+        "v3electionpb.Election/Resign",
+        "v3lockpb.Lock/Lock",
+        "v3lockpb.Lock/Unlock"
+      ],
+      "verification_state": "planned"
+    }
+  ]
+}

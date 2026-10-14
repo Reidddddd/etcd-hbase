@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "etcd-hbase server runtime configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "listeners",
+    "hbase_profiles",
+    "salt_profiles",
+    "table_groups",
+    "resources"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "listeners": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Listener" }
+    },
+    "hbase_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/HBaseProfile" }
+    },
+    "salt_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/SaltProfile" }
+    },
+    "table_groups": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/TableGroup" }
+    },
+    "resources": { "$ref": "#/$defs/ResourceBudgets" }
+  },
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z][A-Za-z0-9._-]*$"
+    },
+    "Listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "bind_host", "port", "table_group_id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Identifier" },
+        "bind_host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "not": { "const": "*" }
+        },
+        "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "table_group_id": { "$ref": "#/$defs/Identifier" }
+      }
+    },
+    "HBaseProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "quorum", "client_port", "namespace", "authentication_mode"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Identifier" },
+        "quorum": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "client_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "namespace": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "authentication_mode": { "$ref": "#/$defs/AuthenticationMode" },
+        "credential_reference": {
+          "type": "string",
+          "pattern": "^(env://[A-Za-z_][A-Za-z0-9_]*|secret://[A-Za-z0-9][A-Za-z0-9._/-]{0,127})$",
+          "not": { "pattern": "\\.\\./|/\\.\\.$" }
+        }
+      },
+      "oneOf": [
+        {
+          "properties": { "authentication_mode": { "const": "DEV_NO_AUTH" } },
+          "not": { "required": ["credential_reference"] }
+        },
+        {
+          "properties": { "authentication_mode": { "const": "CREDENTIAL_REFERENCE" } },
+          "required": ["credential_reference"]
+        }
+      ]
+    },
+    "SaltProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "strategy_id",
+        "encoding_version",
+        "bucket_count",
+        "salt_width_bytes",
+        "split_keys_hex"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Identifier" },
+        "strategy_id": { "$ref": "#/$defs/Identifier" },
+        "encoding_version": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "bucket_count": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "salt_width_bytes": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "split_keys_hex": {
+          "type": "array",
+          "maxItems": 2147483646,
+          "items": { "type": "string", "pattern": "^[A-Fa-f0-9]+$" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "salt_width_bytes": { "const": 1 } }, "required": ["salt_width_bytes"] },
+          "then": { "properties": { "bucket_count": { "maximum": 256 } } }
+        },
+        {
+          "if": { "properties": { "salt_width_bytes": { "const": 2 } }, "required": ["salt_width_bytes"] },
+          "then": { "properties": { "bucket_count": { "maximum": 65536 } } }
+        },
+        {
+          "if": { "properties": { "salt_width_bytes": { "const": 3 } }, "required": ["salt_width_bytes"] },
+          "then": { "properties": { "bucket_count": { "maximum": 16777216 } } }
+        }
+      ]
+    },
+    "TableGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "hbase_profile_id",
+        "salt_profile_id",
+        "identity_provider_id",
+        "history_layout",
+        "system_table",
+        "history_candidates"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Identifier" },
+        "schema_version": { "type": "integer", "const": 1 },
+        "hbase_profile_id": { "$ref": "#/$defs/Identifier" },
+        "salt_profile_id": { "$ref": "#/$defs/Identifier" },
+        "identity_provider_id": { "$ref": "#/$defs/Identifier" },
+        "history_layout": { "$ref": "#/$defs/HistoryLayout" },
+        "system_table": { "$ref": "#/$defs/TableSchemaCandidate" },
+        "history_candidates": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/HistoryLayoutCandidate" }
+        }
+      }
+    },
+    "TableSchemaCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "table_name",
+        "schema_version",
+        "profile_version",
+        "column_families",
+        "split_keys_hex",
+        "record_categories",
+        "identity_permissions"
+      ],
+      "properties": {
+        "table_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+        },
+        "schema_version": { "type": "integer", "const": 1 },
+        "profile_version": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "column_families": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/ColumnFamilySchema" }
+        },
+        "split_keys_hex": {
+          "type": "array",
+          "maxItems": 2147483646,
+          "items": { "type": "string", "pattern": "^[A-Fa-f0-9]+$" }
+        },
+        "record_categories": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/RecordCategory" }
+        },
+        "identity_permissions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/IdentityPermission" }
+        }
+      }
+    },
+    "HistoryLayoutCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["history_layout", "tables"],
+      "properties": {
+        "history_layout": {
+          "$ref": "#/$defs/HistoryLayout",
+          "not": { "const": "UNDECIDED" }
+        },
+        "tables": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/TableSchemaCandidate" }
+        }
+      }
+    },
+    "IdentityPermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity_ref", "permissions"],
+      "properties": {
+        "identity_ref": { "$ref": "#/$defs/Identifier" },
+        "permissions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/TablePermission" }
+        }
+      }
+    },
+    "ColumnFamilySchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "min_versions", "max_versions", "ttl_seconds", "keep_deleted_cells"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$" },
+        "min_versions": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "max_versions": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "ttl_seconds": {
+          "type": "integer",
+          "oneOf": [{ "const": -1 }, { "minimum": 1, "maximum": 2147483647 }]
+        },
+        "keep_deleted_cells": { "$ref": "#/$defs/KeepDeletedCells" }
+      }
+    },
+    "ResourceBudgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_config_bytes",
+        "max_concurrent_requests",
+        "max_scanners_per_table",
+        "request_deadline_ms",
+        "max_rpc_bytes",
+        "max_request_bytes",
+        "max_queued_requests"
+      ],
+      "properties": {
+        "max_config_bytes": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "max_concurrent_requests": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "max_scanners_per_table": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "request_deadline_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
+        "max_rpc_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "max_request_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "max_queued_requests": { "type": "integer", "minimum": 1, "maximum": 100000 }
+      }
+    },
+    "AuthenticationMode": { "type": "string", "enum": ["DEV_NO_AUTH", "CREDENTIAL_REFERENCE"] },
+    "HistoryLayout": {
+      "type": "string",
+      "enum": ["UNDECIDED", "SEPARATE_HISTORY_TABLE", "NATIVE_CELL_VERSIONS"]
+    },
+    "KeepDeletedCells": { "type": "string", "enum": ["FALSE", "TRUE", "TTL"] },
+    "RecordCategory": {
+      "type": "string",
+      "enum": ["CURRENT", "HISTORY", "DECISION", "EVENT", "LEASE", "AUTH", "CONTROL"]
+    },
+    "TablePermission": { "type": "string", "enum": ["READ", "WRITE", "CREATE", "ADMIN"] }
+  }
+}
