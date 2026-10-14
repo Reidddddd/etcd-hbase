@@ -1,0 +1,108 @@
+# Disposable loopback-only profile. It does not describe target or production settings.
+# Public prototype candidates only; table names and family settings remain subject to target inputs
+# and the history-layout prototype. In this schema ttl_seconds: -1 means no expiry and must be
+# translated by the HBase adapter to the pinned client’s unlimited-TTL value.
+schema_version: 1
+listeners:
+  - id: local-etcd
+    bind_host: 127.0.0.1
+    port: 0
+    table_group_id: local
+hbase_profiles:
+  - id: local-hbase
+    quorum: 127.0.0.1
+    client_port: 2181
+    namespace: etcd_candidate
+    authentication_mode: DEV_NO_AUTH
+salt_profiles:
+  - id: crc32-sixteen-buckets
+    strategy_id: crc32-bucket-v1
+    encoding_version: 1
+    bucket_count: 16
+    salt_width_bytes: 2
+    split_keys_hex: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "000a", "000b", "000c", "000d", "000e", "000f"]
+table_groups:
+  - id: local
+    schema_version: 1
+    hbase_profile_id: local-hbase
+    salt_profile_id: crc32-sixteen-buckets
+    identity_provider_id: dev-no-auth
+    history_layout: UNDECIDED
+    system_table:
+      table_name: system
+      schema_version: 1
+      profile_version: 1
+      column_families:
+        - name: s
+          min_versions: 0
+          max_versions: 1
+          ttl_seconds: -1
+          keep_deleted_cells: "FALSE"
+      split_keys_hex: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "000a", "000b", "000c", "000d", "000e", "000f"]
+      record_categories: [DECISION, EVENT, LEASE, AUTH, CONTROL]
+      identity_permissions:
+        - identity_ref: runtime
+          permissions: [READ, WRITE]
+        - identity_ref: initializer
+          permissions: [READ, WRITE, CREATE, ADMIN]
+    history_candidates:
+      - history_layout: SEPARATE_HISTORY_TABLE
+        tables:
+          - table_name: latest
+            schema_version: 1
+            profile_version: 1
+            record_categories: [CURRENT]
+            split_keys_hex: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "000a", "000b", "000c", "000d", "000e", "000f"]
+            identity_permissions:
+              - identity_ref: runtime
+                permissions: [READ, WRITE]
+              - identity_ref: initializer
+                permissions: [READ, WRITE, CREATE, ADMIN]
+            column_families:
+              - name: d
+                min_versions: 0
+                max_versions: 1
+                ttl_seconds: -1
+                keep_deleted_cells: "FALSE"
+          - table_name: history
+            schema_version: 1
+            profile_version: 1
+            record_categories: [HISTORY]
+            split_keys_hex: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "000a", "000b", "000c", "000d", "000e", "000f"]
+            identity_permissions:
+              - identity_ref: runtime
+                permissions: [READ, WRITE]
+              - identity_ref: initializer
+                permissions: [READ, WRITE, CREATE, ADMIN]
+            column_families:
+              - name: h
+                min_versions: 0
+                max_versions: 1
+                ttl_seconds: -1
+                keep_deleted_cells: "TRUE"
+      - history_layout: NATIVE_CELL_VERSIONS
+        tables:
+          - table_name: kv
+            schema_version: 1
+            profile_version: 1
+            record_categories: [CURRENT, HISTORY]
+            split_keys_hex: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "000a", "000b", "000c", "000d", "000e", "000f"]
+            identity_permissions:
+              - identity_ref: runtime
+                permissions: [READ, WRITE]
+              - identity_ref: initializer
+                permissions: [READ, WRITE, CREATE, ADMIN]
+            column_families:
+              - name: d
+                min_versions: 0
+                max_versions: 64
+                ttl_seconds: -1
+                keep_deleted_cells: "TRUE"
+resources:
+  max_config_bytes: 65536
+  max_concurrent_requests: 100
+  max_scanners_per_table: 32
+  request_deadline_ms: 5000
+  max_rpc_bytes: 4194304
+  max_request_bytes: 4194304
+  max_queued_requests: 1024
