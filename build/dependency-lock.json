@@ -36,6 +36,13 @@
       "sha256": "a15977e3457ff8cd803c1a37e1e53aad76e4609cd23bbca8e8f783e5c78e5fa8",
       "reason": "Pin cleanup lifecycle behavior."
     },
+    "maven-install-plugin": {
+      "version": "3.2.0",
+      "coordinate": "org.apache.maven.plugins:maven-install-plugin:3.2.0",
+      "repository": "https://repo.maven.apache.org/maven2",
+      "sha256": "6fd9d26eb6f473d123f6138bf54d5bae80466a84dab95ab5017590c010621e35",
+      "reason": "Install reactor JARs into the isolated repository used by the packaged runtime classpath."
+    },
     "maven-resources-plugin": {
       "version": "3.5.0",
       "coordinate": "org.apache.maven.plugins:maven-resources-plugin:3.5.0",
@@ -77,6 +84,13 @@
       "repository": "https://repo.maven.apache.org/maven2",
       "sha256": "e37a8fc9ff47435cc6bda257a4501cf79626c8115610ba33c77775ce23b4c3b7",
       "reason": "Generate dependency trees for review and convergence evidence."
+    },
+    "maven-help-plugin": {
+      "version": "3.5.2",
+      "coordinate": "org.apache.maven.plugins:maven-help-plugin:3.5.2",
+      "repository": "https://repo.maven.apache.org/maven2",
+      "sha256": "fe53082c6c51b9b4778f4dfe3e9810c18e995c34b0780c30b73fb2a156c90c03",
+      "reason": "Pin effective POM evidence generation."
     },
     "maven-enforcer-plugin": {
       "version": "3.6.3",
@@ -121,6 +135,12 @@
       "sha256": "3558022661e66eddf741316994da9b4188ab012626da7114dc4ade8dd996460d",
       "reason": "Public Hadoop 3 compile candidate only; Java 21 runtime support is not established by the HBase support matrix."
     },
+    "hbaseTestingUtil": {
+      "coordinate": "org.apache.hbase:hbase-testing-util:2.6.6-hadoop3",
+      "repository": "https://repo.maven.apache.org/maven2",
+      "sha256": "09a0c44d7ab947cfab98bdab49ffd5cbc2b82e589afca164f1af1d07a84c8eaa",
+      "reason": "Run public, unauthenticated HBase integration probes against an isolated temporary cluster."
+    },
     "hadoop": {
       "coordinate": "org.apache.hadoop:hadoop-common:3.4.3",
       "repository": "https://repo.maven.apache.org/maven2",
@@ -159,6 +179,11 @@
       "coordinate": "org.slf4j:slf4j-api:2.0.20",
       "repository": "https://repo.maven.apache.org/maven2",
       "sha256": "7e1446499b359675d8aabe6af2de86b85e72ae8a2a932c0b40d0e5ba57097439",
+      "reload4jBinding": {
+        "coordinate": "org.slf4j:slf4j-reload4j:2.0.20",
+        "repository": "https://repo.maven.apache.org/maven2",
+        "sha256": "194277130731fe0ef2a7237759f31a71dc62c116aa4fce26effeb371576ee85b"
+      },
       "reason": "Public logging API; no credentials or key material may be logged."
     },
     "convergenceOverrides": {
@@ -254,8 +279,20 @@
   },
   "go": {
     "version": "1.27.2",
+    "goDirectiveVersion": "1.26.6",
     "moduleVersions": {
-      "go.etcd.io/etcd/client/v3": "v3.5.23"
+      "github.com/gogo/protobuf": "v1.3.2",
+      "go.etcd.io/etcd/api/v3": "v3.5.23",
+      "go.etcd.io/etcd/client/pkg/v3": "v3.5.23",
+      "go.etcd.io/etcd/client/v3": "v3.5.23",
+      "google.golang.org/grpc": "v1.79.3",
+      "google.golang.org/protobuf": "v1.36.10",
+      "go.etcd.io/bbolt": "v1.3.12",
+      "go.etcd.io/etcd/client/v2": "v2.305.23",
+      "go.etcd.io/etcd/pkg/v3": "v3.5.23",
+      "go.etcd.io/etcd/raft/v3": "v3.5.23",
+      "go.etcd.io/etcd/server/v3": "v3.5.23",
+      "sigs.k8s.io/yaml": "v1.2.0"
     },
     "source": "https://go.dev/doc/devel/release",
     "archives": {
@@ -269,13 +306,57 @@
       },
       "windows-x64": {
         "url": "https://go.dev/dl/go1.27.2.windows-amd64.zip",
-      "sha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f"
+        "sha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f"
       }
     },
     "moduleChecksums": {
+      "github.com/gogo/protobuf@v1.3.2": {
+        "module": "h1:Ov1cvc58UF3b5XjBnZv7+opcTcQFZebYjWzi34vdm4Q=",
+        "goMod": "h1:P1XiOD3dCwIKUDQYPy72D8LYyHL2YPYrpS2s69NZV8Q="
+      },
+      "go.etcd.io/etcd/api/v3@v3.5.23": {
+        "module": "h1:tQi/RaO6peOhmf0c11miU3RQIYPZmiL3UzG9V+f8g6k=",
+        "goMod": "h1:QP4ZLWROP49Kk/vPLhudxYQcF4ndhMQ1gvJE4rCTAgc="
+      },
+      "go.etcd.io/etcd/client/pkg/v3@v3.5.23": {
+        "module": "h1:RzwVV28JgOwGl5TUjA47s9IWxl5qQjM2VqSh8wjFFLM=",
+        "goMod": "h1:IdIjxGUGNy+8HWeVlbBXDqmPqe+n8GsVGVYnccAEZ5o="
+      },
       "go.etcd.io/etcd/client/v3@v3.5.23": {
         "module": "h1:WN7sypGG326sFP5jLkFqD3anf/k6NNlV5Hy/UxvTPvc=",
         "goMod": "h1:XTf1oMQi4ZzpXGFoPgvAqbY9JFmTFQqWI1SF4g+hV6o="
+      },
+      "google.golang.org/grpc@v1.79.3": {
+        "module": "h1:sybAEdRIEtvcD68Gx7dmnwjZKlyfuc61Dyo9pGXXkKE=",
+        "goMod": "h1:KmT0Kjez+0dde/v2j9vzwoAScgEPx/Bw1CYChhHLrHQ="
+      },
+      "google.golang.org/protobuf@v1.36.10": {
+        "module": "h1:AYd7cD/uASjIL6Q9LiTjz8JLcrh/88q5UObnmY3aOOE=",
+        "goMod": "h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco="
+      },
+      "go.etcd.io/bbolt@v1.3.12": {
+        "module": "h1:UAxZAIuJqzFwByP19gZC3zd5robK3FOangrGS+Fdczg=",
+        "goMod": "h1:Gi2toLZr1jFkuReJm+yEPn7H8wk6ooptePtHYCbCS1g="
+      },
+      "go.etcd.io/etcd/client/v2@v2.305.23": {
+        "module": "h1:lo6nsSHjp3tGsRLrzmM+neVSahXxbhxnfoatEdB6nao=",
+        "goMod": "h1:Up9T9+5M3MMcCj/V0nDfadBERNMxIYf1tdycva1dXM4="
+      },
+      "go.etcd.io/etcd/pkg/v3@v3.5.23": {
+        "module": "h1:q2skPu7VFC7oerL3MrFqImVACjAFWPlZMjHU0zll9x4=",
+        "goMod": "h1:zUWlm5U4HgvDg+0PUWb8TgMF7ZrUiQA8aQq7FxE0WHo="
+      },
+      "go.etcd.io/etcd/raft/v3@v3.5.23": {
+        "module": "h1:NhCdh4xz1VsrqHd2c+h6SLvhE95B1Hs7K+ESaAs6LLQ=",
+        "goMod": "h1:NJz9BGkhGvru47lIc1wL0QHsg5yvHTy6tUpEqM69ERM="
+      },
+      "go.etcd.io/etcd/server/v3@v3.5.23": {
+        "module": "h1:2g1hz32pp1TYMI7xUyifR8gXOlUnTBCfixV+uJ8BqRU=",
+        "goMod": "h1:sZwt/lLSwYQ/S5aAbzSQX2xNw1WA0Fo5noUCVxVYB4g="
+      },
+      "sigs.k8s.io/yaml@v1.2.0": {
+        "module": "h1:kr/MCeFWJWTwyaHoR9c8EjH9OumOmoF9YGiZd7lFm/Q=",
+        "goMod": "h1:yfXDCHCao9+ENCvLSE62v9VSji2MKu5jeNfTrofGhJc="
       }
     }
   },
@@ -292,6 +373,7 @@
     "https://repo.maven.apache.org/maven2/org/apache/hbase/hbase-shaded-client-byo-hadoop/2.6.6-hadoop3/hbase-shaded-client-byo-hadoop-2.6.6-hadoop3.pom",
     "https://repo.maven.apache.org/maven2/org/apache/hadoop/hadoop-common/3.4.3/hadoop-common-3.4.3.pom",
     "https://go.dev/doc/devel/release",
-    "https://go.dev/dl/"
+    "https://go.dev/dl/",
+    "https://github.com/etcd-io/etcd/tree/v3.5.23/server/embed"
   ]
 }

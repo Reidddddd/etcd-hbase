@@ -1,0 +1,25 @@
+{
+  "schema": "etcd-hbase-salt-profile/v1",
+  "id": "crc32-sixteen-buckets",
+  "strategy_id": "crc32-bucket-v1",
+  "encoding_version": 1,
+  "bucket_count": 16,
+  "salt_width_bytes": 2,
+  "bucket_encoding": "unsigned-fixed-width-big-endian",
+  "split_keys_hex": [
+    "0001", "0002", "0003", "0004", "0005",
+    "0006", "0007", "0008", "0009", "000a",
+    "000b", "000c", "000d", "000e", "000f"
+  ],
+  "vectors": [
+    {"identity_hex": "", "crc32_hex": "00000000", "bucket": 0, "salt_hex": "0000"},
+    {"identity_hex": "61", "crc32_hex": "e8b7be43", "bucket": 3, "salt_hex": "0003"},
+    {"identity_hex": "2f612f622f632f", "crc32_hex": "639fc949", "bucket": 9, "salt_hex": "0009"},
+    {"identity_hex": "00", "crc32_hex": "d202ef8d", "bucket": 13, "salt_hex": "000d"},
+    {"identity_hex": "ff", "crc32_hex": "ff000000", "bucket": 0, "salt_hex": "0000"},
+    {"identity_hex": "6100ff", "crc32_hex": "9b569788", "bucket": 8, "salt_hex": "0008"},
+    {"identity_hex": "2f726f6f74", "crc32_hex": "b203698f", "bucket": 15, "salt_hex": "000f"},
+    {"identity_hex": "2f726f6f742f", "crc32_hex": "04664f0c", "bucket": 12, "salt_hex": "000c"}
+  ],
+  "scope": "public prototype only; target salt rules remain pending B01"
+}

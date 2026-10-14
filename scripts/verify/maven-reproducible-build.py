@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import subprocess
 import sys
@@ -22,8 +23,20 @@ def packaged_jars() -> dict[str, str]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--profile",
+        action="append",
+        default=[],
+        help="Maven profile to activate for both clean builds; may be repeated",
+    )
+    args = parser.parse_args()
+
     results: list[dict[str, str]] = []
-    command = [str(MAVEN), "-B", "-ntp", "clean", "verify"]
+    command = [str(MAVEN), "-B", "-ntp"]
+    if args.profile:
+        command.append("-P" + ",".join(args.profile))
+    command.extend(("clean", "verify"))
     for run in (1, 2):
         print(f"\n=== reproducibility build {run}/2 ===", flush=True)
         completed = subprocess.run(command, cwd=ROOT, check=False)
