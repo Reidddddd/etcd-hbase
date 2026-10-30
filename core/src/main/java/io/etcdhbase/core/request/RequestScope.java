@@ -12,6 +12,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
 
@@ -139,6 +140,50 @@ public final class RequestScope implements AutoCloseable {
     closeResource(resource, joinsClosingBatch);
   }
 
+  /** Transfers one resource into a releasable owner; finished pages leave no retained registration. */
+  public ScopedCleanup registerScopedCleanup(AutoCloseable resource) {
+    var registration = new ScopedCleanup(Objects.requireNonNull(resource, "resource"));
+    registerCleanup(registration);
+    return registration;
+  }
+
+  int registeredResourceCount() {
+    synchronized (lock) {
+      return registrations.size();
+    }
+  }
+
+  public final class ScopedCleanup implements AutoCloseable {
+    private final AutoCloseable resource;
+    private final AtomicBoolean closeStarted = new AtomicBoolean();
+    private final CompletableFuture<Void> closeCompletion = new CompletableFuture<>();
+
+    private ScopedCleanup(AutoCloseable resource) {
+      this.resource = resource;
+    }
+
+    @Override
+    public void close() throws Exception {
+      if (!closeStarted.compareAndSet(false, true)) return;
+      Throwable failure = null;
+      try {
+        resource.close();
+      } catch (Exception | Error problem) {
+        failure = problem;
+        throw problem;
+      } finally {
+        synchronized (lock) {
+          cleanupOrder.remove(this);
+          registrations.remove(this);
+        }
+        // A duplicate close does not wait, including when this resource re-enters its scope.
+        // Publish actual completion outside the state lock so scope callbacks may re-enter.
+        if (failure == null) closeCompletion.complete(null);
+        else closeCompletion.completeExceptionally(failure);
+      }
+    }
+  }
+
   /** Root-operation completion stops the request without replacing its original failure. */
   public <T> CompletionStage<T> own(CompletionStage<T> operation) {
     return Objects.requireNonNull(operation, "operation")
@@ -185,15 +230,26 @@ public final class RequestScope implements AutoCloseable {
   }
 
   private void closeResource(AutoCloseable resource, boolean joinsClosingBatch) {
+    var actualCloseCompletion =
+        resource instanceof ScopedCleanup registration ? registration.closeCompletion : null;
     try {
       resource.close();
     } catch (Exception failure) {
-      cleanupFailureCount.incrementAndGet();
+      if (actualCloseCompletion == null) cleanupFailureCount.incrementAndGet();
     } catch (Error failure) {
-      cleanupFailureCount.incrementAndGet();
+      if (actualCloseCompletion == null) cleanupFailureCount.incrementAndGet();
       throw failure;
     } finally {
-      if (joinsClosingBatch) resourceClosed();
+      if (actualCloseCompletion == null) {
+        if (joinsClosingBatch) resourceClosed();
+      } else {
+        // Another caller may own a still-running close. The closing batch observes that
+        // attempt's outcome rather than treating the duplicate close's return as completion.
+        actualCloseCompletion.whenComplete((ignored, failure) -> {
+          if (failure != null) cleanupFailureCount.incrementAndGet();
+          if (joinsClosingBatch) resourceClosed();
+        });
+      }
     }
   }
 
