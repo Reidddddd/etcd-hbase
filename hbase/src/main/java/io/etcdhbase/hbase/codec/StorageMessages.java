@@ -16,6 +16,16 @@ public final class StorageMessages {
 
   private StorageMessages() {}
 
+  /** Checks serialized metadata before an adapter copies its backing storage. */
+  public static void requireMetadataLength(int length) {
+    if (length < 0 || length > MAX_METADATA_BYTES) throw invalid();
+  }
+
+  /** Checks serialized payload bytes, including their protobuf framing allowance. */
+  public static void requireValuePayloadLength(int length) {
+    if (length < 0 || length > MAX_VALUE_BYTES + 128) throw invalid();
+  }
+
   public static byte[] metadata(StorageMetadata metadata) {
     if (metadata.valueLength() > MAX_VALUE_BYTES) throw invalid();
     var builder = StorageProtos.RecordMetadata.newBuilder()
@@ -41,7 +51,7 @@ public final class StorageMessages {
     if (encodedValue.isEmpty()) return StoredRecord.metadataOnly(key, metadata);
     if (metadata.state() == StorageMetadata.State.TOMBSTONE) throw invalid();
     byte[] payload = encodedValue.orElseThrow();
-    if (payload.length > MAX_VALUE_BYTES + 128) throw invalid();
+    requireValuePayloadLength(payload.length);
     try {
       var value = StorageProtos.ValuePayload.parseFrom(payload);
       if (!value.hasFormatVersion() || value.getFormatVersion() != FORMAT_VERSION
@@ -54,7 +64,7 @@ public final class StorageMessages {
   }
 
   public static StorageMetadata decodeMetadata(byte[] encoded) {
-    if (encoded.length > MAX_METADATA_BYTES) throw invalid();
+    requireMetadataLength(encoded.length);
     try {
       var metadata = StorageProtos.RecordMetadata.parseFrom(encoded);
       if (!metadata.hasFormatVersion() || metadata.getFormatVersion() != FORMAT_VERSION
