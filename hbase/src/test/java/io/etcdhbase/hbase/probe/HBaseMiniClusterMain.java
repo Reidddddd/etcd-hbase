@@ -8,6 +8,7 @@ import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.testing.TestingHBaseCluster;
 import org.apache.hadoop.hbase.testing.TestingHBaseClusterOption;
 import org.apache.hadoop.hbase.util.VersionInfo;
+import org.apache.hadoop.hbase.regionserver.HRegionServer;
 
 /** Disposable SIMPLE or Kerberos HBase server, isolated from the application's client runtime. */
 public final class HBaseMiniClusterMain {
@@ -98,10 +99,21 @@ public final class HBaseMiniClusterMain {
     try (var input =
         new java.io.BufferedReader(
             new java.io.InputStreamReader(System.in, StandardCharsets.US_ASCII))) {
-      String command = input.readLine();
-      if (!"STOP".equals(command)) {
-        throw new IllegalStateException("expected stop signal");
+      String command;
+      while ((command = input.readLine()) != null && !"STOP".equals(command)) {
+        if (!command.matches("SCANNERS [a-f0-9]{32}")) throw new IllegalStateException("unknown fixture control command");
+        int scanners = 0;
+        for (var address : cluster.getRegionServerAddresses()) {
+          var online = cluster.getOnlineRegionsInterface(address).orElseThrow();
+          if (!(online instanceof HRegionServer server)) throw new IllegalStateException("fixture scanner counters are unavailable");
+          scanners += server.getRSRpcServices().getScannersCount();
+        }
+        Path response = readinessFile.resolveSibling("scanner-count.txt");
+        Path pending = response.resolveSibling("scanner-count.pending");
+        Files.writeString(pending, command.substring("SCANNERS ".length()) + "\t" + scanners, StandardCharsets.US_ASCII);
+        Files.move(pending, response, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
       }
+      if (command == null) throw new IllegalStateException("fixture control channel ended before stop");
     } finally {
       try {
         cluster.stop();

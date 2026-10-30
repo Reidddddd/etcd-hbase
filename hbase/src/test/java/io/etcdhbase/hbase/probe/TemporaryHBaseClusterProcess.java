@@ -146,6 +146,24 @@ public final class TemporaryHBaseClusterProcess implements AutoCloseable {
     return configuration;
   }
 
+  /** Test-only control channel reads actual RegionServer scanner maps, never a client estimate. */
+  public synchronized int scannerCount() throws Exception {
+    String token = java.util.UUID.randomUUID().toString().replace("-", "");
+    Path response = directory.resolve("scanner-count.txt");
+    process.getOutputStream().write(("SCANNERS " + token + "\n").getBytes(StandardCharsets.US_ASCII));
+    process.getOutputStream().flush();
+    var observed = new java.util.concurrent.atomic.AtomicInteger(-1);
+    org.apache.hadoop.hbase.Waiter.waitFor(clientConfiguration(), 5000, 20, () -> {
+      if (!process.isAlive()) throw new IOException("fixture stopped before scanner observation");
+      if (!Files.isRegularFile(response)) return false;
+      String[] fields = Files.readString(response, StandardCharsets.US_ASCII).split("\t");
+      if (fields.length != 2 || !token.equals(fields[0])) return false;
+      observed.set(Integer.parseInt(fields[1]));
+      return observed.get() >= 0;
+    });
+    return observed.get();
+  }
+
   private void waitForClientReadiness(HBaseUserContext user)
       throws IOException, InterruptedException {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(CLIENT_READY_TIMEOUT_SECONDS);
@@ -216,7 +234,7 @@ public final class TemporaryHBaseClusterProcess implements AutoCloseable {
   }
 
   @Override
-  public void close() throws Exception {
+  public synchronized void close() throws Exception {
     try {
       CompletableFuture.allOf(abandonedCreations.toArray(CompletableFuture[]::new))
           .get(10, TimeUnit.SECONDS);

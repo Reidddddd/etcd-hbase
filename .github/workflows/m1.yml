@@ -1,0 +1,30 @@
+name: M1 storage scan and resource contracts
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: m1-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  scan:
+    name: M1 真实存储、扫描与资源契约
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: 下载固定 Java 21
+        run: python3 scripts/dev/download-locked-jdk.py --output "$RUNNER_TEMP/m1-jdk.tar.gz"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: jdkfile
+          java-version: '21'
+          jdk-file: ${{ runner.temp }}/m1-jdk.tar.gz
+          cache: maven
+      - name: 验证 M1 契约
+        run: ETCD_HBASE_JDK21_HOME="$JAVA_HOME" bash scripts/verify/m1.sh --through J17

@@ -67,6 +67,16 @@
     </extensions>
     <plugins>
       <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>**/LocalHBaseProbeIT.java</include>
+            <include>**/SecureHBaseAuthenticationIT.java</include>
+          </includes>
+        </configuration>
+      </plugin>
+      <plugin>
         <groupId>org.xolstice.maven.plugins</groupId>
         <artifactId>protobuf-maven-plugin</artifactId>
         <configuration>
@@ -116,6 +126,26 @@
     </plugins>
   </build>
   <profiles>
+    <profile>
+      <id>j11-hbase-local</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <failIfNoTests>true</failIfNoTests>
+              <includes combine.self="override">
+                <include>**/LocalHBaseProbeIT.java</include>
+                <include>**/SecureHBaseAuthenticationIT.java</include>
+                <include>**/M1*IT.java</include>
+              </includes>
+              <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
     <profile>
       <id>j04-hbase-local</id>
       <build>
