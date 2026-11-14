@@ -5,9 +5,20 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 JAVA_MODULES = ("protocol", "spi", "core", "hbase", "grpc", "admin", "server")
-GO_PACKAGES = {"cmd/m0driver", "cmd/m3driver", "cmd/m3history", "cmd/native-etcd", "internal/client",
-               "internal/compare", "internal/history", "internal/rpctypes", "internal/scenario",
-               "internal/trace", "internal/wire"}
+GO_PACKAGES = {
+    "cmd/m0driver",
+    "cmd/m3driver",
+    "cmd/m3history",
+    "cmd/m4driver",
+    "cmd/native-etcd",
+    "internal/client",
+    "internal/compare",
+    "internal/history",
+    "internal/rpctypes",
+    "internal/scenario",
+    "internal/trace",
+    "internal/wire",
+}
 GO_MODULE = "github.com/Reidddddd/etcd-hbase/testkit/go/"
 
 

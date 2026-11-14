@@ -91,6 +91,63 @@ class SnapshotPinManagerTest {
   }
 
   @Test
+  void auxiliaryPinRetainsStableSequenceWithoutASelectedRootAcrossReopen() {
+    var records = new MemoryRecords();
+    var configuration = new SnapshotPinConfiguration(1, 2, Duration.ofSeconds(2));
+    SnapshotPinManager manager = open(records, configuration, Clock.systemUTC());
+    var stable = new ReadView(PROFILE, AUTHORIZATION, 3, 3, 5, 5, 0,
+        Optional.empty(), Optional.empty(), 0);
+    try (RequestScope scope = scope()) {
+      ReadViewPinRegistry.Pin pin = manager.registerAuxiliary(stable, scope).join();
+      SnapshotGcBoundary boundary = manager.advanceRegistrationFloors(8, 5, scope).join();
+      assertEquals(3, boundary.safeSequence());
+      assertEquals(3, boundary.protections().getFirst().requiredSequence());
+      assertTrue(boundary.protections().getFirst().transactionId().isEmpty());
+      var reopened = SnapshotPinManager.open(records, configuration, scope).join();
+      assertEquals(boundary, reopened.readBoundary(scope).join());
+      assertInstanceOf(IllegalStateException.class,
+          failure(() -> reopened.registerAuxiliary(stable, scope).join()));
+      pin.complete(scope).join();
+      assertEquals(5, reopened.readBoundary(scope).join().safeSequence());
+    }
+  }
+
+  @Test
+  void auxiliaryPinProtectsStableBaseAndSelectedRootTogether() {
+    var records = new MemoryRecords();
+    var configuration = new SnapshotPinConfiguration(1, 2, Duration.ofSeconds(2));
+    SnapshotPinManager manager = open(records, configuration, Clock.systemUTC());
+    TransactionId transaction = TransactionId.create();
+    ManifestRoot root = ManifestRoot.create(transaction, 1, 3, 5, 0, 0, Optional.empty());
+    var decision = new CommitDecision(transaction, InvocationId.create(), 4, 5, 5,
+        root.systemIdentity(), root.digest(), false);
+    var selected = new ReadView(PROFILE, AUTHORIZATION, 4, 3, 5, 5, 0,
+        Optional.of(decision), Optional.of(root), 0);
+    try (RequestScope scope = scope()) {
+      ReadViewPinRegistry.Pin pin = manager.registerAuxiliary(selected, scope).join();
+      var boundary = manager.advanceRegistrationFloors(8, 6, scope).join();
+      assertEquals(3, boundary.safeSequence());
+      assertEquals(transaction, boundary.protections().getFirst().transactionId().orElseThrow());
+      assertEquals(root.systemIdentity(), boundary.protections().getFirst().rootIdentity().orElseThrow());
+      pin.complete(scope).join();
+    }
+  }
+
+  @Test
+  void shardCodecKeepsLegacyFormatUnlessSequenceHasNoSelectedRoot() {
+    var empty = new SnapshotPinShard(0, 1, 0, 0, java.util.List.of(SnapshotPinShard.Slot.empty()));
+    var legacy = SnapshotPinRecordCodec.encodeShard(empty);
+    assertEquals(1, java.nio.ByteBuffer.wrap(legacy.bytes()).getInt(4));
+    assertEquals(empty, SnapshotPinRecordCodec.decodeShard(legacy));
+    var slot = SnapshotPinShard.Slot.active(1, ByteKey.copyOf(new byte[16]), 5, 3,
+        digest(1), 1000, Optional.empty(), Optional.empty(), Optional.empty());
+    var auxiliary = new SnapshotPinShard(0, 2, 0, 0, java.util.List.of(slot));
+    var encoded = SnapshotPinRecordCodec.encodeShard(auxiliary);
+    assertEquals(2, java.nio.ByteBuffer.wrap(encoded.bytes()).getInt(4));
+    assertEquals(auxiliary, SnapshotPinRecordCodec.decodeShard(encoded));
+  }
+
+  @Test
   void expiryAloneDoesNotReleaseProtectionAndRevocationFencesTheOldLease() {
     var records = new MemoryRecords();
     var clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));

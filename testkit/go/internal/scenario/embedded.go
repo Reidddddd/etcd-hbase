@@ -55,6 +55,11 @@ type embedded struct {
 }
 
 func startEmbedded(parent context.Context, dataDir string) (*embedded, error) {
+	return startEmbeddedWithElectionTimeout(parent, dataDir, 0)
+}
+
+func startEmbeddedWithElectionTimeout(parent context.Context, dataDir string,
+	electionTimeoutMs uint) (*embedded, error) {
 	peerURL, err := loopbackURL()
 	if err != nil {
 		return nil, fmt.Errorf("allocate peer listener: %w", err)
@@ -66,6 +71,9 @@ func startEmbedded(parent context.Context, dataDir string) (*embedded, error) {
 	cfg := embed.NewConfig()
 	cfg.Name = "m0-native"
 	cfg.Dir = filepath.Join(dataDir, "data")
+	if electionTimeoutMs != 0 {
+		cfg.ElectionMs = electionTimeoutMs
+	}
 	cfg.ListenPeerUrls = []url.URL{*peerURL}
 	cfg.AdvertisePeerUrls = []url.URL{*peerURL}
 	cfg.ListenClientUrls = []url.URL{*clientURL}

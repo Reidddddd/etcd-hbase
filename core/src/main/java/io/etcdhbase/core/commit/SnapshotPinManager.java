@@ -84,13 +84,22 @@ public final class SnapshotPinManager implements ReadViewPinRegistry {
 
   @Override
   public CompletableFuture<Pin> register(ReadView view, RequestScope scope) {
+    return register(view, scope, false);
+  }
+
+  @Override
+  public CompletableFuture<Pin> registerAuxiliary(ReadView view, RequestScope scope) {
+    return register(view, scope, true);
+  }
+
+  private CompletableFuture<Pin> register(ReadView view, RequestScope scope, boolean auxiliary) {
     Objects.requireNonNull(view, "view");
     Objects.requireNonNull(scope, "scope");
     if (!active(scope)) return failed(inactive(scope));
     final PinRequirement requirement;
     final ByteKey pinId;
     try {
-      requirement = PinRequirement.from(view);
+      requirement = PinRequirement.from(view, auxiliary);
       pinId = ByteKey.copyOf(TransactionId.create().bytes());
     } catch (RuntimeException failure) {
       return failed(failure);
@@ -811,10 +820,11 @@ public final class SnapshotPinManager implements ReadViewPinRegistry {
   private record PinRequirement(long requiredRevision, long requiredSequence, ByteKey viewDigest,
       Optional<TransactionId> transactionId, Optional<ByteKey> rootIdentity,
       Optional<ByteKey> rootDigest) {
-    private static PinRequirement from(ReadView view) {
+    private static PinRequirement from(ReadView view, boolean auxiliary) {
       Optional<CommitDecision> decision = view.selectedDecision();
       Optional<ManifestRoot> root = view.selectedRoot();
-      long sequence = decision.map(CommitDecision::sequence).orElse(0L);
+      long sequence = auxiliary && view.finalizedSequence() > 0
+          ? view.finalizedSequence() : decision.map(CommitDecision::sequence).orElse(0L);
       return new PinRequirement(view.stableRevision(), sequence, digestView(view),
           decision.map(CommitDecision::transactionId), root.map(ManifestRoot::systemIdentity),
           root.map(ManifestRoot::digest));

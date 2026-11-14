@@ -224,7 +224,9 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
     if (reply instanceof MutationRelay.KnownRejection rejected) {
       return CompletableFuture.failedFuture(new BackendFailure(rejected.category()));
     }
-    var unknown = (MutationRelay.ResultUnknown) reply;
+    if (!(reply instanceof MutationRelay.ResultUnknown unknown)) {
+      return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN));
+    }
     return resolveOriginal(invocation, digest, scope, account)
         .exceptionallyCompose(failure -> {
           Throwable cause = CompletionFailures.unwrapCompletion(failure);

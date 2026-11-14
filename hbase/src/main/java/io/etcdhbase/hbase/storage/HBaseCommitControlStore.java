@@ -30,11 +30,16 @@ public final class HBaseCommitControlStore implements CommitControlStore {
 
   private final AsyncConnection connection;
   private final SystemTableBinding binding;
+  private final boolean auxiliarySupported;
 
-  private HBaseCommitControlStore(AsyncConnection connection, SystemTableBinding binding) {
+  private HBaseCommitControlStore(AsyncConnection connection, SystemTableBinding binding,
+      boolean auxiliarySupported) {
     this.connection = connection;
     this.binding = binding;
+    this.auxiliarySupported = auxiliarySupported;
   }
+
+  public boolean supportsAuxiliary() { return auxiliarySupported; }
 
   public static CompletableFuture<HBaseCommitControlStore> open(
       HBaseConnectionFactory factory,
@@ -46,7 +51,7 @@ public final class HBaseCommitControlStore implements CommitControlStore {
         startRequest(scope, () -> connection.getAdmin().getDescriptor(binding.table())
             .thenApply(descriptor -> {
               binding.validate(descriptor);
-              return new HBaseCommitControlStore(connection, binding);
+              return new HBaseCommitControlStore(connection, binding, binding.supportsAuxiliary(descriptor));
             }))).exceptionallyCompose(failure -> failed(failure));
   }
 
@@ -65,6 +70,7 @@ public final class HBaseCommitControlStore implements CommitControlStore {
         || initialState.ownerEpoch() != 0 || initialState.ownerLeaseDeadlineEpochMillis() != 0
         || initialState.stateVersion() != 1 || initialState.publishedSequence() != 0
         || initialState.finalizedSequence() != 0 || initialState.compactRevision() != 0
+        || initialState.formatVersion() == CommitState.AUXILIARY_FORMAT_VERSION && !auxiliarySupported
         || initialState.publication().isPresent()) {
       return CompletableFuture.failedFuture(new IllegalArgumentException(
           "control initialization requires a fenced empty initial state"));
@@ -86,6 +92,21 @@ public final class HBaseCommitControlStore implements CommitControlStore {
         || replacement.stateVersion() != Math.addExact(observed.state().stateVersion(), 1)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException(
           "control replacement must advance the exact observed state"));
+    }
+    if (replacement.formatVersion() != observed.state().formatVersion()) {
+      try {
+        CommitState state = observed.state();
+        if (state.formatVersion() != CommitState.FORMAT_VERSION
+            || replacement.formatVersion() != CommitState.AUXILIARY_FORMAT_VERSION
+            || !auxiliarySupported
+            || state.ownerInstance().isEmpty()
+            || !Arrays.equals(CommitControlMessages.encode(replacement), CommitControlMessages.encode(
+                state.upgradeAuxiliaryFormat(state.ownerInstance().orElseThrow(), state.ownerEpoch(), 0)))) {
+          return CompletableFuture.failedFuture(new IllegalArgumentException("invalid control format upgrade"));
+        }
+      } catch (IllegalArgumentException | IllegalStateException | ArithmeticException failure) {
+        return CompletableFuture.failedFuture(failure);
+      }
     }
     return execute(scope, table -> {
       var condition = CheckAndMutate.newBuilder(binding.controlRow())

@@ -39,6 +39,17 @@ public final class ReadViewService {
   /** A missing target selects the latest published revision, including a selected pending commit. */
   public CompletableFuture<PinnedReadView> open(OptionalLong requestedRevision,
       ByteKey authorizationScopeDigest, RequestScope scope) {
+    return open(requestedRevision, authorizationScopeDigest, scope, false);
+  }
+
+  /** Opens the current barrier with a pin that also protects auxiliary sequence history. */
+  public CompletableFuture<PinnedReadView> openAuxiliary(
+      ByteKey authorizationScopeDigest, RequestScope scope) {
+    return open(OptionalLong.empty(), authorizationScopeDigest, scope, true);
+  }
+
+  private CompletableFuture<PinnedReadView> open(OptionalLong requestedRevision,
+      ByteKey authorizationScopeDigest, RequestScope scope, boolean auxiliary) {
     Objects.requireNonNull(requestedRevision, "requestedRevision");
     Objects.requireNonNull(authorizationScopeDigest, "authorizationScopeDigest");
     Objects.requireNonNull(scope, "scope");
@@ -49,10 +60,14 @@ public final class ReadViewService {
     return readControl(scope).thenCompose(snapshot -> {
       CommitState state = snapshot.state();
       requireProfile(state);
+      if (auxiliary && state.formatVersion() != CommitState.AUXILIARY_FORMAT_VERSION) {
+        return CompletableFuture.failedFuture(new IllegalStateException(
+            "auxiliary read requires the fenced control format"));
+      }
       long target = requestedRevision.isPresent()
           ? requestedRevision.getAsLong() : state.publishedRevision();
       return captureSelection(state, target, authorizationScopeDigest, scope);
-    }).thenCompose(capture -> registerAndRecheck(capture, scope));
+    }).thenCompose(capture -> registerAndRecheck(capture, scope, auxiliary));
   }
 
   /** Captures one barrier, then independently pins each distinct revision required by a transaction. */
@@ -99,7 +114,7 @@ public final class ReadViewService {
     CompletableFuture<Void> pending = CompletableFuture.completedFuture(null);
     for (long target : targets) {
       pending = pending.thenCompose(ignored -> captureSelection(barrier, target, authorizationScopeDigest, scope)
-          .thenCompose(capture -> registerAndRecheck(capture, scope))
+          .thenCompose(capture -> registerAndRecheck(capture, scope, false))
           .thenAccept(pinned -> opened.put(target, pinned)));
     }
     return pending.thenApply(ignored -> Map.copyOf(opened)).whenComplete((ignored, failure) -> {
@@ -141,9 +156,11 @@ public final class ReadViewService {
   }
 
   private CompletableFuture<PinnedReadView> registerAndRecheck(Capture capture,
-      RequestScope scope) {
+      RequestScope scope, boolean auxiliary) {
     requireActive(scope);
-    return pins.register(capture.view(), scope).thenCompose(returnedPin -> {
+    var registration = auxiliary ? pins.registerAuxiliary(capture.view(), scope)
+        : pins.register(capture.view(), scope);
+    return registration.thenCompose(returnedPin -> {
       ReadViewPinRegistry.Pin pin = Objects.requireNonNull(returnedPin, "pin registry returned null");
       long generation = pin.generation();
       if (generation <= 0) {
@@ -153,7 +170,7 @@ public final class ReadViewService {
       }
       PinnedReadView pinned;
       try {
-        pinned = new PinnedReadView(capture.view().withPinGeneration(generation), pin, scope);
+        pinned = new PinnedReadView(capture.view().withPinGeneration(generation), pin, scope, auxiliary);
       } catch (RuntimeException | Error failure) {
         // A failed construction must release its registered pin before preserving a fatal cause.
         try {

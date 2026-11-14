@@ -5,6 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.lease.ExpiryCandidateIdentity;
+import io.etcdhbase.core.lease.ExpiryCandidateRecord;
+import io.etcdhbase.core.lease.LeaseEnumerationPointer;
+import io.etcdhbase.core.lease.LeaseRecordIdentity;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.storage.StorageMetadata;
 import io.etcdhbase.core.storage.StoredRecord;
@@ -119,6 +123,43 @@ class CommitFinalizationServiceTest {
     }
   }
 
+  @Test
+  void selectedAuxiliaryRecordsMustFinishBeforeFinalizedWatermarkAdvances() throws Exception {
+    AuxiliaryFixture fixture = new AuxiliaryFixture();
+    try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(5))) {
+      var pending = new CommitOutcomeResolver.Resolution(
+          CommitOutcomeResolver.State.SELECTED_PENDING, Optional.of(fixture.decision), Optional.empty());
+
+      assertThrows(ExecutionException.class,
+          () -> fixture.service.finish(fixture.invocation, pending, scope).get());
+      assertEquals(0, fixture.control.state.finalizedSequence());
+      assertTrue(fixture.control.state.publication().isPresent());
+      assertEquals(1, fixture.materialized.size());
+
+      var recovered = fixture.service.finish(fixture.invocation, pending, scope).get();
+      assertEquals(CommitOutcomeResolver.State.SELECTED_FINALIZED, recovered.state());
+      assertEquals(3, fixture.materialized.size());
+      assertEquals(5, fixture.materializationCalls.get());
+      assertEquals(1, fixture.control.state.finalizedSequence());
+      assertTrue(fixture.control.state.publication().isEmpty());
+    }
+  }
+
+  @Test
+  void supersededAuxiliaryPointerCannotAdvancePendingCommit() {
+    AuxiliaryFixture fixture = new AuxiliaryFixture(true);
+    try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(5))) {
+      var pending = new CommitOutcomeResolver.Resolution(
+          CommitOutcomeResolver.State.SELECTED_PENDING, Optional.of(fixture.decision), Optional.empty());
+
+      assertThrows(ExecutionException.class,
+          () -> fixture.service.finish(fixture.invocation, pending, scope).get());
+      assertEquals(0, fixture.control.state.finalizedSequence());
+      assertTrue(fixture.control.state.publication().isPresent());
+      assertEquals(2, fixture.materializationCalls.get());
+    }
+  }
+
   private static final class Fixture {
     private final TransactionId transactionId = TransactionId.create();
     private final InvocationId invocationId = InvocationId.create();
@@ -219,6 +260,97 @@ class CommitFinalizationServiceTest {
     }
   }
 
+  private static final class AuxiliaryFixture {
+    private final TransactionId transactionId = TransactionId.create();
+    private final InvocationId invocationId = InvocationId.create();
+    private final InvocationBinding invocation;
+    private final CommitDecision decision;
+    private final MemoryControl control = new MemoryControl();
+    private final MemoryDecisions decisions;
+    private final AtomicInteger materializationCalls = new AtomicInteger();
+    private final java.util.Set<ByteKey> materialized = new java.util.HashSet<>();
+    private final CommitFinalizationService service;
+
+    private AuxiliaryFixture() {
+      this(false);
+    }
+
+    private AuxiliaryFixture(boolean superseded) {
+      InvocationBinding preparing = InvocationBinding.begin(invocationId,
+          repeatedDigest(), repeatedDigest(), transactionId, 1, 0, 1);
+      ResultIdentity resultIdentity = ResultIdentity.from(preparing);
+      ResultPage resultPage = new ResultPage(resultIdentity, 0, new byte[] {3, 4});
+      ResultDirectory resultDirectory = ResultDirectory.create(resultIdentity,
+          List.of(ResultPageReference.from(resultPage)));
+      List<PreparedAuxiliaryRecord> auxiliaryRecords = auxiliaryRecords(transactionId);
+      List<AuxiliaryRecordReference> recordReferences = auxiliaryRecords.stream()
+          .map(record -> new AuxiliaryRecordReference(record.ordinal(), record.systemIdentity(),
+              record.digest(), record.encodedBytes())).toList();
+      AuxiliaryPage auxiliaryPage = AuxiliaryPage.create(transactionId, 0, recordReferences);
+      AuxiliaryDirectory auxiliaryDirectory = AuxiliaryDirectory.create(transactionId,
+          List.of(auxiliaryPage.reference()));
+      ManifestRoot root = ManifestRoot.createWithResultAndAuxiliary(transactionId, 1, 0, 1,
+          0, 0, Optional.empty(), 0, 0, Optional.empty(), resultDirectory.reference(),
+          auxiliaryDirectory.reference());
+      invocation = preparing.seal(root.systemIdentity());
+      decision = new CommitDecision(transactionId, invocationId,
+          1, 1, 1, root.systemIdentity(), root.digest(), false);
+      CommitState state = CommitState.initial(repeatedDigest(), 1)
+          .claimOwner("auxiliary-owner", 1, 100);
+      control.state = state.publish(new PublicationSlot(transactionId, invocationId, 1,
+          0, 1, 1, 1, false, root.systemIdentity(), root.digest()));
+      decisions = new MemoryDecisions(decision, SystemRecordStore.CreateResult.ALREADY_PRESENT);
+      ManifestRepository repository = new StubManifestRepository(root, null, null, auxiliaryRecords,
+          auxiliaryPage, auxiliaryDirectory);
+      ManifestCatalog catalog = new ManifestCatalog(repository);
+      MaterializationStore materialization = new MaterializationStore() {
+        @Override public CompletableFuture<ApplyResult> applySelected(
+            CommitDecision selected, PreparedCandidate candidate, RequestScope scope) {
+          throw new UnsupportedOperationException();
+        }
+        @Override public CompletableFuture<Void> preflight(
+            PreparedCandidate candidate, RequestScope scope) {
+          throw new UnsupportedOperationException();
+        }
+      };
+      ResultRepository resultRepository = new ResultRepository() {
+        @Override public CompletableFuture<SystemRecordStore.CreateResult> createPage(
+            ResultPage page, RequestScope scope) { throw new UnsupportedOperationException(); }
+        @Override public CompletableFuture<SystemRecordStore.CreateResult> createDirectory(
+            ResultDirectory directory, RequestScope scope) { throw new UnsupportedOperationException(); }
+        @Override public CompletableFuture<Optional<ResultPage>> readPage(
+            ResultIdentity identity, int index, RequestScope scope) {
+          return CompletableFuture.completedFuture(Optional.of(resultPage));
+        }
+        @Override public CompletableFuture<Optional<ResultDirectory>> readDirectory(
+            ResultIdentity identity, RequestScope scope) {
+          return CompletableFuture.completedFuture(Optional.of(resultDirectory));
+        }
+      };
+      AtomicInteger injectedFailures = new AtomicInteger();
+      AuxiliaryMaterializationStore auxiliaryMaterialization = new AuxiliaryMaterializationStore() {
+        @Override public CompletableFuture<Void> preflight(
+            PreparedAuxiliaryRecord record, RequestScope scope) {
+          return CompletableFuture.completedFuture(null);
+        }
+        @Override public CompletableFuture<ApplyResult> applySelected(
+            CommitDecision selected, PreparedAuxiliaryRecord record, RequestScope scope) {
+          materializationCalls.incrementAndGet();
+          if (record.ordinal() == 1 && superseded) {
+            return CompletableFuture.completedFuture(ApplyResult.SUPERSEDED);
+          }
+          if (record.ordinal() == 1 && injectedFailures.getAndIncrement() == 0) {
+            return CompletableFuture.failedFuture(new IllegalStateException("injected auxiliary write failure"));
+          }
+          return CompletableFuture.completedFuture(materialized.add(record.systemIdentity())
+              ? ApplyResult.APPLIED : ApplyResult.ALREADY_APPLIED);
+        }
+      };
+      service = new CommitFinalizationService(control, new CommitOutcomeResolver(control, decisions),
+          decisions, catalog, materialization, new ResultCatalog(resultRepository), auxiliaryMaterialization);
+    }
+  }
+
   private static final class MemoryControl implements CommitControlStore {
     private CommitState state;
     private int version;
@@ -283,11 +415,23 @@ class CommitFinalizationServiceTest {
     private final ManifestRoot root;
     private final PreparedCandidate candidate;
     private final ManifestPage page;
+    private final List<PreparedAuxiliaryRecord> auxiliaryRecords;
+    private final AuxiliaryPage auxiliaryPage;
+    private final AuxiliaryDirectory auxiliaryDirectory;
 
     private StubManifestRepository(ManifestRoot root, PreparedCandidate candidate, ManifestPage page) {
+      this(root, candidate, page, List.of(), null, null);
+    }
+
+    private StubManifestRepository(ManifestRoot root, PreparedCandidate candidate, ManifestPage page,
+        List<PreparedAuxiliaryRecord> auxiliaryRecords, AuxiliaryPage auxiliaryPage,
+        AuxiliaryDirectory auxiliaryDirectory) {
       this.root = root;
       this.candidate = candidate;
       this.page = page;
+      this.auxiliaryRecords = List.copyOf(auxiliaryRecords);
+      this.auxiliaryPage = auxiliaryPage;
+      this.auxiliaryDirectory = auxiliaryDirectory;
     }
 
     @Override public int candidateBucket(PreparedCandidate candidate) { return 0; }
@@ -328,10 +472,38 @@ class CommitFinalizationServiceTest {
         ByteKey identity, RequestScope scope) { return CompletableFuture.completedFuture(Optional.empty()); }
     @Override public CompletableFuture<Optional<EventDirectoryPage>> readEventDirectoryPage(
         ByteKey identity, RequestScope scope) { return CompletableFuture.completedFuture(Optional.empty()); }
+    @Override public CompletableFuture<Optional<PreparedAuxiliaryRecord>> readAuxiliaryRecord(
+        ByteKey identity, RequestScope scope) {
+      return CompletableFuture.completedFuture(auxiliaryRecords.stream()
+          .filter(record -> record.systemIdentity().equals(identity)).findFirst());
+    }
+    @Override public CompletableFuture<Optional<AuxiliaryPage>> readAuxiliaryPage(
+        ByteKey identity, RequestScope scope) {
+      return CompletableFuture.completedFuture(auxiliaryPage != null
+          && auxiliaryPage.systemIdentity().equals(identity) ? Optional.of(auxiliaryPage) : Optional.empty());
+    }
+    @Override public CompletableFuture<Optional<AuxiliaryDirectory>> readAuxiliaryDirectory(
+        ByteKey identity, RequestScope scope) {
+      return CompletableFuture.completedFuture(auxiliaryDirectory != null
+          && auxiliaryDirectory.systemIdentity().equals(identity)
+              ? Optional.of(auxiliaryDirectory) : Optional.empty());
+    }
 
     private static CompletableFuture<SystemRecordStore.CreateResult> created() {
       return CompletableFuture.completedFuture(SystemRecordStore.CreateResult.CREATED);
     }
+  }
+
+  private static List<PreparedAuxiliaryRecord> auxiliaryRecords(TransactionId transactionId) {
+    long leaseId = 31;
+    return List.of(
+        PreparedAuxiliaryRecord.create(transactionId, 1, 0, 0, SystemRecordType.LEASE_STATE,
+            LeaseRecordIdentity.stateVersion(leaseId, 1), ByteKey.copyOf(new byte[] {1})),
+        PreparedAuxiliaryRecord.create(transactionId, 1, 0, 1, SystemRecordType.LEASE_ENUMERATION,
+            LeaseRecordIdentity.enumeration(leaseId), new LeaseEnumerationPointer(1).encode()),
+        PreparedAuxiliaryRecord.create(transactionId, 1, 0, 2, SystemRecordType.EXPIRY_CANDIDATE,
+            new ExpiryCandidateIdentity(20_000, leaseId, 1, 0).encode(),
+            new ExpiryCandidateRecord(1).encode()));
   }
 
   private static ByteKey repeatedDigest() {

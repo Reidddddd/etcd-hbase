@@ -23,6 +23,19 @@ class CommitControlMessagesTest {
       new InvocationId(UUID.fromString("00000000-0000-0000-0000-000000000012"));
 
   @Test
+  void auxiliaryControlFormatRoundTripsWithoutChangingLegacyBytes() throws Exception {
+    var legacy = CommitState.initial(FINGERPRINT, 5).claimOwner("owner-a", 10, 100);
+    var upgraded = legacy.upgradeAuxiliaryFormat("owner-a", 1, 11);
+    var oldWire = CommitProtos.CommitControlState.parseFrom(CommitControlMessages.encode(legacy));
+    var newWire = CommitProtos.CommitControlState.parseFrom(CommitControlMessages.encode(upgraded));
+    assertEquals(1, oldWire.getFormatVersion());
+    assertEquals(2, newWire.getFormatVersion());
+    assertStateEquals(upgraded, roundTrip(upgraded));
+    assertThrows(IllegalArgumentException.class, () -> CommitControlMessages.decode(
+        newWire.toBuilder().setFormatVersion(3).build().toByteArray()));
+  }
+
+  @Test
   void initialAndPendingPublicationStatesRoundTrip() {
     CommitState initial = CommitState.initial(FINGERPRINT, 5);
     assertStateEquals(initial, roundTrip(initial));
@@ -95,6 +108,7 @@ class CommitControlMessagesTest {
   }
 
   private static void assertStateEquals(CommitState expected, CommitState actual) {
+    assertEquals(expected.formatVersion(), actual.formatVersion());
     assertEquals(expected.profileFingerprint(), actual.profileFingerprint());
     assertEquals(expected.ownerInstance(), actual.ownerInstance());
     assertEquals(expected.ownerEpoch(), actual.ownerEpoch());

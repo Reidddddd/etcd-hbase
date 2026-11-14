@@ -9,6 +9,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.bytes.KeyRange;
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.lease.ExpiryCandidateIdentity;
+import io.etcdhbase.core.lease.ExpiryCandidateRecord;
+import io.etcdhbase.core.lease.LeaseEnumerationPointer;
+import io.etcdhbase.core.lease.LeaseIdentity;
+import io.etcdhbase.core.lease.LeaseRecordIdentity;
+import io.etcdhbase.core.lease.LeaseState;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.core.storage.ScanDirection;
@@ -718,6 +724,204 @@ class ManifestPreparationTest {
   }
 
   @Test
+  void sealsAuxiliaryUpdatesWithTheDurableRpcResultAndPreflightsEveryTarget() {
+    MemoryRepository repository = new MemoryRepository();
+    SingleResultRepository resultRepository = new SingleResultRepository();
+    ResultCatalog results = new ResultCatalog(resultRepository);
+    InvocationBinding invocation = InvocationBinding.begin(InvocationId.create(),
+        ByteKey.copyOf(new byte[32]), ByteKey.copyOf(new byte[32]), TransactionId.create(), 1, 0, 1);
+    ResultIdentity resultIdentity = ResultIdentity.from(invocation);
+    ResultPage resultPage = new ResultPage(resultIdentity, 0, new byte[] {7, 8});
+    ResultDirectory resultDirectory = ResultDirectory.create(resultIdentity,
+        List.of(ResultPageReference.from(resultPage)));
+    resultRepository.page = resultPage;
+    resultRepository.directory = resultDirectory;
+
+    long leaseId = -7;
+    List<PreparedAuxiliaryRecord> records = List.of(
+        PreparedAuxiliaryRecord.create(invocation.transactionId(), 1, 0, 0,
+            SystemRecordType.LEASE_STATE, LeaseRecordIdentity.stateVersion(leaseId, 1),
+            ByteKey.copyOf(new byte[] {1})),
+        PreparedAuxiliaryRecord.create(invocation.transactionId(), 1, 0, 1,
+            SystemRecordType.LEASE_ENUMERATION, LeaseRecordIdentity.enumeration(leaseId),
+            new LeaseEnumerationPointer(1).encode()),
+        PreparedAuxiliaryRecord.create(invocation.transactionId(), 1, 0, 2,
+            SystemRecordType.EXPIRY_CANDIDATE,
+            new ExpiryCandidateIdentity(10_000, leaseId, 1, 0).encode(),
+            new ExpiryCandidateRecord(1).encode()));
+
+    try (RequestScope scope = scope()) {
+      ManifestRoot root = new ManifestPreparation(repository,
+          new ManifestPreparation.Limits(0, 0, 0, 0))
+          .prepareWithResultAndAuxiliary(invocation, List.<PreparedCandidate>of().iterator(),
+              List.<PreparedEvent>of().iterator(), resultDirectory.reference(), results,
+              records.iterator(), () -> CompletableFuture.completedFuture(null), scope).join();
+
+      assertFalse(root.containsKeyChanges());
+      assertEquals(0, root.eventCount());
+      assertTrue(root.resultReference().isPresent());
+      assertTrue(root.auxiliaryReference().isPresent());
+      List<PreparedAuxiliaryRecord> visited = new ArrayList<>();
+      new ManifestCatalog(repository).forEachAuxiliary(root, scope, record -> {
+        visited.add(record);
+        return CompletableFuture.completedFuture(null);
+      }).join();
+      assertEquals(records, visited);
+
+      InvocationBinding sealed = invocation.seal(root.systemIdentity());
+      MaterializationStore materialization = new MaterializationStore() {
+        @Override public CompletableFuture<ApplyResult> applySelected(
+            CommitDecision decision, PreparedCandidate candidate, RequestScope ignored) {
+          return CompletableFuture.completedFuture(ApplyResult.APPLIED);
+        }
+        @Override public CompletableFuture<Void> preflight(PreparedCandidate candidate, RequestScope ignored) {
+          return CompletableFuture.completedFuture(null);
+        }
+      };
+      AtomicInteger preflightCalls = new AtomicInteger();
+      AuxiliaryMaterializationStore auxiliary = new AuxiliaryMaterializationStore() {
+        @Override public CompletableFuture<Void> preflight(
+            PreparedAuxiliaryRecord record, RequestScope ignored) {
+          preflightCalls.incrementAndGet();
+          return CompletableFuture.completedFuture(null);
+        }
+        @Override public CompletableFuture<ApplyResult> applySelected(
+            CommitDecision decision, PreparedAuxiliaryRecord record, RequestScope ignored) {
+          return CompletableFuture.completedFuture(ApplyResult.APPLIED);
+        }
+      };
+      ManifestCatalog catalog = new ManifestCatalog(repository);
+      var statePayload = ByteKey.copyOf(new byte[] {1});
+      var leaseState = new LeaseState(new LeaseIdentity(leaseId, 1), 30, 10_000, 0,
+          LeaseState.Status.ACTIVE, 1, 0, 0, 0);
+      var leasePlanVerifier = new AuxiliaryLeasePlanVerifier(
+          payload -> payload.equals(statePayload) ? leaseState
+              : throwInvalidLeaseStatePayload(),
+          payload -> throwInvalidLeaseBindingPayload());
+      assertThrows(CompletionException.class, () -> new CommitPlanVerifier(catalog,
+          materialization, results).verify(sealed, root, scope).join());
+      assertEquals(root, new CommitPlanVerifier(catalog, materialization, results, auxiliary,
+          leasePlanVerifier)
+          .verify(sealed, root, scope).join());
+      assertEquals(3, preflightCalls.get());
+    }
+  }
+
+  private static LeaseState throwInvalidLeaseStatePayload() {
+    throw new IllegalArgumentException("unexpected test Lease state payload");
+  }
+
+  private static io.etcdhbase.core.lease.LeaseBindingVersion throwInvalidLeaseBindingPayload() {
+    throw new IllegalArgumentException("unexpected test Lease binding payload");
+  }
+
+  @Test
+  void traversesMaximumAuxiliaryManifestWithoutRecursiveStackGrowth() {
+    int count = (int) AuxiliaryReference.MAX_RECORDS;
+    MemoryRepository repository = new MemoryRepository();
+    InvocationBinding invocation = InvocationBinding.begin(InvocationId.create(),
+        ByteKey.copyOf(new byte[32]), ByteKey.copyOf(new byte[32]), TransactionId.create(), 1, 0, 1);
+    var records = IntStream.range(0, count).mapToObj(index -> PreparedAuxiliaryRecord.create(
+        invocation.transactionId(), 1, 0, index, SystemRecordType.LEASE_ENUMERATION,
+        LeaseRecordIdentity.enumeration(index + 1L), new LeaseEnumerationPointer(1).encode())).iterator();
+    try (RequestScope scope = scope()) {
+      var root = new ManifestPreparation(repository, new ManifestPreparation.Limits(0, 0, 0, 0))
+          .prepareWithAuxiliary(invocation, records, () -> CompletableFuture.completedFuture(null), scope).join();
+      AtomicInteger visited = new AtomicInteger();
+      var summary = new ManifestCatalog(repository).forEachAuxiliary(root, scope, record -> {
+        assertEquals(visited.getAndIncrement(), record.ordinal());
+        return CompletableFuture.completedFuture(null);
+      }).join();
+      assertEquals(count, visited.get());
+      assertEquals(count, summary.count());
+    }
+  }
+
+  @Test
+  void stopsAuxiliaryTraversalWhenAnInFlightReadCompletesAfterCancellation() {
+    MemoryRepository repository = new MemoryRepository();
+    InvocationBinding invocation = InvocationBinding.begin(InvocationId.create(),
+        ByteKey.copyOf(new byte[32]), ByteKey.copyOf(new byte[32]), TransactionId.create(), 1, 0, 1);
+    var records = IntStream.range(0, 2).mapToObj(index -> PreparedAuxiliaryRecord.create(
+        invocation.transactionId(), 1, 0, index, SystemRecordType.LEASE_ENUMERATION,
+        LeaseRecordIdentity.enumeration(index + 1L), new LeaseEnumerationPointer(1).encode())).toList();
+    try (RequestScope scope = scope()) {
+      var root = new ManifestPreparation(repository, new ManifestPreparation.Limits(0, 0, 0, 0))
+          .prepareWithAuxiliary(invocation, records.iterator(),
+              () -> CompletableFuture.completedFuture(null), scope).join();
+      repository.pendingAuxiliaryRecordRead = new CompletableFuture<>();
+      AtomicInteger visited = new AtomicInteger();
+      var traversal = new ManifestCatalog(repository).forEachAuxiliary(root, scope, record -> {
+        visited.incrementAndGet();
+        return CompletableFuture.completedFuture(null);
+      });
+      assertEquals(1, repository.auxiliaryRecordReads);
+      scope.cancel();
+      repository.pendingAuxiliaryRecordRead.complete(Optional.of(records.getFirst()));
+      var failure = assertThrows(CompletionException.class, traversal::join);
+      assertEquals(BackendFailure.Category.CANCELLED, ((BackendFailure) failure.getCause()).category());
+      assertEquals(0, visited.get());
+      assertEquals(1, repository.auxiliaryRecordReads);
+    }
+  }
+
+  @Test
+  void chargesAuxiliaryDirectoryPagesAndRecordsBeforeReading() throws Exception {
+    MemoryRepository repository = new MemoryRepository();
+    InvocationBinding invocation = InvocationBinding.begin(InvocationId.create(),
+        ByteKey.copyOf(new byte[32]), ByteKey.copyOf(new byte[32]), TransactionId.create(), 1, 0, 1);
+    var records = IntStream.range(0, 2).mapToObj(index -> PreparedAuxiliaryRecord.create(
+        invocation.transactionId(), 1, 0, index, SystemRecordType.LEASE_ENUMERATION,
+        LeaseRecordIdentity.enumeration(index + 1L), new LeaseEnumerationPointer(1).encode())).toList();
+    var limits = new BudgetManager.Limits(2, 2, 2, 2, 2, 1_000_000, 256L << 20);
+    var manager = new BudgetManager(limits, Map.of("public", limits), limits);
+    var reservation = new BudgetManager.Reservation(8192, 8192, 128L << 20, 8192, 8192);
+    try (RequestScope scope = scope(); var account = manager.admit("public", scope, reservation, proofReadLimits())) {
+      var root = new ManifestPreparation(repository, new ManifestPreparation.Limits(0, 0, 0, 0))
+          .prepareWithAuxiliary(invocation, records.iterator(),
+              () -> CompletableFuture.completedFuture(null), scope).join();
+      var budget = new ManifestCatalog.ProofReadBudget(scope, account, 3, 1L << 30);
+      var failure = assertThrows(CompletionException.class, () -> new ManifestCatalog(repository)
+          .forEachAuxiliary(root, scope, budget, record -> CompletableFuture.completedFuture(null)).join());
+      assertEquals(BackendFailure.Category.RESOURCE_LIMIT, ((BackendFailure) failure.getCause()).category());
+      assertEquals(3, budget.pages());
+      assertEquals(1, repository.auxiliaryRecordReads);
+      assertEquals(0, manager.snapshot().allocatedBytes());
+    }
+  }
+
+  @Test
+  void rejectsDuplicateAuxiliaryTargetsDuringPreparationAndSealedTraversal() {
+    MemoryRepository repository = new MemoryRepository();
+    InvocationBinding invocation = InvocationBinding.begin(InvocationId.create(),
+        ByteKey.copyOf(new byte[32]), ByteKey.copyOf(new byte[32]), TransactionId.create(), 1, 0, 1);
+    ByteKey identity = LeaseRecordIdentity.stateVersion(-7, 1);
+    var first = PreparedAuxiliaryRecord.create(invocation.transactionId(), 1, 0, 0,
+        SystemRecordType.LEASE_STATE, identity, ByteKey.copyOf(new byte[] {1}));
+    var duplicate = PreparedAuxiliaryRecord.create(invocation.transactionId(), 1, 0, 1,
+        SystemRecordType.LEASE_STATE, identity, ByteKey.copyOf(new byte[] {2}));
+    try (RequestScope scope = scope()) {
+      var preparation = new ManifestPreparation(repository, new ManifestPreparation.Limits(0, 0, 0, 0));
+      assertThrows(CompletionException.class, () -> preparation.prepareWithAuxiliary(invocation,
+          List.of(first, duplicate).iterator(), () -> CompletableFuture.completedFuture(null), scope).join());
+      assertEquals(0, repository.sealCalls);
+
+      var firstReference = new AuxiliaryRecordReference(0, first.systemIdentity(), first.digest(), first.encodedBytes());
+      var secondReference = new AuxiliaryRecordReference(1, duplicate.systemIdentity(), duplicate.digest(), duplicate.encodedBytes());
+      var page = AuxiliaryPage.create(invocation.transactionId(), 0, List.of(firstReference, secondReference));
+      var directory = AuxiliaryDirectory.create(invocation.transactionId(), List.of(page.reference()));
+      var root = ManifestRoot.createWithAuxiliary(invocation.transactionId(), 1, 0, 1,
+          Optional.of(directory.reference()));
+      repository.auxiliaryRecords.put(first.systemIdentity(), first);
+      repository.auxiliaryRecords.put(duplicate.systemIdentity(), duplicate);
+      repository.auxiliaryPages.put(page.systemIdentity(), page);
+      repository.auxiliaryDirectories.put(directory.systemIdentity(), directory);
+      assertThrows(CompletionException.class, () -> new ManifestCatalog(repository)
+          .forEachAuxiliary(root, scope, record -> CompletableFuture.completedFuture(null)).join());
+    }
+  }
+
+  @Test
   void asynchronouslyStreamsCandidatesAndEventsBeforeSealing() {
     MemoryRepository repository = new MemoryRepository();
     SingleResultRepository resultRepository = new SingleResultRepository();
@@ -878,6 +1082,9 @@ class ManifestPreparationTest {
     private final Map<ByteKey, PreparedEvent> events = new HashMap<>();
     private final Map<ByteKey, EventPage> eventPages = new HashMap<>();
     private final Map<ByteKey, EventDirectoryPage> eventDirectories = new HashMap<>();
+    private final Map<ByteKey, PreparedAuxiliaryRecord> auxiliaryRecords = new HashMap<>();
+    private final Map<ByteKey, AuxiliaryPage> auxiliaryPages = new HashMap<>();
+    private final Map<ByteKey, AuxiliaryDirectory> auxiliaryDirectories = new HashMap<>();
     private final Map<ByteKey, ManifestRoot> roots = new HashMap<>();
     private int maximumLogicalKeyLength = Integer.MAX_VALUE;
     private int candidateWriteCount;
@@ -888,6 +1095,8 @@ class ManifestPreparationTest {
     private final ArrayDeque<PendingCreate> pendingCreates = new ArrayDeque<>();
     private int maximumPendingCreates;
     private CompletableFuture<Optional<ManifestDirectoryPage>> pendingDirectoryRead;
+    private CompletableFuture<Optional<PreparedAuxiliaryRecord>> pendingAuxiliaryRecordRead;
+    private int auxiliaryRecordReads;
 
     @Override
     public int candidateBucket(PreparedCandidate candidate) {
@@ -944,6 +1153,27 @@ class ManifestPreparationTest {
     }
 
     @Override
+    public CompletableFuture<SystemRecordStore.CreateResult> createAuxiliaryRecord(
+        PreparedAuxiliaryRecord record, RequestScope scope) {
+      writeCount++;
+      return create(auxiliaryRecords, record.systemIdentity(), record, PreparedAuxiliaryRecord::digest);
+    }
+
+    @Override
+    public CompletableFuture<SystemRecordStore.CreateResult> createAuxiliaryPage(
+        AuxiliaryPage page, RequestScope scope) {
+      writeCount++;
+      return create(auxiliaryPages, page.systemIdentity(), page, AuxiliaryPage::digest);
+    }
+
+    @Override
+    public CompletableFuture<SystemRecordStore.CreateResult> createAuxiliaryDirectory(
+        AuxiliaryDirectory directory, RequestScope scope) {
+      writeCount++;
+      return create(auxiliaryDirectories, directory.systemIdentity(), directory, AuxiliaryDirectory::digest);
+    }
+
+    @Override
     public CompletableFuture<SystemRecordStore.CreateResult> seal(ManifestRoot root, RequestScope scope) {
       writeCount++;
       sealCalls++;
@@ -986,6 +1216,26 @@ class ManifestPreparationTest {
     public CompletableFuture<Optional<EventDirectoryPage>> readEventDirectoryPage(
         ByteKey identity, RequestScope scope) {
       return completed(eventDirectories.get(identity));
+    }
+
+    @Override
+    public CompletableFuture<Optional<PreparedAuxiliaryRecord>> readAuxiliaryRecord(
+        ByteKey identity, RequestScope scope) {
+      auxiliaryRecordReads++;
+      if (pendingAuxiliaryRecordRead != null) return pendingAuxiliaryRecordRead;
+      return completed(auxiliaryRecords.get(identity));
+    }
+
+    @Override
+    public CompletableFuture<Optional<AuxiliaryPage>> readAuxiliaryPage(
+        ByteKey identity, RequestScope scope) {
+      return completed(auxiliaryPages.get(identity));
+    }
+
+    @Override
+    public CompletableFuture<Optional<AuxiliaryDirectory>> readAuxiliaryDirectory(
+        ByteKey identity, RequestScope scope) {
+      return completed(auxiliaryDirectories.get(identity));
     }
 
     private void put(PreparedCandidate value) { candidates.put(value.systemIdentity(), value); }

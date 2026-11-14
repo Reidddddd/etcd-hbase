@@ -177,7 +177,9 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
     if (reply instanceof MutationRelay.KnownRejection rejection) {
       return CompletableFuture.failedFuture(new BackendFailure(rejection.category()));
     }
-    var unknown = (MutationRelay.ResultUnknown) reply;
+    if (!(reply instanceof MutationRelay.ResultUnknown unknown)) {
+      return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN));
+    }
     // A lost owner reply may follow a completed publication. Resolve this same invocation;
     // never submit the mutation again or infer success from an incomplete decision.
     return resolveOriginal(invocation, digest, scope, account)

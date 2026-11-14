@@ -75,6 +75,27 @@
       </build>
     </profile>
     <profile>
+      <id>m4-j40-public</id>
+      <properties>
+        <j03.skipWire>false</j03.skipWire>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <failIfNoTests>true</failIfNoTests>
+              <includes combine.self="override">
+                <include>**/M4LeaseRpcIT.java</include>
+              </includes>
+              <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
       <id>m3-j34-public</id>
       <properties>
         <j03.skipWire>false</j03.skipWire>

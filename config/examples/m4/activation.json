@@ -1,0 +1,16 @@
+{
+  "member_id": "1",
+  "owner_lease_ms": 6000,
+  "heartbeat_ms": 1000,
+  "startup_timeout_ms": 60000,
+  "shutdown_timeout_ms": 30000,
+  "memory_bytes": 536870912,
+  "max_etcd_request_bytes": 1572864,
+  "pin_shards": 2,
+  "pin_slots_per_shard": 16,
+  "pin_lease_ms": 60000,
+  "read_cache_enabled": false,
+  "m4_lease_api_enabled": true,
+  "lease_min_ttl_seconds": 5,
+  "lease_clock_uncertainty_ms": 1000
+}

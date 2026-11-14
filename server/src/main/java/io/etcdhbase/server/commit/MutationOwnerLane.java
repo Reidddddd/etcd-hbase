@@ -59,8 +59,8 @@ public final class MutationOwnerLane {
     if (!tableGroup.equals(request.tableGroupId())) {
       return CompletableFuture.completedFuture(new OwnerForwarding.Unknown(BackendFailure.Category.PERMISSION));
     }
-    final boolean transaction;
-    try { transaction = MutationOperationEnvelope.kind(request.operationBytes()) != MutationOperationEnvelope.Kind.PUT; }
+    final MutationOperationEnvelope.Kind operationKind;
+    try { operationKind = MutationOperationEnvelope.kind(request.operationBytes()); }
     catch (IllegalArgumentException malformed) {
       return CompletableFuture.completedFuture(new OwnerForwarding.Unknown(BackendFailure.Category.UNKNOWN));
     }
@@ -70,8 +70,12 @@ public final class MutationOwnerLane {
     try {
       return queue.submit(bytes, scope, serviceScope -> {
         long elapsed = nanoTime.getAsLong() - entered;
-        if (transaction) metrics.recordTxnStage(RequestMetrics.TxnStage.QUEUE, Math.max(0, elapsed));
-        else metrics.recordPutStage(RequestMetrics.PutStage.QUEUE, Math.max(0, elapsed));
+        if (operationKind == MutationOperationEnvelope.Kind.PUT) {
+          metrics.recordPutStage(RequestMetrics.PutStage.QUEUE, Math.max(0, elapsed));
+        } else if (operationKind != MutationOperationEnvelope.Kind.LEASE_GRANT
+            && operationKind != MutationOperationEnvelope.Kind.LEASE_EXPIRE_EMPTY) {
+          metrics.recordTxnStage(RequestMetrics.TxnStage.QUEUE, Math.max(0, elapsed));
+        }
         long remaining = elapsed < 0 || elapsed >= request.remainingTimeoutNanos()
             ? 0 : Math.min(request.remainingTimeoutNanos() - elapsed, serviceScope.remainingDeadlineNanos());
         if (remaining <= 0) {

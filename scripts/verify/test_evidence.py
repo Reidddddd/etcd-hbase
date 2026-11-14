@@ -15,6 +15,18 @@ class EvidenceTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
 
+    def go_events(self, packages):
+        events = []
+        for package in sorted(packages):
+            events.extend([{"Action": "pass", "Package": GO_MODULE + package, "Test": "TestContract"},
+                           {"Action": "pass", "Package": GO_MODULE + package}])
+        return events
+
+    def write_go_events(self, events):
+        path = self.root / "go.jsonl"
+        path.write_text("".join(json.dumps(item) + "\n" for item in events))
+        return path
+
     def test_java_requires_actual_cases_and_rejects_skips(self):
         path = self.root / "core/target/surefire-reports/TEST-scope.xml"
         path.parent.mkdir(parents=True)
@@ -69,36 +81,34 @@ class EvidenceTest(unittest.TestCase):
             java_reports(self.root, {"integration"}, report_kinds=("surefire-reports",))
 
     def test_go_requires_every_package_and_executed_tests(self):
-        path = self.root / "go.jsonl"
-        events = []
-        for package in sorted(GO_PACKAGES):
-            events.extend([{"Action": "pass", "Package": GO_MODULE + package, "Test": "TestContract"},
-                           {"Action": "pass", "Package": GO_MODULE + package}])
-        def write(items):
-            path.write_text("".join(json.dumps(item) + "\n" for item in items))
-        write(events)
+        events = self.go_events(GO_PACKAGES)
+        path = self.write_go_events(events)
         self.assertEqual(len(GO_PACKAGES), go_report(path)["passed_test_events"])
         for damaged in (events[:-1], events + [{"Action": "skip"}], events + [events[-1]],
                         [event for event in events if "Test" not in event]):
-            write(damaged)
+            self.write_go_events(damaged)
             with self.assertRaises(ValueError):
                 go_report(path)
 
-    def test_go_requires_m3_driver_without_weakening_package_or_skip_checks(self):
+    def test_go_requires_m3_driver(self):
         self.assertIn("cmd/m3driver", GO_PACKAGES)
-        path = self.root / "go.jsonl"
-        events = []
-        for package in sorted(GO_PACKAGES - {"cmd/m3driver"}):
-            events.extend([{"Action": "pass", "Package": GO_MODULE + package, "Test": "TestContract"},
-                           {"Action": "pass", "Package": GO_MODULE + package}])
-        path.write_text("".join(json.dumps(item) + "\n" for item in events))
+        path = self.write_go_events(self.go_events(GO_PACKAGES - {"cmd/m3driver"}))
         with self.assertRaises(ValueError):
             go_report(path)
-        events.extend([{"Action": "pass", "Package": GO_MODULE + "cmd/m3driver", "Test": "TestContract"},
-                       {"Action": "pass", "Package": GO_MODULE + "cmd/m3driver"},
-                       {"Action": "pass", "Package": GO_MODULE + "cmd/unexpected", "Test": "TestContract"},
-                       {"Action": "pass", "Package": GO_MODULE + "cmd/unexpected"}])
-        path.write_text("".join(json.dumps(item) + "\n" for item in events))
+
+    def test_go_requires_m4_driver(self):
+        self.assertIn("cmd/m4driver", GO_PACKAGES)
+        path = self.write_go_events(self.go_events(GO_PACKAGES - {"cmd/m4driver"}))
+        with self.assertRaises(ValueError):
+            go_report(path)
+
+        report = go_report(self.write_go_events(self.go_events(GO_PACKAGES)))
+        self.assertEqual(GO_PACKAGES, set(report["packages"]))
+
+    def test_go_rejects_unregistered_packages(self):
+        events = self.go_events(GO_PACKAGES)
+        events.extend(self.go_events({"cmd/unexpected"}))
+        path = self.write_go_events(events)
         with self.assertRaises(ValueError):
             go_report(path)
 

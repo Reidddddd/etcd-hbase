@@ -7,9 +7,11 @@ import java.util.Optional;
 /** Immutable logical control state; HBase serialization stays in the adapter module. */
 public final class CommitState {
   public static final int FORMAT_VERSION = 1;
+  public static final int AUXILIARY_FORMAT_VERSION = 2;
   public static final int MAX_OWNER_INSTANCE_BYTES = 128;
 
   private final ByteKey profileFingerprint;
+  private final int formatVersion;
   private final Optional<String> ownerInstance;
   private final long ownerEpoch;
   private final long ownerLeaseDeadlineEpochMillis;
@@ -22,6 +24,7 @@ public final class CommitState {
   private final long compactRevision;
 
   private CommitState(
+      int formatVersion,
       ByteKey profileFingerprint,
       Optional<String> ownerInstance,
       long ownerEpoch,
@@ -36,6 +39,10 @@ public final class CommitState {
     this.profileFingerprint = Objects.requireNonNull(profileFingerprint, "profileFingerprint");
     this.ownerInstance = Objects.requireNonNull(ownerInstance, "ownerInstance");
     this.publication = Objects.requireNonNull(publication, "publication");
+    if (formatVersion != FORMAT_VERSION && formatVersion != AUXILIARY_FORMAT_VERSION) {
+      throw new IllegalArgumentException("unknown commit control format");
+    }
+    this.formatVersion = formatVersion;
     validateProfileFingerprint(profileFingerprint);
     validateCountersAndWatermarks(ownerEpoch, stateVersion, publishedSequence, publishedRevision,
         finalizedSequence, finalizedRevision, compactRevision);
@@ -54,7 +61,7 @@ public final class CommitState {
 
   public static CommitState initial(ByteKey profileFingerprint, long initialRevision) {
     if (initialRevision <= 0) throw new IllegalArgumentException("initial revision must be positive");
-    return new CommitState(profileFingerprint, Optional.empty(), 0, 0, 1,
+    return new CommitState(FORMAT_VERSION, profileFingerprint, Optional.empty(), 0, 0, 1,
         0, initialRevision, 0, initialRevision, Optional.empty(), 0);
   }
 
@@ -71,11 +78,21 @@ public final class CommitState {
       long finalizedRevision,
       Optional<PublicationSlot> publication,
       long compactRevision) {
-    return new CommitState(profileFingerprint, ownerInstance, ownerEpoch,
+    return restore(FORMAT_VERSION, profileFingerprint, ownerInstance, ownerEpoch,
         ownerLeaseDeadlineEpochMillis, stateVersion, publishedSequence, publishedRevision,
         finalizedSequence, finalizedRevision, publication, compactRevision);
   }
 
+  public static CommitState restore(int formatVersion, ByteKey profileFingerprint,
+      Optional<String> ownerInstance, long ownerEpoch, long ownerLeaseDeadlineEpochMillis,
+      long stateVersion, long publishedSequence, long publishedRevision, long finalizedSequence,
+      long finalizedRevision, Optional<PublicationSlot> publication, long compactRevision) {
+    return new CommitState(formatVersion, profileFingerprint, ownerInstance, ownerEpoch,
+        ownerLeaseDeadlineEpochMillis, stateVersion, publishedSequence, publishedRevision,
+        finalizedSequence, finalizedRevision, publication, compactRevision);
+  }
+
+  public int formatVersion() { return formatVersion; }
   public ByteKey profileFingerprint() { return profileFingerprint; }
   public Optional<String> ownerInstance() { return ownerInstance; }
   public long ownerEpoch() { return ownerEpoch; }
@@ -87,6 +104,18 @@ public final class CommitState {
   public long finalizedRevision() { return finalizedRevision; }
   public Optional<PublicationSlot> publication() { return publication; }
   public long compactRevision() { return compactRevision; }
+
+  /** Fences the old owner in the same CAS that enables the auxiliary control format. */
+  public CommitState upgradeAuxiliaryFormat(String expectedOwner, long expectedEpoch, long nowMillis) {
+    requireOwner(expectedOwner, expectedEpoch);
+    if (formatVersion != FORMAT_VERSION || publication.isPresent() || ownerLeaseExpired(nowMillis)) {
+      throw new IllegalStateException("control state cannot be upgraded while active work is pending");
+    }
+    return new CommitState(AUXILIARY_FORMAT_VERSION, profileFingerprint, ownerInstance,
+        Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
+        publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
+        publication, compactRevision);
+  }
 
   public boolean ownerLeaseExpired(long nowEpochMillis) {
     if (nowEpochMillis < 0) throw new IllegalArgumentException("current time must be non-negative");
@@ -164,7 +193,7 @@ public final class CommitState {
       long nextVersion, long nextPublishedSequence, long nextPublishedRevision,
       long nextFinalizedSequence, long nextFinalizedRevision,
       Optional<PublicationSlot> nextPublication, long nextCompactRevision) {
-    return new CommitState(profileFingerprint, nextOwner, nextEpoch, nextLeaseDeadline, nextVersion,
+    return new CommitState(formatVersion, profileFingerprint, nextOwner, nextEpoch, nextLeaseDeadline, nextVersion,
         nextPublishedSequence, nextPublishedRevision, nextFinalizedSequence,
         nextFinalizedRevision, nextPublication, nextCompactRevision);
   }

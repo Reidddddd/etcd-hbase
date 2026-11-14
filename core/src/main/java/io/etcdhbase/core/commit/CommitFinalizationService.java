@@ -18,6 +18,7 @@ public final class CommitFinalizationService implements CommitFinalizer {
   private final ManifestCatalog manifests;
   private final MaterializationStore materialization;
   private final ResultCatalog results;
+  private final AuxiliaryMaterializationStore auxiliaryMaterialization;
 
   public CommitFinalizationService(
       CommitControlStore control,
@@ -36,12 +37,25 @@ public final class CommitFinalizationService implements CommitFinalizer {
       ManifestCatalog manifests,
       MaterializationStore materialization,
       ResultCatalog results) {
+    this(control, outcomes, decisions, manifests, materialization, results, null);
+  }
+
+  /** Creates a finalizer that also materializes the selected auxiliary records before F advances. */
+  public CommitFinalizationService(
+      CommitControlStore control,
+      CommitOutcomeResolver outcomes,
+      CommitDecisionRepository decisions,
+      ManifestCatalog manifests,
+      MaterializationStore materialization,
+      ResultCatalog results,
+      AuxiliaryMaterializationStore auxiliaryMaterialization) {
     this.control = Objects.requireNonNull(control, "control");
     this.outcomes = Objects.requireNonNull(outcomes, "outcomes");
     this.decisions = Objects.requireNonNull(decisions, "decisions");
     this.manifests = Objects.requireNonNull(manifests, "manifests");
     this.materialization = Objects.requireNonNull(materialization, "materialization");
     this.results = results;
+    this.auxiliaryMaterialization = auxiliaryMaterialization;
   }
 
   @Override
@@ -67,7 +81,8 @@ public final class CommitFinalizationService implements CommitFinalizer {
       validateBinding(invocation, decision);
       return archiveDecision(decision, serviceScope, 0)
           .thenCompose(ignored -> readAndValidateManifest(invocation, decision, serviceScope))
-          .thenCompose(root -> applyCandidates(invocation, decision, root, serviceScope))
+          .thenCompose(root -> applyCandidates(invocation, decision, root, serviceScope)
+              .thenCompose(ignored -> applyAuxiliary(invocation, root, decision, serviceScope)))
           .thenCompose(ignored -> finalizeControl(invocation, decision, serviceScope, 0));
     });
   }
@@ -150,6 +165,31 @@ public final class CommitFinalizationService implements CommitFinalizer {
                   : CompletableFuture.failedFuture(new IllegalStateException(
                       "current row was superseded before this commit was finalized")));
         })).thenApply(ignored -> null);
+  }
+
+  private CompletableFuture<Void> applyAuxiliary(
+      InvocationBinding invocation, ManifestRoot root, CommitDecision decision, RequestScope scope) {
+    if (root.auxiliaryReference().isEmpty()) return CompletableFuture.completedFuture(null);
+    if (auxiliaryMaterialization == null) {
+      return CompletableFuture.failedFuture(new IllegalStateException(
+          "finalizer is not equipped to materialize auxiliary records"));
+    }
+    return manifests.forEachAuxiliary(root, scope, record ->
+        auxiliaryMaterialization.applySelected(decision, record, scope).thenCompose(result -> {
+          if (result == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                "auxiliary materialization returned no result"));
+          }
+          if (result != AuxiliaryMaterializationStore.ApplyResult.SUPERSEDED) {
+            return CompletableFuture.completedFuture(null);
+          }
+          return outcomes.resolveForFinalization(invocation, scope).thenCompose(current ->
+              current.state() == CommitOutcomeResolver.State.SELECTED_FINALIZED
+                  ? CompletableFuture.completedFuture(null)
+                  : CompletableFuture.failedFuture(new IllegalStateException(
+                      "auxiliary pointer was superseded before this commit was finalized")));
+        }))
+        .thenApply(ignored -> null);
   }
 
   private CompletableFuture<CommitOutcomeResolver.Resolution> finalizeControl(

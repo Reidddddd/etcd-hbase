@@ -14,15 +14,20 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.Objects;
+import java.util.LinkedHashSet;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 
 /** Validated binding to the pre-provisioned system table; it never creates or adopts a table. */
 public final class SystemTableBinding {
   private static final Set<String> REQUIRED_RECORD_CATEGORIES =
       Set.of("CONTROL", "INVOCATION", "CANDIDATE", "MANIFEST", "DECISION", "SNAPSHOT_PIN");
+  private static final Set<String> AUXILIARY_RECORD_CATEGORIES = Set.of(
+      "AUXILIARY", "LEASE_STATE", "LEASE_ENUMERATION", "EXPIRY_CANDIDATE",
+      "LEASE_RESULT", "LEASE_BINDING");
   private final TableName table;
   private final byte[] family;
   private final String tableGroupId;
@@ -98,10 +103,50 @@ public final class SystemTableBinding {
     return Arrays.asList(categories.split(",", -1)).contains("RESULT");
   }
 
+  /** Descriptor capability only; safe activation also requires the control-row upgrade fence. */
+  public boolean supportsAuxiliary(TableDescriptor descriptor) {
+    return supportsResults(descriptor)
+        && "1".equals(descriptor.getValue("etcdhbase.m4.auxiliary-format"))
+        && containsAllCategories(descriptor.getValue("etcdhbase.m0.record-categories"),
+            AUXILIARY_RECORD_CATEGORIES);
+  }
+
+  /** Returns an additive record-category declaration for the fenced M4 capability upgrade. */
+  public String auxiliaryRecordCategories(TableDescriptor descriptor) {
+    validate(descriptor);
+    if (!supportsResults(descriptor)) {
+      throw new IllegalStateException("M4 auxiliary records require the M3 result capability");
+    }
+    var categories = new LinkedHashSet<>(Arrays.asList(
+        descriptor.getValue("etcdhbase.m0.record-categories").split(",", -1)));
+    categories.addAll(AUXILIARY_RECORD_CATEGORIES);
+    return String.join(",", categories);
+  }
+
+  /** Adds the M4 record capability without changing the table's rows or family policy. */
+  public TableDescriptor withAuxiliaryCapability(TableDescriptor descriptor) {
+    validate(descriptor);
+    if (supportsAuxiliary(descriptor)) return descriptor;
+    TableDescriptor upgraded = TableDescriptorBuilder.newBuilder(descriptor)
+        .setValue("etcdhbase.m0.record-categories", auxiliaryRecordCategories(descriptor))
+        .setValue("etcdhbase.m4.auxiliary-format", "1")
+        .build();
+    if (!supportsAuxiliary(upgraded)) {
+      throw new IllegalStateException("M4 auxiliary descriptor capability could not be constructed");
+    }
+    return upgraded;
+  }
+
   private static boolean containsRequiredCategories(String categories) {
-    if (categories == null) return false;
-    Set<String> declared = Set.copyOf(Arrays.asList(categories.split(",", -1)));
-    return declared.containsAll(REQUIRED_RECORD_CATEGORIES);
+    return containsAllCategories(categories, REQUIRED_RECORD_CATEGORIES);
+  }
+
+  private static boolean containsAllCategories(String categories, Set<String> required) {
+    if (categories == null || categories.isBlank()) return false;
+    String[] items = categories.split(",", -1);
+    if (Arrays.stream(items).anyMatch(String::isBlank)) return false;
+    Set<String> declared = Set.copyOf(Arrays.asList(items));
+    return declared.containsAll(required);
   }
 
   private static String requireIdentifier(String value, String name) {

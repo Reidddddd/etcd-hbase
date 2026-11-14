@@ -11,6 +11,7 @@ import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.core.scan.ScanScheduler;
 import io.etcdhbase.grpc.service.KvService;
+import io.etcdhbase.grpc.service.LeaseService;
 import io.etcdhbase.hbase.identity.HBaseAuthenticators;
 import io.etcdhbase.hbase.identity.HBaseBackendIdentityProvider;
 import io.etcdhbase.server.commit.M3TableGroupRuntime;
@@ -172,6 +173,12 @@ final class M3RuntimeGroups implements AutoCloseable {
     ManagedGroup managed = groups.get(group);
     if (managed == null || closing.get()) throw new IllegalArgumentException("table group is not active");
     return managed.runtime().kvService();
+  }
+
+  LeaseService leaseService(String group) {
+    ManagedGroup managed = groups.get(group);
+    if (managed == null || closing.get()) throw new IllegalArgumentException("table group is not active");
+    return managed.runtime().leaseService();
   }
 
   RequestMetrics metrics(String group) {

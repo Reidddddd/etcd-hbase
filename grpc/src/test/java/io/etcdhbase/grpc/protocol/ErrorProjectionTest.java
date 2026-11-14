@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.kv.KvFailure;
+import io.etcdhbase.core.lease.LeaseFailure;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.util.concurrent.CancellationException;
@@ -17,6 +18,25 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 
 class ErrorProjectionTest {
+  @Test
+  void projectsLeaseFailuresWithoutExposingTheirCause() {
+    assertStatus(ErrorProjection.project(new LeaseFailure(LeaseFailure.Reason.NOT_FOUND)),
+        Status.Code.NOT_FOUND, "etcdserver: requested lease not found");
+    assertStatus(ErrorProjection.project(new LeaseFailure(LeaseFailure.Reason.ALREADY_EXISTS)),
+        Status.Code.FAILED_PRECONDITION, "etcdserver: lease already exists");
+    assertStatus(ErrorProjection.project(new LeaseFailure(LeaseFailure.Reason.TTL_TOO_LARGE)),
+        Status.Code.OUT_OF_RANGE, "etcdserver: too large lease TTL");
+    assertStatus(ErrorProjection.project(new LeaseFailure(LeaseFailure.Reason.CLOCK_UNHEALTHY)),
+        Status.Code.UNAVAILABLE, "lease time source is unavailable");
+    for (LeaseFailure.Reason reason : new LeaseFailure.Reason[] {
+        LeaseFailure.Reason.RESOURCE_LIMIT, LeaseFailure.Reason.ID_SPACE_EXHAUSTED}) {
+      var projected = ErrorProjection.project(new CompletionException(
+          new LeaseFailure(reason, new IllegalStateException("sensitive backend detail"))));
+      assertStatus(projected, Status.Code.RESOURCE_EXHAUSTED, "backend resource limit was reached");
+      assertNull(projected.getCause());
+    }
+  }
+
   @Test
   void projectsKvSemanticsUsingNativeErrorIdentity() {
     assertStatus(ErrorProjection.project(new KvFailure(KvFailure.Reason.EMPTY_KEY)),

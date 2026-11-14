@@ -26,7 +26,7 @@ public record SnapshotGcBoundary(long safeRevision, long safeSequence,
       Objects.requireNonNull(rootDigest, "rootDigest");
       if (shard < 0 || slot < 0 || generation <= 0 || pinId.length() != 16
           || requiredRevision <= 0 || requiredSequence < 0
-          || (requiredSequence > 0) != transactionId.isPresent()
+          || transactionId.isPresent() && requiredSequence == 0
           || transactionId.isPresent() != rootIdentity.isPresent()
           || rootIdentity.isPresent() != rootDigest.isPresent()
           || rootDigest.filter(digest -> digest.length() != 32).isPresent()) {

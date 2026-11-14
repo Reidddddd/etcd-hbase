@@ -42,7 +42,8 @@ public final class RuntimeServer implements AutoCloseable {
     try {
       for (var listener : configuration.listeners()) {
         opened.add(Bootstrap.startConfigured(listener, configuration.resources(),
-            groups.service(listener.tableGroupId()), groups.metrics(listener.tableGroupId())));
+            groups.service(listener.tableGroupId()), groups.leaseService(listener.tableGroupId()),
+            groups.metrics(listener.tableGroupId())));
       }
       if (!groups.isReady()) throw new IllegalStateException("M3 table group lost readiness during startup");
       return new RuntimeServer(opened, groups, activation.shutdownTimeoutMs());

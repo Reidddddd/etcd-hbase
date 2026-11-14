@@ -2,6 +2,7 @@ package io.etcdhbase.core.commit;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.bytes.KeyRange;
+import io.etcdhbase.core.concurrent.ContinuationExecutor;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.request.RequestScope;
@@ -16,13 +17,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.ToLongFunction;
 
 /** Verifies and streams a sealed candidate/event manifest without collecting transaction data. */
 public final class ManifestCatalog {
+  private static final ContinuationExecutor AUXILIARY_CONTINUATIONS = new ContinuationExecutor();
   // Conservative accounting for ordinary adapter-sized values and transient copies. The HBase
   // client can receive an oversized cell before the adapter rejects it; this is not a hard wire
   // bound and must be addressed before production proof reuse is enabled.
   static final long PROOF_SYSTEM_RECORD_ENVELOPE = 64L << 20;
+
+  /** Minimum I/O lane needed to admit one conservative system-record proof read. */
+  public static long maximumProofReadPageBytes() {
+    return PROOF_SYSTEM_RECORD_ENVELOPE;
+  }
+
   /** Proof-only page allowance; callers use a separate account so a miss can fall back safely. */
   public static final class ProofReadBudget {
     private final RequestScope scope;
@@ -42,14 +51,15 @@ public final class ManifestCatalog {
       this.maximumBytes = maximumBytes;
     }
 
-    private synchronized BudgetManager.Lease retainPage(long maximumPageBytes) throws BackendFailure {
+    private synchronized BudgetManager.Lease retainPage(long maximumPageBytes, boolean pointRead)
+        throws BackendFailure {
       if (pages >= maximumPages || maximumPageBytes > maximumBytes - bytes) {
         throw new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT);
       }
       var lease = account.tryRetain(BudgetManager.Memory.IO, maximumPageBytes)
           .orElseThrow(() -> new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
       try {
-        account.chargeInternalPointRead(maximumPageBytes);
+        if (pointRead) account.chargeInternalPointRead(maximumPageBytes);
       } catch (BackendFailure | RuntimeException | Error failure) {
         try { lease.close(); }
         catch (RuntimeException | Error cleanup) { if (cleanup != failure) failure.addSuppressed(cleanup); }
@@ -60,6 +70,26 @@ public final class ManifestCatalog {
       return lease;
     }
 
+    private synchronized BudgetManager.Lease retainMeasuredPage(long maximumPageBytes)
+        throws BackendFailure {
+      if (maximumPageBytes < 1 || pages >= maximumPages) {
+        throw new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT);
+      }
+      var lease = account.tryRetain(BudgetManager.Memory.IO, maximumPageBytes)
+          .orElseThrow(() -> new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
+      pages++;
+      return lease;
+    }
+
+    private synchronized void recordMeasuredBytes(long actualBytes, long maximumPageBytes,
+        boolean pointRead) throws BackendFailure {
+      if (actualBytes < 0 || actualBytes > maximumPageBytes || actualBytes > maximumBytes - bytes) {
+        throw new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT);
+      }
+      if (pointRead) account.chargeInternalPointRead(actualBytes);
+      bytes = Math.addExact(bytes, actualBytes);
+    }
+
     public synchronized int pages() { return pages; }
     public synchronized long bytes() { return bytes; }
     public boolean belongsTo(RequestScope candidate) { return scope == candidate; }
@@ -67,18 +97,63 @@ public final class ManifestCatalog {
 
     <T> CompletableFuture<T> read(long maximumBytes, Supplier<CompletableFuture<T>> work) {
       BudgetManager.Lease lease;
-      try { lease = retainPage(maximumBytes); }
+      try { lease = retainPage(maximumBytes, true); }
       catch (BackendFailure | RuntimeException failure) { return CompletableFuture.failedFuture(failure); }
       return new ProofPageRead<T>(lease).start(work);
+    }
+
+    /**
+     * Reserves a maximum-sized I/O page but charges the actual encoded bytes returned. This keeps
+     * worst-case in-flight memory separate from cumulative request work, so a sequence of small
+     * metadata records does not consume the budget as though every record were maximum-sized.
+     */
+    <T> CompletableFuture<T> readMeasured(long maximumPageBytes,
+        ToLongFunction<? super T> encodedBytes, Supplier<CompletableFuture<T>> work) {
+      Objects.requireNonNull(encodedBytes, "encodedBytes");
+      BudgetManager.Lease lease;
+      try { lease = retainMeasuredPage(maximumPageBytes); }
+      catch (BackendFailure | RuntimeException failure) { return CompletableFuture.failedFuture(failure); }
+      return new ProofPageRead<T>(lease, maximumPageBytes, encodedBytes, true).start(work);
+    }
+
+    /** Reserves a bounded scan page without charging it as a point Get. */
+    <T> CompletableFuture<T> scan(long maximumBytes, Supplier<CompletableFuture<T>> work) {
+      BudgetManager.Lease lease;
+      try { lease = retainPage(maximumBytes, false); }
+      catch (BackendFailure | RuntimeException failure) { return CompletableFuture.failedFuture(failure); }
+      return new ProofPageRead<T>(lease).start(work);
+    }
+
+    /** Reserves a bounded scan page and charges only the returned encoded bytes. */
+    <T> CompletableFuture<T> scanMeasured(long maximumPageBytes,
+        ToLongFunction<? super T> encodedBytes, Supplier<CompletableFuture<T>> work) {
+      Objects.requireNonNull(encodedBytes, "encodedBytes");
+      BudgetManager.Lease lease;
+      try { lease = retainMeasuredPage(maximumPageBytes); }
+      catch (BackendFailure | RuntimeException failure) { return CompletableFuture.failedFuture(failure); }
+      return new ProofPageRead<T>(lease, maximumPageBytes, encodedBytes, false).start(work);
     }
 
     /** Owns one admitted page until its producer and cleanup have both settled. */
     private final class ProofPageRead<T> {
       private final BudgetManager.Lease lease;
+      private final long maximumPageBytes;
+      private final ToLongFunction<? super T> encodedBytes;
+      private final boolean pointRead;
       private final CompletableFuture<Void> released = new CompletableFuture<>();
       private RequestScope.ScopedCleanup registration;
 
-      private ProofPageRead(BudgetManager.Lease lease) { this.lease = lease; }
+      private ProofPageRead(BudgetManager.Lease lease) {
+        this(lease, 0, null, false);
+      }
+
+      private ProofPageRead(BudgetManager.Lease lease, long maximumPageBytes,
+          ToLongFunction<? super T> encodedBytes, boolean pointRead) {
+        this.lease = lease;
+        this.maximumPageBytes = maximumPageBytes;
+        this.encodedBytes = encodedBytes;
+        this.pointRead = pointRead;
+      }
 
       private CompletableFuture<T> start(Supplier<CompletableFuture<T>> work) {
         try {
@@ -102,7 +177,18 @@ public final class ManifestCatalog {
           catch (Exception | Error cleanup) { if (cleanup != failure) failure.addSuppressed(cleanup); }
           return CompletableFuture.failedFuture(failure);
         }
-        return operation.whenComplete((ignored, failure) -> {
+        CompletableFuture<T> measured = operation;
+        if (encodedBytes != null) {
+          measured = operation.thenApply(value -> {
+            try {
+              recordMeasuredBytes(encodedBytes.applyAsLong(value), maximumPageBytes, pointRead);
+            } catch (BackendFailure budgetFailure) {
+              throw new java.util.concurrent.CompletionException(budgetFailure);
+            }
+            return value;
+          });
+        }
+        return measured.whenComplete((ignored, failure) -> {
           try { registration.close(); }
           catch (Exception cleanup) { throw new java.util.concurrent.CompletionException(cleanup); }
         });
@@ -237,6 +323,148 @@ public final class ManifestCatalog {
           : CompletableFuture.failedFuture(new IllegalStateException("manifest event directory is missing"));
     }
     return cursor.visit(root.eventDirectory().orElseThrow()).thenApply(ignored -> cursor.summary());
+  }
+
+  /** Streams and authenticates every immutable auxiliary update covered by a sealed root. */
+  public CompletableFuture<Summary> forEachAuxiliary(ManifestRoot root, RequestScope scope,
+      Function<PreparedAuxiliaryRecord, CompletableFuture<Void>> consumer) {
+    return forEachAuxiliary(root, scope, null, consumer);
+  }
+
+  /** Charges each bounded system-record read against the caller's metadata budget. */
+  public CompletableFuture<Summary> forEachAuxiliary(ManifestRoot root, RequestScope scope,
+      ProofReadBudget budget, Function<PreparedAuxiliaryRecord, CompletableFuture<Void>> consumer) {
+    Objects.requireNonNull(root, "root");
+    Objects.requireNonNull(scope, "scope");
+    Objects.requireNonNull(consumer, "consumer");
+    if (budget != null && !budget.belongsTo(scope)) {
+      return CompletableFuture.failedFuture(new IllegalArgumentException("auxiliary budget belongs to another scope"));
+    }
+    if (root.auxiliaryReference().isEmpty()) {
+      return CompletableFuture.completedFuture(new Summary(0, 0));
+    }
+    AuxiliaryReference reference = root.auxiliaryReference().orElseThrow();
+    return readAuxiliary(budget,
+        () -> repository.readAuxiliaryDirectoryWithSize(reference.identity(), scope))
+        .thenCompose(stored -> {
+      requireAuxiliaryActive(scope);
+      AuxiliaryDirectory directory = stored.orElseThrow(
+          () -> new IllegalStateException("sealed auxiliary directory is missing"));
+      if (!directory.transactionId().equals(root.transactionId())
+          || !directory.systemIdentity().equals(reference.identity())
+          || !directory.reference().equals(reference)) {
+        return CompletableFuture.failedFuture(
+            new IllegalStateException("auxiliary directory differs from its sealed root"));
+      }
+      var cursor = new AuxiliaryCursor(root, directory, scope, budget, consumer);
+      return cursor.visitPage(0).thenApply(ignored -> cursor.summary(reference));
+    });
+  }
+
+  private final class AuxiliaryCursor {
+    private final ManifestRoot root;
+    private final AuxiliaryDirectory directory;
+    private final RequestScope scope;
+    private final ProofReadBudget budget;
+    private final Function<PreparedAuxiliaryRecord, CompletableFuture<Void>> consumer;
+    private final java.util.Set<AuxiliaryTarget> targets = new java.util.HashSet<>();
+    private long count;
+    private long bytes;
+    private long nextOrdinal;
+
+    private AuxiliaryCursor(ManifestRoot root, AuxiliaryDirectory directory, RequestScope scope,
+        ProofReadBudget budget, Function<PreparedAuxiliaryRecord, CompletableFuture<Void>> consumer) {
+      this.root = root;
+      this.directory = directory;
+      this.scope = scope;
+      this.budget = budget;
+      this.consumer = consumer;
+    }
+
+    private CompletableFuture<Void> visitPage(int pageIndex) {
+      requireAuxiliaryActive(scope);
+      if (pageIndex == directory.pages().size()) return CompletableFuture.completedFuture(null);
+      AuxiliaryPageReference reference = directory.pages().get(pageIndex);
+      if (reference.pageIndex() != pageIndex || reference.firstOrdinal() != nextOrdinal) {
+        return invalidAuxiliary("auxiliary page range is not contiguous");
+      }
+      return readAuxiliary(budget,
+          () -> repository.readAuxiliaryPageWithSize(reference.identity(), scope))
+          .thenCompose(stored -> {
+        requireAuxiliaryActive(scope);
+        AuxiliaryPage page = stored.orElseThrow(
+            () -> new IllegalStateException("sealed auxiliary page is missing"));
+        if (!page.transactionId().equals(root.transactionId())
+            || !page.reference().equals(reference)) {
+          return invalidAuxiliary("auxiliary page differs from its directory reference");
+        }
+        return visitRecord(page, 0).thenComposeAsync(ignored -> {
+          if (nextOrdinal != reference.lastOrdinal() + 1) {
+            return invalidAuxiliary("auxiliary page did not cover its declared ordinal range");
+          }
+          return visitPage(pageIndex + 1);
+        }, AUXILIARY_CONTINUATIONS);
+      });
+    }
+
+    private CompletableFuture<Void> visitRecord(AuxiliaryPage page, int recordIndex) {
+      requireAuxiliaryActive(scope);
+      if (recordIndex == page.records().size()) return CompletableFuture.completedFuture(null);
+      AuxiliaryRecordReference reference = page.records().get(recordIndex);
+      if (reference.ordinal() != nextOrdinal) {
+        return invalidAuxiliary("auxiliary records are not contiguous");
+      }
+      return readAuxiliary(budget,
+          () -> repository.readAuxiliaryRecordWithSize(reference.identity(), scope))
+          .thenCompose(stored -> {
+        requireAuxiliaryActive(scope);
+        PreparedAuxiliaryRecord record = stored.orElseThrow(
+            () -> new IllegalStateException("sealed auxiliary record is missing"));
+        if (!reference.matches(record) || !record.transactionId().equals(root.transactionId())
+            || record.ownerEpoch() != root.ownerEpoch()
+            || record.baseSequence() != root.baseSequence() || record.ordinal() != nextOrdinal) {
+          return invalidAuxiliary("auxiliary record differs from its authenticated reference");
+        }
+        if (!targets.add(new AuxiliaryTarget(record.targetType(), record.targetIdentity()))) {
+          return invalidAuxiliary("duplicate auxiliary materialization target");
+        }
+        count = Math.addExact(count, 1);
+        bytes = Math.addExact(bytes, record.encodedBytes());
+        nextOrdinal = Math.addExact(nextOrdinal, 1);
+        return Objects.requireNonNull(consumer.apply(record), "auxiliary consumer future")
+            .thenComposeAsync(ignored -> visitRecord(page, recordIndex + 1), AUXILIARY_CONTINUATIONS);
+      });
+    }
+
+    private Summary summary(AuxiliaryReference reference) {
+      if (count != reference.itemCount() || bytes != reference.totalBytes()
+          || directory.pages().size() != reference.pageCount()) {
+        throw new IllegalStateException("auxiliary root aggregates differ from its records");
+      }
+      return new Summary(count, bytes);
+    }
+  }
+
+  private record AuxiliaryTarget(SystemRecordType type, ByteKey identity) {}
+
+  private static <T> CompletableFuture<Optional<T>> readAuxiliary(ProofReadBudget budget,
+      Supplier<CompletableFuture<ManifestRepository.ReadValue<T>>> work) {
+    CompletableFuture<ManifestRepository.ReadValue<T>> read = budget == null
+        ? work.get()
+        : budget.readMeasured(PROOF_SYSTEM_RECORD_ENVELOPE,
+            ManifestRepository.ReadValue::encodedBytes, work);
+    return read.thenApply(ManifestRepository.ReadValue::value);
+  }
+
+  private static void requireAuxiliaryActive(RequestScope scope) {
+    if (scope.isDeadlineExceeded() || scope.isClosed()) {
+      throw new java.util.concurrent.CompletionException(new BackendFailure(scope.isDeadlineExceeded()
+          ? BackendFailure.Category.TIMEOUT : BackendFailure.Category.CANCELLED));
+    }
+  }
+
+  private static <T> CompletableFuture<T> invalidAuxiliary(String message) {
+    return CompletableFuture.failedFuture(new IllegalStateException(message));
   }
 
   /**

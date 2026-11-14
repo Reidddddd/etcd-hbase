@@ -1,0 +1,152 @@
+{
+  "schema": "etcd-hbase-m4-cases/v1",
+  "protocol": "etcd-v3.5.23",
+  "tasks": [
+    {
+      "id": "J40",
+      "api_ids": ["L01", "L04", "L05"],
+      "scenario": "m4-lease-v1",
+      "manifest": "m4-lease.yaml",
+      "trace_cases": [
+        {"id": "native-baseline", "api_id": "L05", "method": "etcdserverpb.Lease/LeaseLeases"},
+        {"id": "auto-grant", "api_id": "L01", "method": "etcdserverpb.Lease/LeaseGrant"},
+        {"id": "auto-ttl", "api_id": "L01", "method": "etcdserverpb.Lease/LeaseTimeToLive"},
+        {"id": "explicit-grant", "api_id": "L01", "method": "etcdserverpb.Lease/LeaseGrant"},
+        {"id": "explicit-ttl", "api_id": "L01", "method": "etcdserverpb.Lease/LeaseTimeToLive"},
+        {"id": "duplicate-id", "api_id": "L01", "method": "etcdserverpb.Lease/LeaseGrant"},
+        {"id": "missing-ttl", "api_id": "L04", "method": "etcdserverpb.Lease/LeaseTimeToLive"},
+        {"id": "negative-id", "api_id": "L01", "method": "etcdserverpb.Lease/LeaseGrant"},
+        {"id": "leases-list", "api_id": "L05", "method": "etcdserverpb.Lease/LeaseLeases"},
+        {"id": "oversized-ttl", "api_id": "L01", "method": "etcdserverpb.Lease/LeaseGrant"},
+        {"id": "zero-id-ttl", "api_id": "L04", "method": "etcdserverpb.Lease/LeaseTimeToLive"}
+      ],
+      "go_tests": [
+        {"package": "cmd/m4driver", "tests": [
+          "TestRunNativeLeaseWritesFreshTraceAndVerifiableMetadata",
+          "TestParseRunOptionsRejectsMissingLayoutAndUnscopedPrefix",
+          "TestCompareRejectsCorruptOrEmptyTrace"
+        ]},
+        {"package": "internal/scenario", "tests": [
+          "TestM4LeaseScenarioMatchesItsPinnedNativeOracle",
+          "TestLoadM4LeaseSuiteRejectsMissingOrChangedCoverage",
+          "TestValidateM4LeaseRejectsUnscopedPrefixBeforeRPC"
+        ]},
+        {"package": "internal/compare", "tests": [
+          "TestCompareM4LeaseAllowsConfiguredMinimumAndAtMostOneSecondRemainingTTLSkew",
+          "TestCompareM4LeaseRejectsRemainingTTLSkewOverOneSecond",
+          "TestCompareM4LeaseKeepsStatusAndErrorContractsStrict"
+        ]},
+        {"package": "internal/trace", "tests": [
+          "TestSnapshotProtoPreservesBinaryAndInt64Values",
+          "TestReadJSONLRejectsInvalidOrderingAndSecrets",
+          "TestStreamTerminalCannotContradictItsOutcome"
+        ]}
+      ],
+      "maven_tests": [
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.lease.LeaseStateTest", "tests": [
+          "preservesSignedWireIdAndSeparatesIncarnations",
+          "grantsMinimumTtlAndRejectsOnlyValuesAboveMaximum",
+          "deadlineUsesUpperBoundAndExpiryUsesLowerBound",
+          "overflowAndUnhealthyClockNeverCreateADeadline",
+          "renewalAdvancesSequenceAndGenerationWithoutChangingGrantedTtl"
+        ]},
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.lease.LeaseGrantPlannerTest", "tests": [
+          "grantsSignedIdWithMinimumTtlAndConservativeDeadline",
+          "requiresRevocationBeforeReusingIdAndAdvancesIncarnation",
+          "rejectsInvalidIdentityOverflowAndUnhealthyTime"
+        ]},
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.lease.LeaseIdAllocatorTest", "tests": [
+          "checksCollisionsAndReturnsTheRetiredVersionForIncarnationFencing",
+          "preservesNegativeExplicitIdWithoutCallingGenerator",
+          "failsAfterBoundedCollisionsAndPropagatesLookupFailures",
+          "rejectsMismatchedStateAndCountsInvalidCandidatesAgainstTheLimit"
+        ]},
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.commit.AuxiliaryFormatUpgradeTest", "tests": [
+          "upgradeFencesAnOldObservedControlRowAndResolvesLostCasResponse",
+          "competingCasCannotBeReportedAsUpgradeSuccess"
+        ]},
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.commit.AuxiliaryLeasePlanVerifierTest", "tests": [
+          "acceptsMatchingStatePointerExpiryAndBindingUpdates",
+          "rejectsMissingOrMismatchedEnumerationPointer",
+          "rejectsExpiryCandidateThatDoesNotDescribeItsStateUpdate",
+          "requiresBindingUpdateToMatchTheSameLeaseIncarnationAndSequence",
+          "allowsRevokedStateWithoutExpiryCandidate"
+        ]},
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.commit.SystemRecordAuxiliaryMaterializationStoreTest", "tests": [
+          "immutableVersionsArePreflightedAndAppliedIdempotently",
+          "enumerationPointerOnlyMovesForwardAndUnknownCasIsResolvedByReadback",
+          "expiryCandidateMustNameTheSelectedLeaseVersion",
+          "preflightRejectsStateWithDifferentIdentityOrSequence"
+        ]},
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.commit.LeaseReadViewTest", "tests": [
+          "enumeratesStableAndSelectedLeasesWithoutIncludingFutureOnlyPointers",
+          "enumerationFailsForMissingStateOrIncompleteResult",
+          "emptyEnumerationReservesScanPagesButChargesOnlyReturnedBytes",
+          "bindingReadMergesStableHistoryWithSelectedChangesAtOneBarrier",
+          "bindingReadFailsAsAWholeWhenTheOutputBudgetIsExceeded",
+          "bindingReadReservesMemoryForTheLeaseRatherThanMaximumLimits",
+          "pointReadChargesStableAndSelectedMetadataBeforeReturning",
+          "overlaysSelectedMetadataOnlyCommitAndKeepsOtherLeaseAtStableSequence",
+          "missingPageBudgetAndCorruptedStableStateFailClosed",
+          "holdsPinUntilCancelledReadSettles",
+          "refusesToUseOrFinishPinFromAnotherRequest",
+          "refusesPinThatDoesNotProtectAuxiliaryHistory"
+        ]},
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.commit.CommitFinalizationServiceTest", "tests": [
+          "selectedAuxiliaryRecordsMustFinishBeforeFinalizedWatermarkAdvances",
+          "supersededAuxiliaryPointerCannotAdvancePendingCommit",
+          "upgradedFinalizerStillRecoversLegacyRoots"
+        ]},
+        {"module": "core", "kind": "surefire", "class": "io.etcdhbase.core.commit.ManifestPreparationTest", "tests": [
+          "sealsAuxiliaryUpdatesWithTheDurableRpcResultAndPreflightsEveryTarget",
+          "traversesMaximumAuxiliaryManifestWithoutRecursiveStackGrowth",
+          "stopsAuxiliaryTraversalWhenAnInFlightReadCompletesAfterCancellation",
+          "chargesAuxiliaryDirectoryPagesAndRecordsBeforeReading",
+          "rejectsDuplicateAuxiliaryTargetsDuringPreparationAndSealedTraversal",
+          "catalogRejectsMissingOrMismatchedPagesAndRestoreRejectsBadDigest"
+        ]},
+        {"module": "grpc", "kind": "surefire", "class": "io.etcdhbase.grpc.service.LeaseServiceTest", "tests": [
+          "routesOnlyInstalledUnaryOperationsAndLeavesRevokeUnimplemented",
+          "defaultUnaryHandlersRemainUnimplemented"
+        ]},
+        {"module": "grpc", "kind": "surefire", "class": "io.etcdhbase.grpc.protocol.LeaseGrantResponseMapperTest", "tests": [
+          "preservesExplicitNegativeIdAndSelectedRevision",
+          "refusesWrongIdRevisionKeyChangesOrMissingServingIdentity"
+        ]},
+        {"module": "grpc", "kind": "surefire", "class": "io.etcdhbase.grpc.protocol.LeaseTimeToLiveResponseMapperTest", "tests": [
+          "includesEveryRequestedKeyAsOriginalBytesWithThePinnedHeader",
+          "missingOrRevokedLeaseUsesNativeMissingTtlAndHasNoKeys",
+          "rejectsKeysForAnUnrequestedOrDifferentLeaseResponse"
+        ]},
+        {"module": "grpc", "kind": "surefire", "class": "io.etcdhbase.grpc.RequestLifecycleOutcomeTest", "tests": [
+          "classifiesExpectedEtcdDomainRejectionsSeparatelyFromBackendFailures"
+        ]},
+        {"module": "server", "kind": "surefire", "class": "io.etcdhbase.server.commit.LeaseGrantPreparationTest", "tests": [
+          "sealsOriginalResultAndAllThreeStateRecordsAfterReadValidation",
+          "failedReadProtectionDoesNotSealOrAdvanceInvocation"
+        ]},
+        {"module": "server", "kind": "surefire", "class": "io.etcdhbase.server.config.M3RuntimeConfigurationTest", "tests": [
+          "m4ExampleUsesExplicitLeaseTimingInputs",
+          "m4ActivationRequiresExplicitMinimumTtlAndClockBound"
+        ]},
+        {"module": "hbase", "kind": "failsafe", "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordStoreScanIT", "tests": [
+          "scansOneBucketInBoundedExclusiveResumePages",
+          "stopsBeforeCrossingTheByteBudgetAndResumesAfterTheLastIncludedRecord",
+          "rejectsPagesThatExceedTheirByteBudgetAndSeeksVersionsAtTheBarrier"
+        ]},
+        {"module": "server", "kind": "failsafe", "class": "io.etcdhbase.server.M4LeaseRpcIT", "tests": [
+          "realGoLeaseCallsMatchNativeAndSurviveRestartAcrossLayouts"
+        ]}
+      ],
+      "evidence": {
+        "native": {"scope": "native-etcd", "layout": "", "embedded_native": true},
+        "targets": [
+          {"scope": "target-hbase", "layout": "HISTORY", "embedded_native": false},
+          {"scope": "target-hbase", "layout": "NATIVE", "embedded_native": false}
+        ],
+        "compare_logs": ["compare-history.log", "compare-native.log"]
+      }
+    }
+  ],
+  "pending_tasks": ["J41", "J42", "J43", "J44", "J45", "J46", "J47", "J29.4"]
+}

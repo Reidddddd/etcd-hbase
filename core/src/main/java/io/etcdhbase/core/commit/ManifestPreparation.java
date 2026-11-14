@@ -66,7 +66,8 @@ public final class ManifestPreparation {
     }
     return new Writer(transactionId, ownerEpoch, baseSequence, baseRevision,
         AsyncCursor.fromIterator(candidates), AsyncCursor.fromIterator(events),
-        Optional.empty(), null, () -> CompletableFuture.completedFuture(null), scope).start().copy();
+        Optional.empty(), null, Optional.empty(),
+        () -> CompletableFuture.completedFuture(null), scope).start().copy();
   }
 
   /** Prepares a business manifest only after its result belongs to this invocation. */
@@ -96,7 +97,68 @@ public final class ManifestPreparation {
     }
     return new Writer(invocation.transactionId(), invocation.preparedOwnerEpoch(),
         invocation.baseSequence(), invocation.baseRevision(), candidates, events,
-        Optional.of(result), results, beforeSeal, scope).start().copy();
+        Optional.of(result), results, Optional.empty(), beforeSeal, scope).start().copy();
+  }
+
+  /** Prepares an auxiliary-only M2 transaction such as Grant or KeepAlive. */
+  public CompletableFuture<ManifestRoot> prepareWithAuxiliary(InvocationBinding invocation,
+      Iterator<PreparedAuxiliaryRecord> records,
+      Supplier<CompletableFuture<Void>> beforeSeal, RequestScope scope) {
+    Objects.requireNonNull(records, "records");
+    return prepareWithAuxiliary(invocation, AsyncCursor.fromIterator(records), beforeSeal, scope);
+  }
+
+  /** Streams auxiliary updates without retaining the full transaction in memory. */
+  public CompletableFuture<ManifestRoot> prepareWithAuxiliary(InvocationBinding invocation,
+      AsyncCursor<PreparedAuxiliaryRecord> records,
+      Supplier<CompletableFuture<Void>> beforeSeal, RequestScope scope) {
+    Objects.requireNonNull(invocation, "invocation");
+    Objects.requireNonNull(records, "records");
+    Objects.requireNonNull(beforeSeal, "beforeSeal");
+    if (invocation.state() != InvocationBinding.State.PREPARING) {
+      return CompletableFuture.failedFuture(new IllegalArgumentException(
+          "only a preparing invocation can seal auxiliary records"));
+    }
+    return new Writer(invocation.transactionId(), invocation.preparedOwnerEpoch(),
+        invocation.baseSequence(), invocation.baseRevision(),
+        AsyncCursor.fromIterator(java.util.Collections.<PreparedCandidate>emptyIterator()),
+        AsyncCursor.fromIterator(java.util.Collections.<PreparedEvent>emptyIterator()),
+        Optional.empty(), null, Optional.of(records), beforeSeal, scope).start().copy();
+  }
+
+  /** Seals a non-KV RPC result and its auxiliary state under one M2 publication decision. */
+  public CompletableFuture<ManifestRoot> prepareWithResultAndAuxiliary(
+      InvocationBinding invocation, Iterator<PreparedCandidate> candidates,
+      Iterator<PreparedEvent> events, ResultReference result, ResultCatalog results,
+      Iterator<PreparedAuxiliaryRecord> auxiliaryRecords,
+      Supplier<CompletableFuture<Void>> beforeSeal, RequestScope scope) {
+    return prepareWithResultAndAuxiliary(invocation, AsyncCursor.fromIterator(candidates),
+        AsyncCursor.fromIterator(events), result, results,
+        AsyncCursor.fromIterator(auxiliaryRecords), beforeSeal, scope);
+  }
+
+  /** Streams KV, event, result, and auxiliary records into one immutable publication plan. */
+  public CompletableFuture<ManifestRoot> prepareWithResultAndAuxiliary(
+      InvocationBinding invocation, AsyncCursor<PreparedCandidate> candidates,
+      AsyncCursor<PreparedEvent> events, ResultReference result, ResultCatalog results,
+      AsyncCursor<PreparedAuxiliaryRecord> auxiliaryRecords,
+      Supplier<CompletableFuture<Void>> beforeSeal, RequestScope scope) {
+    Objects.requireNonNull(invocation, "invocation");
+    Objects.requireNonNull(candidates, "candidates");
+    Objects.requireNonNull(events, "events");
+    Objects.requireNonNull(result, "result");
+    Objects.requireNonNull(results, "results");
+    Objects.requireNonNull(auxiliaryRecords, "auxiliaryRecords");
+    Objects.requireNonNull(beforeSeal, "beforeSeal");
+    if (invocation.state() != InvocationBinding.State.PREPARING
+        || !result.identity().matches(invocation)) {
+      return CompletableFuture.failedFuture(new IllegalArgumentException(
+          "result does not belong to the preparing invocation"));
+    }
+    return new Writer(invocation.transactionId(), invocation.preparedOwnerEpoch(),
+        invocation.baseSequence(), invocation.baseRevision(), candidates, events,
+        Optional.of(result), results, Optional.of(auxiliaryRecords), beforeSeal, scope)
+        .start().copy();
   }
 
   private final class Writer {
@@ -109,6 +171,7 @@ public final class ManifestPreparation {
     private final RequestScope scope;
     private final Optional<ResultReference> result;
     private final ResultCatalog results;
+    private final Optional<AsyncCursor<PreparedAuxiliaryRecord>> auxiliaryInput;
     private final Supplier<CompletableFuture<Void>> beforeSeal;
     private final CompletableFuture<ManifestRoot> completion = new CompletableFuture<>();
     private final List<ManifestCandidateReference> leaf = new ArrayList<>(ManifestPage.MAX_ENTRIES);
@@ -125,6 +188,7 @@ public final class ManifestPreparation {
     private Writer(TransactionId transactionId, long ownerEpoch, long baseSequence, long baseRevision,
         AsyncCursor<PreparedCandidate> input, AsyncCursor<PreparedEvent> eventInput,
         Optional<ResultReference> result, ResultCatalog results,
+        Optional<AsyncCursor<PreparedAuxiliaryRecord>> auxiliaryInput,
         Supplier<CompletableFuture<Void>> beforeSeal, RequestScope scope) {
       this.transactionId = Objects.requireNonNull(transactionId, "transactionId");
       this.ownerEpoch = ownerEpoch;
@@ -134,6 +198,7 @@ public final class ManifestPreparation {
       this.eventInput = eventInput;
       this.result = result;
       this.results = results;
+      this.auxiliaryInput = Objects.requireNonNull(auxiliaryInput, "auxiliaryInput");
       this.beforeSeal = beforeSeal;
       this.scope = Objects.requireNonNull(scope, "scope");
       for (int level = 0; level <= ManifestDirectoryPage.MAX_DEPTH; level++) {
@@ -252,22 +317,45 @@ public final class ManifestPreparation {
     private CompletableFuture<ManifestRoot> finishDirectories() {
       return finishLevel(0).thenCompose(candidateRoot ->
           new EventWriter(transactionId, ownerEpoch, baseSequence, baseRevision, eventInput, scope)
-              .write().thenCompose(events -> {
-        ManifestRoot root = result.isPresent()
-            ? ManifestRoot.createWithResult(transactionId, ownerEpoch, baseSequence, baseRevision,
-                count, valueBytes, Optional.ofNullable(candidateRoot), events.count(), events.bytes(),
-                Optional.ofNullable(events.root()), result.orElseThrow())
-            : ManifestRoot.create(transactionId, ownerEpoch, baseSequence, baseRevision,
-                count, valueBytes, Optional.ofNullable(candidateRoot), events.count(), events.bytes(),
-                Optional.ofNullable(events.root()));
+              .write().thenCompose(events -> prepareAuxiliary().thenCompose(auxiliary -> {
+        ManifestRoot root = createRoot(candidateRoot, events, auxiliary);
         CompletableFuture<?> verified = result.isPresent()
             ? results.verify(result.orElseThrow(), scope) : CompletableFuture.completedFuture(null);
         return verified.thenCompose(ignored -> validateBeforeSeal())
             .thenCompose(ignored -> repository.seal(root, scope)).thenApply(outcome -> {
-          requireCreatedOrIdentical(outcome, "sealed manifest root");
-          return root;
-        });
-      }));
+              requireCreatedOrIdentical(outcome, "sealed manifest root");
+              return root;
+            });
+      })));
+    }
+
+    private CompletableFuture<Optional<AuxiliaryReference>> prepareAuxiliary() {
+      if (auxiliaryInput.isEmpty()) return CompletableFuture.completedFuture(Optional.empty());
+      return new AuxiliaryManifestPreparation(repository).prepare(transactionId, ownerEpoch,
+          baseSequence, auxiliaryInput.orElseThrow(), scope).thenApply(Optional::of);
+    }
+
+    private ManifestRoot createRoot(ManifestChildReference candidateRoot, EventSummary events,
+        Optional<AuxiliaryReference> auxiliary) {
+      Optional<ManifestChildReference> candidates = Optional.ofNullable(candidateRoot);
+      Optional<EventReference> eventDirectory = Optional.ofNullable(events.root());
+      if (auxiliary.isPresent()) {
+        if (result.isPresent()) {
+          return ManifestRoot.createWithResultAndAuxiliary(transactionId, ownerEpoch,
+              baseSequence, baseRevision, count, valueBytes, candidates, events.count(),
+              events.bytes(), eventDirectory, result.orElseThrow(), auxiliary.orElseThrow());
+        }
+        return ManifestRoot.createWithAuxiliary(transactionId, ownerEpoch, baseSequence,
+            baseRevision, count, valueBytes, candidates, events.count(), events.bytes(),
+            eventDirectory, auxiliary);
+      }
+      if (result.isPresent()) {
+        return ManifestRoot.createWithResult(transactionId, ownerEpoch, baseSequence,
+            baseRevision, count, valueBytes, candidates, events.count(), events.bytes(),
+            eventDirectory, result.orElseThrow());
+      }
+      return ManifestRoot.create(transactionId, ownerEpoch, baseSequence, baseRevision,
+          count, valueBytes, candidates, events.count(), events.bytes(), eventDirectory);
     }
 
     private CompletableFuture<Void> validateBeforeSeal() {

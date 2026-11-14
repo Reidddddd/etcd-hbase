@@ -46,7 +46,7 @@ record SnapshotPinShard(int shard, long generation, long revisionFloor, long seq
       } else if (status == Status.ACTIVE) {
         if (generation == 0 || pinId.length() != 16 || requiredRevision <= 0
             || viewDigest.length() != 32 || expiresAtEpochMillis <= 0
-            || (requiredSequence > 0) != transactionId.isPresent()
+            || transactionId.isPresent() && requiredSequence == 0
             || transactionId.isPresent() != rootIdentity.isPresent()
             || rootIdentity.isPresent() != rootDigest.isPresent()
             || rootDigest.filter(digest -> digest.length() != 32).isPresent()) {

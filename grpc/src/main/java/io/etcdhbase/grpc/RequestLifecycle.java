@@ -196,7 +196,7 @@ final class RequestLifecycle<RequestT, ResponseT> {
     };
   }
 
-  private static RequestCompletionRecorder.Outcome classifyOutcome(Status status) {
+  static RequestCompletionRecorder.Outcome classifyOutcome(Status status) {
     return switch (status.getCode()) {
       case OK -> RequestCompletionRecorder.Outcome.SUCCESS;
       case CANCELLED -> RequestCompletionRecorder.Outcome.CANCELLED;
@@ -206,6 +206,8 @@ final class RequestLifecycle<RequestT, ResponseT> {
       case INVALID_ARGUMENT -> RequestCompletionRecorder.Outcome.INVALID_ARGUMENT;
       case PERMISSION_DENIED, UNAUTHENTICATED ->
           RequestCompletionRecorder.Outcome.PERMISSION_DENIED;
+      case FAILED_PRECONDITION, NOT_FOUND, OUT_OF_RANGE, ALREADY_EXISTS ->
+          RequestCompletionRecorder.Outcome.REQUEST_REJECTED;
       default -> RequestCompletionRecorder.Outcome.BACKEND_FAILURE;
     };
   }

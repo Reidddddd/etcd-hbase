@@ -20,7 +20,7 @@ public final class CommitControlMessages {
 
   public static byte[] encode(CommitState state) {
     var builder = CommitProtos.CommitControlState.newBuilder()
-        .setFormatVersion(CommitState.FORMAT_VERSION)
+        .setFormatVersion(state.formatVersion())
         .setProfileFingerprint(ByteString.copyFrom(state.profileFingerprint().bytes()))
         .setOwnerEpoch(state.ownerEpoch())
         .setOwnerLeaseDeadlineEpochMillis(state.ownerLeaseDeadlineEpochMillis())
@@ -42,7 +42,9 @@ public final class CommitControlMessages {
     try {
       var message = CommitProtos.CommitControlState.parseFrom(encoded);
       if (!message.getUnknownFields().asMap().isEmpty()
-          || !message.hasFormatVersion() || message.getFormatVersion() != CommitState.FORMAT_VERSION
+          || !message.hasFormatVersion()
+          || message.getFormatVersion() != CommitState.FORMAT_VERSION
+              && message.getFormatVersion() != CommitState.AUXILIARY_FORMAT_VERSION
           || !message.hasProfileFingerprint() || !message.hasOwnerEpoch()
           || !message.hasOwnerLeaseDeadlineEpochMillis() || !message.hasStateVersion()
           || !message.hasPublishedSequence() || !message.hasPublishedRevision()
@@ -58,7 +60,7 @@ public final class CommitControlMessages {
           ? Optional.of(message.getOwnerInstance()) : Optional.empty();
       Optional<PublicationSlot> publication = message.hasPublication()
           ? Optional.of(decode(message.getPublication())) : Optional.empty();
-      return CommitState.restore(ByteKey.copyOf(fingerprint), owner, ownerEpoch,
+      return CommitState.restore(message.getFormatVersion(), ByteKey.copyOf(fingerprint), owner, ownerEpoch,
           message.getOwnerLeaseDeadlineEpochMillis(), message.getStateVersion(),
           message.getPublishedSequence(), message.getPublishedRevision(),
           message.getFinalizedSequence(), message.getFinalizedRevision(), publication,

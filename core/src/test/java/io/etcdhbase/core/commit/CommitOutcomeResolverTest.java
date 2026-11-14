@@ -1,6 +1,7 @@
 package io.etcdhbase.core.commit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.etcdhbase.core.bytes.ByteKey;
@@ -9,6 +10,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class CommitOutcomeResolverTest {
@@ -67,6 +69,50 @@ class CommitOutcomeResolverTest {
     assertThrows(CompletionException.class, () -> outcomeResolver.resolve(noChanges, scope).join());
     assertThrows(CompletionException.class,
         () -> outcomeResolver.resolveForFinalization(noChanges, scope).join());
+    scope.close();
+  }
+
+  @Test
+  void serializedOwnerCanPersistAProvenPrePreparationRejection() {
+    InvocationBinding preparing = InvocationBinding.begin(ATTEMPT_INVOCATION, DIGEST, DIGEST,
+        ATTEMPT_TRANSACTION, 1, 0, 1);
+    var scope = RequestScope.withoutDeadline();
+    var outcomeResolver = resolver(ownedState(), Optional.empty());
+
+    var resolution = outcomeResolver.proveNotSelectedForOwnerLane(preparing,
+        new CommitOwnerService.OwnerToken("owner", 1), 100, scope).join();
+
+    assertEquals(CommitOutcomeResolver.State.NOT_SELECTED, resolution.state());
+    NotSelectedProof proof = resolution.notSelectedProof().orElseThrow();
+    InvocationBinding rejected = preparing.notSelected(proof);
+    AtomicReference<InvocationBinding> stored = new AtomicReference<>(preparing);
+    InvocationRepository repository = new InvocationRepository() {
+      @Override
+      public CompletableFuture<Optional<InvocationBinding>> read(InvocationId id, RequestScope ignored) {
+        return CompletableFuture.completedFuture(Optional.ofNullable(stored.get()));
+      }
+
+      @Override
+      public CompletableFuture<SystemRecordStore.CreateResult> createIfAbsent(
+          InvocationBinding binding, RequestScope ignored) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public CompletableFuture<Boolean> compareAndSet(InvocationBinding expected,
+          InvocationBinding replacement, RequestScope ignored) {
+        return CompletableFuture.completedFuture(stored.compareAndSet(expected, replacement));
+      }
+    };
+
+    InvocationBinding persisted = new InvocationService(repository)
+        .transition(preparing, rejected, scope).join();
+
+    assertEquals(InvocationBinding.State.NOT_SELECTED, persisted.state());
+    assertEquals(InvocationBinding.State.NOT_SELECTED, stored.get().state());
+    assertFalse(outcomeResolver.proveNotSelectedForOwnerLane(preparing,
+        new CommitOwnerService.OwnerToken("other", 1), 100, scope).join().state()
+        == CommitOutcomeResolver.State.NOT_SELECTED);
     scope.close();
   }
 
