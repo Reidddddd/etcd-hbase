@@ -58,6 +58,38 @@ public final class CommitOutcomeResolver {
     return resolveDurable(invocation, scope);
   }
 
+  /**
+   * Proves a pre-preparation rejection while the caller still owns the serialized mutation lane.
+   * The owner lane is required so no other request from this owner can select the empty sequence
+   * between this control-row read and the caller's durable NOT_SELECTED transition.
+   */
+  public CompletableFuture<Resolution> proveNotSelectedForOwnerLane(
+      InvocationBinding invocation, CommitOwnerService.OwnerToken owner, long nowEpochMillis,
+      RequestScope scope) {
+    Objects.requireNonNull(invocation, "invocation");
+    Objects.requireNonNull(owner, "owner");
+    Objects.requireNonNull(scope, "scope");
+    if (invocation.state() != InvocationBinding.State.PREPARING
+        || invocation.preparedOwnerEpoch() != owner.epoch() || nowEpochMillis < 0) {
+      return CompletableFuture.completedFuture(indeterminate());
+    }
+    return control.read(scope).thenApply(snapshot -> {
+      if (snapshot.isEmpty()) return indeterminate();
+      CommitState state = snapshot.orElseThrow().state();
+      boolean sameActiveOwner = state.ownerEpoch() == owner.epoch()
+          && state.ownerInstance().filter(owner.instance()::equals).isPresent()
+          && !state.ownerLeaseExpired(nowEpochMillis);
+      boolean unchangedEmptySequence = state.publication().isEmpty()
+          && state.publishedSequence() == invocation.baseSequence()
+          && state.publishedRevision() == invocation.baseRevision();
+      if (!sameActiveOwner || !unchangedEmptySequence) return indeterminate();
+      var proof = new NotSelectedProof(invocation.preparedOwnerEpoch(), invocation.baseSequence(),
+          state.ownerEpoch(), state.publishedSequence(), Optional.empty(),
+          NotSelectedProof.Reason.OWNER_LANE_REJECTED_WITH_EMPTY_SLOT);
+      return new Resolution(State.NOT_SELECTED, Optional.empty(), Optional.of(proof));
+    });
+  }
+
   /** Resolves durable publication state for recovery even after the caller query window closed. */
   CompletableFuture<Resolution> resolveForFinalization(
       InvocationBinding invocation, RequestScope scope) {

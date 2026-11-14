@@ -9,12 +9,15 @@ import io.etcdhbase.core.commit.CommitState;
 import io.etcdhbase.core.commit.InvocationBinding;
 import io.etcdhbase.core.commit.InvocationId;
 import io.etcdhbase.core.commit.ManifestCatalog;
+import io.etcdhbase.core.commit.PinnedReadView;
 import io.etcdhbase.core.commit.ReadViewRecordStore;
 import io.etcdhbase.core.commit.ReadViewService;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.kv.PutCommand;
+import io.etcdhbase.core.kv.PutPlanner;
 import io.etcdhbase.core.kv.ResponseBudget;
+import io.etcdhbase.core.lease.LeaseBindingChange;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.core.scan.DirectRecordReader;
@@ -27,6 +30,7 @@ import io.etcdhbase.hbase.storage.StorageTableBinding;
 import io.etcdhbase.server.observability.RequestMetrics;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import java.time.Clock;
+import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
@@ -47,6 +51,7 @@ public final class PutMutationExecutor {
   private final Executor backendWorker;
   private final PutCommitPreparation preparation;
   private final CommitPublisher publisher;
+  private final LeaseBindingMutationPlanner leaseBindings;
   private final long maximumPointBytes;
   private final long maximumResponseBytes;
   private final Clock clock;
@@ -59,7 +64,7 @@ public final class PutMutationExecutor {
       long maximumPointBytes, long maximumResponseBytes) {
     this(tableGroup, profileFingerprint, control, views, manifests, connections, primary,
         backendWorker, preparation, publisher, maximumPointBytes, maximumResponseBytes,
-        Clock.systemUTC(), new RequestMetrics());
+        Clock.systemUTC(), new RequestMetrics(), null);
   }
 
   public PutMutationExecutor(String tableGroup, ByteKey profileFingerprint,
@@ -69,7 +74,18 @@ public final class PutMutationExecutor {
       long maximumPointBytes, long maximumResponseBytes, RequestMetrics metrics) {
     this(tableGroup, profileFingerprint, control, views, manifests, connections, primary,
         backendWorker, preparation, publisher, maximumPointBytes, maximumResponseBytes,
-        Clock.systemUTC(), metrics);
+        Clock.systemUTC(), metrics, null);
+  }
+
+  public PutMutationExecutor(String tableGroup, ByteKey profileFingerprint,
+      CommitControlStore control, ReadViewService views, ManifestCatalog manifests,
+      HBaseConnectionFactory connections, StorageTableBinding primary, Executor backendWorker,
+      PutCommitPreparation preparation, CommitPublisher publisher,
+      long maximumPointBytes, long maximumResponseBytes,
+      LeaseBindingMutationPlanner leaseBindings, RequestMetrics metrics) {
+    this(tableGroup, profileFingerprint, control, views, manifests, connections, primary,
+        backendWorker, preparation, publisher, maximumPointBytes, maximumResponseBytes,
+        Clock.systemUTC(), metrics, Objects.requireNonNull(leaseBindings, "leaseBindings"));
   }
 
   PutMutationExecutor(String tableGroup, ByteKey profileFingerprint,
@@ -79,14 +95,15 @@ public final class PutMutationExecutor {
       long maximumPointBytes, long maximumResponseBytes, Clock clock) {
     this(tableGroup, profileFingerprint, control, views, manifests, connections, primary,
         backendWorker, preparation, publisher, maximumPointBytes, maximumResponseBytes,
-        clock, new RequestMetrics());
+        clock, new RequestMetrics(), null);
   }
 
   private PutMutationExecutor(String tableGroup, ByteKey profileFingerprint,
       CommitControlStore control, ReadViewService views, ManifestCatalog manifests,
       HBaseConnectionFactory connections, StorageTableBinding primary, Executor backendWorker,
       PutCommitPreparation preparation, CommitPublisher publisher,
-      long maximumPointBytes, long maximumResponseBytes, Clock clock, RequestMetrics metrics) {
+      long maximumPointBytes, long maximumResponseBytes, Clock clock, RequestMetrics metrics,
+      LeaseBindingMutationPlanner leaseBindings) {
     this.tableGroup = Objects.requireNonNull(tableGroup, "tableGroup");
     this.profileFingerprint = Objects.requireNonNull(profileFingerprint, "profileFingerprint");
     this.control = Objects.requireNonNull(control, "control");
@@ -97,6 +114,7 @@ public final class PutMutationExecutor {
     this.backendWorker = Objects.requireNonNull(backendWorker, "backendWorker");
     this.preparation = Objects.requireNonNull(preparation, "preparation");
     this.publisher = Objects.requireNonNull(publisher, "publisher");
+    this.leaseBindings = leaseBindings;
     this.clock = Objects.requireNonNull(clock, "clock");
     this.metrics = Objects.requireNonNull(metrics, "metrics");
     if (tableGroup.isBlank() || profileFingerprint.length() != 32
@@ -168,7 +186,10 @@ public final class PutMutationExecutor {
       InvocationBinding binding, AuthorizedBackendIdentity identity,
       RequestScope scope, BudgetManager.Account account) {
     long started = System.nanoTime();
-    return views.open(OptionalLong.empty(), binding.authorizationScopeDigest(), scope)
+    var readView = leaseBindings == null
+        ? views.open(OptionalLong.empty(), binding.authorizationScopeDigest(), scope)
+        : views.openAuxiliary(binding.authorizationScopeDigest(), scope);
+    return readView
         .thenCompose(pinned -> {
           if (pinned.view().barrierSequence() != binding.baseSequence()
               || pinned.view().targetRevision() != binding.baseRevision()
@@ -181,7 +202,8 @@ public final class PutMutationExecutor {
                     primary.codec().saltProfile().bucketCount(), scope);
                 var reader = new DirectRecordReader(view, account, maximumPointBytes);
                 return reader.readForPreparation(command.key(), binding.baseRevision(), ReadProjection.FULL)
-                    .thenCompose(point -> prepareFromPoint(command, binding, point, view, scope, account));
+                    .thenCompose(point -> prepareFromPoint(
+                        command, binding, point, pinned, view, scope, account));
               });
         }).exceptionallyCompose(failure -> {
           Throwable cause = CompletionFailures.unwrapCompletion(failure);
@@ -192,11 +214,22 @@ public final class PutMutationExecutor {
   }
 
   private CompletableFuture<PutCommitPreparation.Sealed> prepareFromPoint(PutCommand command,
-      InvocationBinding binding, PointResult point, ReadViewRecordStore view,
+      InvocationBinding binding, PointResult point, PinnedReadView pinned, ReadViewRecordStore view,
       RequestScope scope, BudgetManager.Account account) {
     try {
-      CompletableFuture<PutCommitPreparation.Sealed> result =
-          preparation.prepare(command, binding, point.record(), scope, account, view::finishRead);
+      CompletableFuture<PutCommitPreparation.Sealed> result;
+      if (leaseBindings == null) {
+        result = preparation.prepare(command, binding, point.record(), scope, account, view::finishRead);
+      } else {
+        PutPlanner.Plan plan = new PutPlanner().planWithLease(command, binding, point.record());
+        List<LeaseBindingChange> changes = LeaseBindingChange.between(
+            point.record(), plan.candidate().record()).stream().toList();
+        LeaseBindingMutationPlanner.MutationView mutationView =
+            leaseBindings.open(pinned, scope, account);
+        result = mutationView.prepare(binding, changes).thenCompose(auxiliary ->
+            preparation.prepare(plan, command, binding, point.record(), auxiliary,
+                scope, account, view::finishRead));
+      }
       return result.whenComplete((ignored, failure) -> point.close());
     } catch (RuntimeException | Error failure) {
       try {

@@ -11,6 +11,7 @@ import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.kv.PutCommand;
+import io.etcdhbase.core.lease.LeaseFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.grpc.protocol.PutRequestMapper;
@@ -84,6 +85,11 @@ public final class PutOwnerProcessor implements MutationForwardReceiver.Mutation
             Throwable cause = CompletionFailures.unwrapCompletion(failure);
             // PutPlanner's finite semantic failures occur before private records or publication.
             if (cause instanceof KvFailure semantic) return new OwnerForwarding.SemanticRejected(semantic.reason());
+            // Binding validation runs during preparation, before publish() can select a decision.
+            // Publication failures remain unknown and are not projected as Lease rejections.
+            if (cause instanceof LeaseFailure leaseFailure) {
+              return new OwnerForwarding.LeaseRejected(leaseFailure.reason());
+            }
           }
           return unknownReply(failure);
         });

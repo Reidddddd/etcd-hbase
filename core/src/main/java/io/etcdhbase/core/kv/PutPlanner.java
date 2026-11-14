@@ -19,16 +19,26 @@ public final class PutPlanner {
   }
 
   public Plan plan(PutCommand command, InvocationBinding invocation, Optional<StoredRecord> baseRecord) {
-    return plan(command, invocation, baseRecord, false);
+    return plan(command, invocation, baseRecord, false, false);
+  }
+
+  public Plan planWithLease(PutCommand command, InvocationBinding invocation,
+      Optional<StoredRecord> baseRecord) {
+    return plan(command, invocation, baseRecord, false, true);
   }
 
   /** The caller must obtain an in-transaction record from its verified completed workset. */
   Plan planWorking(PutCommand command, InvocationBinding invocation, Optional<StoredRecord> current) {
-    return plan(command, invocation, current, true);
+    return plan(command, invocation, current, true, false);
+  }
+
+  Plan planWorkingWithLease(PutCommand command, InvocationBinding invocation,
+      Optional<StoredRecord> current) {
+    return plan(command, invocation, current, true, true);
   }
 
   private Plan plan(PutCommand command, InvocationBinding invocation, Optional<StoredRecord> baseRecord,
-      boolean workingView) {
+      boolean workingView, boolean leaseEnabled) {
     Objects.requireNonNull(command, "command");
     Objects.requireNonNull(invocation, "invocation");
     Objects.requireNonNull(baseRecord, "baseRecord");
@@ -50,15 +60,20 @@ public final class PutPlanner {
         || command.leaseIntent() == PutCommand.LeaseIntent.PRESERVE)) {
       throw new KvFailure(KvFailure.Reason.KEY_NOT_FOUND);
     }
-    if (command.leaseIntent() == PutCommand.LeaseIntent.EXPLICIT
-        || previous.filter(record -> record.metadata().leaseId() != 0).isPresent()) {
+    if (!leaseEnabled && (command.leaseIntent() == PutCommand.LeaseIntent.EXPLICIT
+        || previous.filter(record -> record.metadata().leaseId() != 0).isPresent())) {
       throw new KvFailure(KvFailure.Reason.LEASE_UNAVAILABLE);
     }
     long revision = Math.addExact(invocation.baseRevision(), 1);
     long createRevision = previous.map(record -> record.metadata().createRevision()).orElse(revision);
     long version = previous.isPresent() ? Math.addExact(previous.orElseThrow().metadata().version(), 1) : 1;
     byte[] value = command.ignoreValue() ? previous.orElseThrow().value().orElseThrow() : command.value();
-    var metadata = new StorageMetadata(createRevision, revision, version, 0,
+    long leaseId = switch (command.leaseIntent()) {
+      case NONE -> 0;
+      case EXPLICIT -> command.leaseId();
+      case PRESERVE -> previous.orElseThrow().metadata().leaseId();
+    };
+    var metadata = new StorageMetadata(createRevision, revision, version, leaseId,
         StorageMetadata.State.LIVE, value.length);
     StoredRecord current = StoredRecord.live(command.key(), metadata, value);
     PreparedCandidate candidate = new PreparedCandidate(invocation.transactionId(),

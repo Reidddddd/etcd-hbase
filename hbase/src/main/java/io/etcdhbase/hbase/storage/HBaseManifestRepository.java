@@ -1,6 +1,8 @@
 package io.etcdhbase.hbase.storage;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.AuxiliaryDirectory;
+import io.etcdhbase.core.commit.AuxiliaryPage;
 import io.etcdhbase.core.commit.EventDirectoryPage;
 import io.etcdhbase.core.commit.EventPage;
 import io.etcdhbase.core.commit.ManifestDirectoryPage;
@@ -8,6 +10,7 @@ import io.etcdhbase.core.commit.ManifestPage;
 import io.etcdhbase.core.commit.ManifestRepository;
 import io.etcdhbase.core.commit.ManifestRoot;
 import io.etcdhbase.core.commit.PreparedCandidate;
+import io.etcdhbase.core.commit.PreparedAuxiliaryRecord;
 import io.etcdhbase.core.commit.PreparedEvent;
 import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.commit.SystemRecordType;
@@ -76,6 +79,30 @@ public final class HBaseManifestRepository implements ManifestRepository {
   }
 
   @Override
+  public CompletableFuture<SystemRecordStore.CreateResult> createAuxiliaryRecord(
+      PreparedAuxiliaryRecord record, RequestScope scope) {
+    Objects.requireNonNull(record, "record");
+    return create(SystemRecordType.AUXILIARY, record.systemIdentity(),
+        ManifestMessages.encode(record), scope);
+  }
+
+  @Override
+  public CompletableFuture<SystemRecordStore.CreateResult> createAuxiliaryPage(
+      AuxiliaryPage page, RequestScope scope) {
+    Objects.requireNonNull(page, "page");
+    return create(SystemRecordType.AUXILIARY, page.systemIdentity(),
+        ManifestMessages.encode(page), scope);
+  }
+
+  @Override
+  public CompletableFuture<SystemRecordStore.CreateResult> createAuxiliaryDirectory(
+      AuxiliaryDirectory directory, RequestScope scope) {
+    Objects.requireNonNull(directory, "directory");
+    return create(SystemRecordType.AUXILIARY, directory.systemIdentity(),
+        ManifestMessages.encode(directory), scope);
+  }
+
+  @Override
   public CompletableFuture<SystemRecordStore.CreateResult> seal(ManifestRoot root, RequestScope scope) {
     Objects.requireNonNull(root, "root");
     return create(SystemRecordType.MANIFEST, root.systemIdentity(), ManifestMessages.encode(root), scope);
@@ -125,6 +152,48 @@ public final class HBaseManifestRepository implements ManifestRepository {
         EventDirectoryPage::systemIdentity, scope);
   }
 
+  @Override
+  public CompletableFuture<Optional<PreparedAuxiliaryRecord>> readAuxiliaryRecord(
+      ByteKey identity, RequestScope scope) {
+    return read(SystemRecordType.AUXILIARY, identity, ManifestMessages::decodeAuxiliaryRecord,
+        PreparedAuxiliaryRecord::systemIdentity, scope);
+  }
+
+  @Override
+  public CompletableFuture<Optional<AuxiliaryPage>> readAuxiliaryPage(
+      ByteKey identity, RequestScope scope) {
+    return read(SystemRecordType.AUXILIARY, identity, ManifestMessages::decodeAuxiliaryPage,
+        AuxiliaryPage::systemIdentity, scope);
+  }
+
+  @Override
+  public CompletableFuture<Optional<AuxiliaryDirectory>> readAuxiliaryDirectory(
+      ByteKey identity, RequestScope scope) {
+    return read(SystemRecordType.AUXILIARY, identity, ManifestMessages::decodeAuxiliaryDirectory,
+        AuxiliaryDirectory::systemIdentity, scope);
+  }
+
+  @Override
+  public CompletableFuture<ReadValue<PreparedAuxiliaryRecord>> readAuxiliaryRecordWithSize(
+      ByteKey identity, RequestScope scope) {
+    return readWithSize(SystemRecordType.AUXILIARY, identity,
+        ManifestMessages::decodeAuxiliaryRecord, PreparedAuxiliaryRecord::systemIdentity, scope);
+  }
+
+  @Override
+  public CompletableFuture<ReadValue<AuxiliaryPage>> readAuxiliaryPageWithSize(
+      ByteKey identity, RequestScope scope) {
+    return readWithSize(SystemRecordType.AUXILIARY, identity,
+        ManifestMessages::decodeAuxiliaryPage, AuxiliaryPage::systemIdentity, scope);
+  }
+
+  @Override
+  public CompletableFuture<ReadValue<AuxiliaryDirectory>> readAuxiliaryDirectoryWithSize(
+      ByteKey identity, RequestScope scope) {
+    return readWithSize(SystemRecordType.AUXILIARY, identity,
+        ManifestMessages::decodeAuxiliaryDirectory, AuxiliaryDirectory::systemIdentity, scope);
+  }
+
   private <T> CompletableFuture<Optional<T>> read(SystemRecordType type, ByteKey identity,
       java.util.function.Function<byte[], T> decoder,
       java.util.function.Function<T, ByteKey> identityOf, RequestScope scope) {
@@ -135,6 +204,21 @@ public final class HBaseManifestRepository implements ManifestRepository {
       }
       return decoded;
     }));
+  }
+
+  private <T> CompletableFuture<ReadValue<T>> readWithSize(SystemRecordType type,
+      ByteKey identity, java.util.function.Function<byte[], T> decoder,
+      java.util.function.Function<T, ByteKey> identityOf, RequestScope scope) {
+    return records.read(type, identity, scope).thenApply(value -> {
+      if (value.isEmpty()) return new ReadValue<>(Optional.empty(), 0);
+      ByteKey encoded = value.orElseThrow();
+      T decoded = decoder.apply(encoded.bytes());
+      if (!identityOf.apply(decoded).equals(identity)) {
+        throw new IllegalArgumentException("manifest record row identity differs from its payload");
+      }
+      long encodedBytes = Math.addExact(identity.length(), encoded.length());
+      return new ReadValue<>(Optional.of(decoded), encodedBytes);
+    });
   }
 
   private CompletableFuture<SystemRecordStore.CreateResult> create(

@@ -794,26 +794,26 @@ J02/J03/J07 等基础交付按所需工程输入推进，不能等待 J00 的全
 
 ### M4：Lease、注册监听与 Watch
 
-**状态：未开始｜已完成 0 / 8｜未完成 8｜负责人：待分配｜计划/实际日期：— / —**
+**状态：进行中｜已完成 1 / 8｜未完成 7｜负责人：Codex｜计划/实际日期：— / 2026-11-14**
 
 **进入条件：** M2 内核已验收，M3 对应 Put/Txn/Delete 和事件准备可用。
 
 **阶段交付：** Lease 时序/竞争报告、注册监听端到端报告、Watch 协议/回放报告、续约与事件读取账本。
 
-- [ ] **J40｜LeaseStore、Grant、TimeToLive、ID 碰撞检查及管理列表**
+- [x] **J40｜LeaseStore、Grant、TimeToLive、ID 碰撞检查及管理列表**
   - 依赖：M2/J30。
   - 完成标准：重启恢复权威状态；真实 remaining/granted TTL、过期/不存在语义正确；LeaseLeases 和 TTL keys 按能力矩阵交付。
   - 子任务 / 交付物（各项记录状态、负责人、日期、PR 与证据）：
-    - [ ] **J40.1** 优先：Grant、基本 TimeToLive 和持久化租约状态，支撑注册/续约闭环。
-    - [ ] **J40.2** 完整：ID 碰撞、管理列表、TTL keys 和全部矩阵选项，首版全部验收。
+    - [x] **J40.1** 优先：Grant、基本 TimeToLive 和持久化租约状态，支撑注册/续约闭环。
+    - [x] **J40.2** 完整：ID 碰撞、管理列表、TTL keys 和全部矩阵选项，首版全部验收。
   - 验证层次：L1 内核 + L2 协议/Go client；注册联动另记 L3。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=代码与公开临时验证完成；负责人=Codex；完成日期=2026-11-14；PR/commit=[PR #47](https://github.com/Reidddddd/etcd-hbase/pull/47) / `a467e99`；验证=M4 J40 public profile passed（Temurin JDK 21、Maven 105 个单测、M4LeaseRpcIT、Go 原生对照及两种布局）；评审人=Reidddddd；评审结论=等待评审；目标环境与 M4 阶段验收=未完成。
 
-- [ ] **J41｜绑定/换绑、附着与撤销顺序及多角色注册联动**
+- [x] **J41｜绑定/换绑、附着与撤销顺序及多角色注册联动**
   - 依赖：J40/J31。
   - 完成标准：Put WithLease 与提交原子性正确；A 换绑 B、删除后重建、旧 generation 和 revoke 竞争均不误删；多角色注册全有或全无。
   - 验证层次：L1 内核 + L2 协议/Go client；注册联动另记 L3。
-  - 跟踪：状态=未开始；负责人=待分配；完成日期=—；PR/commit=—；验证报告=—；评审人/结论=—。
+  - 跟踪：状态=代码与公开临时验证完成；负责人=Codex；完成日期=2026-11-14；PR/commit=PR #48（head 见 PR）；验证=M4 J41 public profile passed（Temurin JDK 21、Go 294 项、Java 870 项、39 个原生 trace、HISTORY/NATIVE MiniCluster；最终报告保留于本地 artifact）；评审人=Reidddddd；评审结论=待评审；目标环境及 M4 阶段验收=未完成。
 
 - [ ] **J42｜KeepAlive 双向流与持久化后回复**
   - 依赖：J40/J41。

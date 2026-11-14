@@ -5,7 +5,11 @@ import java.util.Optional;
 
 /** Internal evidence that an attempt can no longer occupy its proposed sequence. */
 public final class NotSelectedProof {
-  public enum Reason { DIFFERENT_TRANSACTION_SELECTED, OLD_OWNER_FENCED_WITH_EMPTY_SLOT }
+  public enum Reason {
+    DIFFERENT_TRANSACTION_SELECTED,
+    OLD_OWNER_FENCED_WITH_EMPTY_SLOT,
+    OWNER_LANE_REJECTED_WITH_EMPTY_SLOT
+  }
 
   record SelectedDecision(long sequence, TransactionId transactionId) {
     SelectedDecision {
@@ -38,6 +42,11 @@ public final class NotSelectedProof {
         && (observedPublishedSequence != baseSequence || observedOwnerEpoch <= preparedOwnerEpoch
             || selectedDecision.isPresent())) {
       throw new IllegalArgumentException("old owner was not durably fenced");
+    }
+    if (reason == Reason.OWNER_LANE_REJECTED_WITH_EMPTY_SLOT
+        && (observedPublishedSequence != baseSequence || observedOwnerEpoch != preparedOwnerEpoch
+            || selectedDecision.isPresent())) {
+      throw new IllegalArgumentException("owner lane did not observe its unchanged empty slot");
     }
   }
 

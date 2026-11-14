@@ -14,6 +14,7 @@ import io.etcdhbase.core.commit.MutationForwardRequest;
 import io.etcdhbase.core.commit.OwnerForwarding;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.kv.KvFailure;
+import io.etcdhbase.core.lease.LeaseFailure;
 import io.etcdhbase.core.request.RequestScope;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -133,6 +134,16 @@ class MutationRelayTest {
     var result = assertInstanceOf(MutationRelay.SemanticRejection.class,
         relay.forward(request(), RequestScope.withoutDeadline()).join());
     assertEquals(KvFailure.Reason.KEY_NOT_FOUND, result.reason());
+  }
+
+  @Test
+  void leaseRejectionPreservesItsOwnSemanticReason() {
+    var relay = relay(ignored -> CompletableFuture.completedFuture(ROUTE),
+        (selected, forwarded, scope) -> CompletableFuture.completedFuture(
+            new OwnerForwarding.LeaseRejected(LeaseFailure.Reason.ALREADY_EXISTS)));
+    var result = assertInstanceOf(MutationRelay.LeaseRejection.class,
+        relay.forward(request(), RequestScope.withoutDeadline()).join());
+    assertEquals(LeaseFailure.Reason.ALREADY_EXISTS, result.reason());
   }
 
   @Test

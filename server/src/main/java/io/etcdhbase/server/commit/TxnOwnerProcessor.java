@@ -12,6 +12,7 @@ import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.kv.TxnCommand;
+import io.etcdhbase.core.lease.LeaseFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.grpc.protocol.TxnProtocolLimit;
@@ -107,8 +108,16 @@ public final class TxnOwnerProcessor implements MutationForwardReceiver.Mutation
     return executor.executeNew(command, binding, owner, identity, scope, account)
         .<OwnerForwarding.Reply>handle((id, failure) -> {
           if (failure == null && id.equals(request.invocationId())) return receipt(request);
-          if (failure != null && CompletionFailures.unwrapCompletion(failure) instanceof KvFailure semantic) {
-            return new OwnerForwarding.SemanticRejected(semantic.reason());
+          if (failure != null) {
+            Throwable cause = CompletionFailures.unwrapCompletion(failure);
+            if (cause instanceof KvFailure semantic) {
+              return new OwnerForwarding.SemanticRejected(semantic.reason());
+            }
+            // Txn lease checks and auxiliary planning finish before finish() calls publish().
+            // A failed or unknown publication is kept on the Unknown path below.
+            if (cause instanceof LeaseFailure leaseFailure) {
+              return new OwnerForwarding.LeaseRejected(leaseFailure.reason());
+            }
           }
           return unknownReply(failure);
         });

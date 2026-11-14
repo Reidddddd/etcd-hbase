@@ -24,6 +24,17 @@ class MutationOperationEnvelopeTest {
     assertFalse(MutationOperationEnvelope.isTransaction(delete));
     assertArrayEquals(new byte[] {10, 1, 'a'}, MutationOperationEnvelope.deleteRangeBytes(delete));
     assertThrows(IllegalArgumentException.class, () -> MutationOperationEnvelope.transactionBytes(delete));
+    var grant = MutationOperationEnvelope.leaseGrant(new byte[] {0, (byte) 0xff});
+    assertEquals(MutationOperationEnvelope.Kind.LEASE_GRANT, MutationOperationEnvelope.kind(grant));
+    assertArrayEquals(new byte[] {0, (byte) 0xff}, MutationOperationEnvelope.leaseGrantBytes(grant));
+    assertThrows(IllegalArgumentException.class, () -> MutationOperationEnvelope.leaseGrantBytes(delete));
+    byte[] expiry = new byte[Long.BYTES * 4];
+    ByteKey expiryOperation = MutationOperationEnvelope.leaseExpireEmpty(expiry);
+    assertEquals(MutationOperationEnvelope.Kind.LEASE_EXPIRE_EMPTY,
+        MutationOperationEnvelope.kind(expiryOperation));
+    assertArrayEquals(expiry, MutationOperationEnvelope.leaseExpireEmptyBytes(expiryOperation));
+    assertThrows(IllegalArgumentException.class,
+        () -> MutationOperationEnvelope.leaseExpireEmpty(new byte[Long.BYTES]));
   }
 
   @Test
@@ -34,5 +45,7 @@ class MutationOperationEnvelopeTest {
         () -> MutationOperationEnvelope.transactionBytes(ByteKey.copyOf(new byte[] {10, 1, 'a'})));
     assertThrows(IllegalArgumentException.class,
         () -> MutationOperationEnvelope.transaction(new byte[MutationForwardRequest.MAX_OPERATION_BYTES]));
+    assertThrows(IllegalArgumentException.class,
+        () -> MutationOperationEnvelope.kind(ByteKey.copyOf(new byte[] {0, 'L', 'E', 1, 1})));
   }
 }

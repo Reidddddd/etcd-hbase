@@ -2,6 +2,7 @@ package io.etcdhbase.grpc.protocol;
 
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.kv.KvFailure;
+import io.etcdhbase.core.lease.LeaseFailure;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.util.Collections;
@@ -29,6 +30,9 @@ public final class ErrorProjection {
     }
     if (cause instanceof KvFailure kvFailure) {
       return projectKvFailure(kvFailure);
+    }
+    if (cause instanceof LeaseFailure leaseFailure) {
+      return projectLeaseFailure(leaseFailure);
     }
     if (cause instanceof CancellationException || cause instanceof InterruptedException) {
       return status(
@@ -86,6 +90,17 @@ public final class ErrorProjection {
           status(Status.UNIMPLEMENTED, "etcd-hbase: transaction operation is not available");
       case REQUEST_BUDGET_EXHAUSTED ->
           status(Status.RESOURCE_EXHAUSTED, "backend resource limit was reached");
+    };
+  }
+
+  private static StatusRuntimeException projectLeaseFailure(LeaseFailure failure) {
+    return switch (failure.reason()) {
+      case NOT_FOUND -> status(Status.NOT_FOUND, "etcdserver: requested lease not found");
+      case ALREADY_EXISTS -> status(Status.FAILED_PRECONDITION, "etcdserver: lease already exists");
+      case TTL_TOO_LARGE -> status(Status.OUT_OF_RANGE, "etcdserver: too large lease TTL");
+      case CLOCK_UNHEALTHY -> status(Status.UNAVAILABLE, "lease time source is unavailable");
+      case RESOURCE_LIMIT, ID_SPACE_EXHAUSTED ->
+          status(Status.RESOURCE_EXHAUSTED, safeMessage(BackendFailure.Category.RESOURCE_LIMIT));
     };
   }
 

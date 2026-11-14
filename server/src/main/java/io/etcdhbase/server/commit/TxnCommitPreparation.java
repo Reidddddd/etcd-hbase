@@ -2,8 +2,10 @@ package io.etcdhbase.server.commit;
 
 import io.etcdhbase.core.commit.InvocationBinding;
 import io.etcdhbase.core.commit.InvocationService;
+import io.etcdhbase.core.commit.AsyncCursor;
 import io.etcdhbase.core.commit.ManifestPreparation;
 import io.etcdhbase.core.commit.ManifestRoot;
+import io.etcdhbase.core.commit.PreparedAuxiliaryRecord;
 import io.etcdhbase.core.commit.ResultCatalog;
 import io.etcdhbase.core.commit.ResultIdentity;
 import io.etcdhbase.core.commit.ResultPage;
@@ -65,15 +67,23 @@ public final class TxnCommitPreparation {
   /** The caller owns the scope until this preparation and any publication producer have drained. */
   public CompletableFuture<Prepared> prepare(TxnEvaluator.Evaluation evaluation,
       InvocationBinding invocation, RequestScope scope, BudgetManager.Account account) {
+    return prepare(evaluation, invocation, scope, account, List.of());
+  }
+
+  /** Includes Lease state and binding deltas in the same prepared M2 publication as KV results. */
+  public CompletableFuture<Prepared> prepare(TxnEvaluator.Evaluation evaluation,
+      InvocationBinding invocation, RequestScope scope, BudgetManager.Account account,
+      List<PreparedAuxiliaryRecord> auxiliaryRecords) {
     Objects.requireNonNull(evaluation, "evaluation");
     Objects.requireNonNull(invocation, "invocation");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
+    Objects.requireNonNull(auxiliaryRecords, "auxiliaryRecords");
     boolean changed = evaluation.candidateCount() > 0;
     if (invocation.state() != InvocationBinding.State.PREPARING || !account.belongsTo(scope)
         || !evaluation.belongsTo(invocation, scope)
         || evaluation.eventCount() < evaluation.candidateCount()
-        || !changed && evaluation.eventCount() != 0
+        || !changed && (evaluation.eventCount() != 0 || !auxiliaryRecords.isEmpty())
         || !(evaluation.result().root() instanceof ResultNode.Txn txn)
         || !txn.header().present() || txn.header().revision() != invocation.baseRevision() + (changed ? 1 : 0)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("transaction result and invocation differ"));
@@ -100,8 +110,13 @@ public final class TxnCommitPreparation {
           return invocations.completeWithoutChanges(invocation, reference, catalog,
               evaluation::finishRead, scope).thenApply(NoChanges::new);
         }
-        return manifests.prepareWithResult(invocation, evaluation.candidates(),
-            evaluation.events(), reference, catalog, evaluation::finishRead, scope)
+        return (auxiliaryRecords.isEmpty()
+            ? manifests.prepareWithResult(invocation, evaluation.candidates(),
+                evaluation.events(), reference, catalog, evaluation::finishRead, scope)
+            : manifests.prepareWithResultAndAuxiliary(invocation, evaluation.candidates(),
+                evaluation.events(), reference, catalog,
+                AsyncCursor.fromIterator(auxiliaryRecords.iterator()),
+                evaluation::finishRead, scope))
             .thenCompose(manifest -> invocations.transition(invocation,
                 invocation.seal(manifest.systemIdentity()), scope)
                 .thenApply(sealed -> new Sealed(sealed, manifest)));

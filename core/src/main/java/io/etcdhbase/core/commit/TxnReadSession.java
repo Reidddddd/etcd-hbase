@@ -38,6 +38,7 @@ public final class TxnReadSession implements AutoCloseable {
   private final ByteKey authorizationScopeDigest;
   private final long currentRevision;
   private final long barrierSequence;
+  private final PinnedReadView currentPinnedView;
   private final boolean readyForMutation;
   private final Map<Long, ReadViewRecordStore> stores = new LinkedHashMap<>();
   private final Map<Long, RecordStore> readers = new LinkedHashMap<>();
@@ -58,10 +59,12 @@ public final class TxnReadSession implements AutoCloseable {
     this.authorizationScopeDigest = authorizationScopeDigest;
     this.currentRevision = captured.currentRevision();
     this.barrierSequence = captured.barrierSequence();
-    ReadView current = Objects.requireNonNull(captured.views().get(currentRevision),
-        "current transaction view").view();
-    this.readyForMutation = current.selectedDecision().isEmpty()
-        && current.finalizedSequence() == current.barrierSequence();
+    PinnedReadView current = Objects.requireNonNull(captured.views().get(currentRevision),
+        "current transaction view");
+    this.currentPinnedView = current;
+    ReadView currentReadView = current.view();
+    this.readyForMutation = currentReadView.selectedDecision().isEmpty()
+        && currentReadView.finalizedSequence() == currentReadView.barrierSequence();
     install(captured.views());
   }
 
@@ -78,6 +81,23 @@ public final class TxnReadSession implements AutoCloseable {
   public static CompletableFuture<TxnReadSession> open(ReadViewService service, List<Long> revisions,
       ByteKey authorizationScopeDigest, RecordStore physical, ManifestCatalog manifests,
       ToIntFunction<ByteKey> bucketSelector, int bucketCount, RequestScope scope) {
+    return open(service, revisions, authorizationScopeDigest, physical, manifests,
+        bucketSelector, bucketCount, scope, false);
+  }
+
+  /** Opens a KV transaction session whose current view also protects Lease auxiliary history. */
+  public static CompletableFuture<TxnReadSession> openAuxiliary(ReadViewService service,
+      List<Long> revisions, ByteKey authorizationScopeDigest, RecordStore physical,
+      ManifestCatalog manifests, ToIntFunction<ByteKey> bucketSelector, int bucketCount,
+      RequestScope scope) {
+    return open(service, revisions, authorizationScopeDigest, physical, manifests,
+        bucketSelector, bucketCount, scope, true);
+  }
+
+  private static CompletableFuture<TxnReadSession> open(ReadViewService service, List<Long> revisions,
+      ByteKey authorizationScopeDigest, RecordStore physical, ManifestCatalog manifests,
+      ToIntFunction<ByteKey> bucketSelector, int bucketCount, RequestScope scope,
+      boolean auxiliary) {
     Objects.requireNonNull(service, "service");
     Objects.requireNonNull(revisions, "revisions");
     Objects.requireNonNull(authorizationScopeDigest, "authorizationScopeDigest");
@@ -88,7 +108,10 @@ public final class TxnReadSession implements AutoCloseable {
     if (bucketCount <= 0 || bucketCount > 4096) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("invalid transaction bucket count"));
     }
-    return service.openForTransaction(revisions, authorizationScopeDigest, scope).thenApply(captured -> {
+    var capturedView = auxiliary
+        ? service.openAuxiliaryForTransaction(revisions, authorizationScopeDigest, scope)
+        : service.openForTransaction(revisions, authorizationScopeDigest, scope);
+    return capturedView.thenApply(captured -> {
       try {
         var session = new TxnReadSession(service, captured, physical, manifests, bucketSelector, bucketCount,
             authorizationScopeDigest, scope);
@@ -110,6 +133,15 @@ public final class TxnReadSession implements AutoCloseable {
   public boolean belongsTo(RequestScope expectedScope) { return scope == expectedScope; }
   public boolean authorizes(ByteKey expectedDigest) { return authorizationScopeDigest.equals(expectedDigest); }
   public boolean readyForMutation() { return readyForMutation; }
+
+  /** Returns the current Lease-capable view only when this session was opened with auxiliary protection. */
+  public synchronized PinnedReadView currentAuxiliaryView() {
+    if (state != State.ACTIVE || expanding || scope.isClosed() || scope.isDeadlineExceeded()
+        || !currentPinnedView.protectsAuxiliary() || !currentPinnedView.isOpen()) {
+      throw new IllegalStateException("transaction session has no active auxiliary-protected view");
+    }
+    return currentPinnedView;
+  }
 
   /** Pins only selected historical targets, all derived from the original control barrier. */
   public CompletableFuture<Void> pinRevisions(List<Long> revisions) {

@@ -1,0 +1,82 @@
+schema_version: 1
+id: m4-lease-bindings-v1
+protocol: etcd-v3.5.23
+steps:
+  - case_id: L05
+    id: binding-baseline
+  - case_id: L01
+    id: binding-grant-a
+  - case_id: L01
+    id: binding-grant-b
+  - case_id: T01
+    id: binding-register-then
+  - case_id: L04
+    id: binding-ttl-a-initial
+  - case_id: L04
+    id: binding-ttl-b-initial
+  - case_id: P01
+    id: binding-ignore-flags
+  - case_id: L04
+    id: binding-ttl-a-preserved
+  - case_id: P01
+    id: binding-rebind-a-to-b
+  - case_id: L04
+    id: binding-ttl-a-after-rebind
+  - case_id: L04
+    id: binding-ttl-b-after-rebind
+  - case_id: T01
+    id: binding-register-else
+  - case_id: L04
+    id: binding-ttl-b-after-else
+  - case_id: T01
+    id: binding-register-nested
+  - case_id: L04
+    id: binding-ttl-a-after-nested
+  - case_id: L04
+    id: binding-ttl-b-after-nested
+  - case_id: P01
+    id: binding-unbind
+  - case_id: L04
+    id: binding-ttl-a-after-unbind
+  - case_id: D01
+    id: binding-delete
+  - case_id: L04
+    id: binding-ttl-b-after-delete
+  - case_id: P01
+    id: binding-recreate-unleased
+  - case_id: L04
+    id: binding-ttl-b-after-recreate
+  - case_id: D01
+    id: binding-delete-range
+  - case_id: L04
+    id: binding-ttl-a-after-delete-range
+  - case_id: L04
+    id: binding-ttl-b-after-delete-range
+  - case_id: R01
+    id: binding-role-prefix-after-delete-range
+  - case_id: R01
+    id: binding-version-after-delete-range
+  - case_id: P01
+    id: binding-survivor-put
+  - case_id: L04
+    id: binding-ttl-b-after-survivor-put
+  - case_id: T01
+    id: binding-invalid-lease-atomicity
+  - case_id: R01
+    id: binding-atomicity-range-first
+  - case_id: R01
+    id: binding-atomicity-range-second
+  - case_id: L04
+    id: binding-ttl-a-after-failed-txn
+  - case_id: P01
+    id: binding-invalid-lease-put
+  - case_id: R01
+    id: binding-atomicity-range-invalid-put
+  - case_id: T01
+    id: binding-invalid-lease-unselected-branch
+  - case_id: R01
+    id: binding-unselected-then-absent
+  - case_id: R01
+    id: binding-unselected-else-visible
+  - case_id: L04
+    id: binding-ttl-b-after-unselected-branch

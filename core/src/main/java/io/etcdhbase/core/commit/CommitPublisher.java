@@ -82,6 +82,10 @@ public final class CommitPublisher {
       }
       ControlSnapshot observed = snapshot.orElseThrow();
       CommitState state = observed.state();
+      if (manifest.auxiliaryReference().isPresent() && !state.supportsAuxiliaryRecords()) {
+        return CompletableFuture.failedFuture(new IllegalStateException(
+            "auxiliary publication requires the fenced control format"));
+      }
       if (state.ownerEpoch() != owner.epoch()
           || state.ownerInstance().filter(owner.instance()::equals).isEmpty()
           || state.publishedSequence() != invocation.baseSequence()

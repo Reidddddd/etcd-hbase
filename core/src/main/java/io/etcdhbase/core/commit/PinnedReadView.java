@@ -12,6 +12,7 @@ public final class PinnedReadView implements AutoCloseable {
   private final ReadView view;
   private final ReadViewPinRegistry.Pin pin;
   private final RequestScope scope;
+  private final boolean auxiliaryProtected;
   private final CompletableFuture<Void> cleanupCompletion = new CompletableFuture<>();
   private final CompletableFuture<Void> termination = new CompletableFuture<>();
   private boolean closeRequested;
@@ -21,15 +22,23 @@ public final class PinnedReadView implements AutoCloseable {
   private int activeReaders;
 
   PinnedReadView(ReadView view, ReadViewPinRegistry.Pin pin, RequestScope scope) {
+    this(view, pin, scope, false);
+  }
+
+  PinnedReadView(ReadView view, ReadViewPinRegistry.Pin pin, RequestScope scope,
+      boolean auxiliaryProtected) {
     this.view = Objects.requireNonNull(view, "view");
     this.pin = Objects.requireNonNull(pin, "pin");
     this.scope = Objects.requireNonNull(scope, "scope");
+    this.auxiliaryProtected = auxiliaryProtected;
     if (view.pinGeneration() != pin.generation()) {
       throw new IllegalArgumentException("read view and pin generations differ");
     }
   }
 
   public ReadView view() { return view; }
+  public boolean belongsTo(RequestScope requestScope) { return scope == requestScope; }
+  public boolean protectsAuxiliary() { return auxiliaryProtected; }
   public Optional<ManifestRoot> selectedRoot() { return view.selectedRoot(); }
   public synchronized boolean isOpen() { return !closeRequested && !pinClosed; }
   CompletionStage<Void> cleanupCompletion() { return cleanupCompletion.minimalCompletionStage(); }

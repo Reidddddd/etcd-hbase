@@ -3,6 +3,11 @@ package io.etcdhbase.hbase.codec;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.AuxiliaryDirectory;
+import io.etcdhbase.core.commit.AuxiliaryPage;
+import io.etcdhbase.core.commit.AuxiliaryPageReference;
+import io.etcdhbase.core.commit.AuxiliaryRecordReference;
+import io.etcdhbase.core.commit.AuxiliaryReference;
 import io.etcdhbase.core.commit.ManifestCandidateReference;
 import io.etcdhbase.core.commit.ManifestChildReference;
 import io.etcdhbase.core.commit.ManifestDirectoryPage;
@@ -14,7 +19,10 @@ import io.etcdhbase.core.commit.EventReference;
 import io.etcdhbase.core.commit.PreparedEvent;
 import io.etcdhbase.core.commit.PreparedEventReference;
 import io.etcdhbase.core.commit.PreparedCandidate;
+import io.etcdhbase.core.commit.PreparedAuxiliaryRecord;
+import io.etcdhbase.core.commit.ResultReference;
 import io.etcdhbase.core.commit.TransactionId;
+import io.etcdhbase.core.commit.SystemRecordType;
 import io.etcdhbase.core.storage.StorageMetadata;
 import io.etcdhbase.core.storage.StoredRecord;
 import io.etcdhbase.hbase.storage.proto.CommitProtos;
@@ -27,8 +35,10 @@ import org.apache.hadoop.hbase.HConstants;
 public final class ManifestMessages {
   public static final int FORMAT_VERSION = 2;
   public static final int ROOT_RESULT_FORMAT_VERSION = 3;
+  public static final int ROOT_AUXILIARY_FORMAT_VERSION = 4;
   public static final int MAX_ROOT_BYTES = 16 * 1024;
   public static final int MAX_RESULT_ROOT_BYTES = 128 * 1024;
+  public static final int MAX_AUXILIARY_ROOT_BYTES = 128 * 1024;
   public static final int MAX_DIRECTORY_BYTES = ManifestDirectoryPage.MAX_PAGE_BYTES;
   public static final int MAX_EVENT_DIRECTORY_BYTES = 64 * 1024;
 
@@ -163,8 +173,10 @@ public final class ManifestMessages {
       requireRootKeyLength(child.identity().length());
     });
     root.eventDirectory().ifPresent(child -> requireRootKeyLength(child.identity().length()));
+    int formatVersion = root.auxiliaryReference().isPresent() ? ROOT_AUXILIARY_FORMAT_VERSION
+        : root.resultReference().isPresent() ? ROOT_RESULT_FORMAT_VERSION : FORMAT_VERSION;
     var builder = CommitProtos.ManifestRoot.newBuilder()
-        .setFormatVersion(root.resultReference().isPresent() ? ROOT_RESULT_FORMAT_VERSION : FORMAT_VERSION)
+        .setFormatVersion(formatVersion)
         .setTransactionId(ByteString.copyFrom(root.transactionId().bytes()))
         .setOwnerEpoch(root.ownerEpoch())
         .setBaseSequence(root.baseSequence())
@@ -195,9 +207,9 @@ public final class ManifestMessages {
         .setEventDirectoryLevel(child.level())
         .setEventDirectoryTotalBytes(child.totalBytes()));
     root.resultReference().ifPresent(reference -> builder.setResult(ResultMessages.encode(reference)));
+    root.auxiliaryReference().ifPresent(reference -> builder.setAuxiliary(encode(reference)));
     byte[] encoded = builder.build().toByteArray();
-    requireLength(encoded.length, root.resultReference().isPresent()
-        ? MAX_RESULT_ROOT_BYTES : MAX_ROOT_BYTES);
+    requireLength(encoded.length, rootLimit(formatVersion));
     return encoded;
   }
 
@@ -209,13 +221,18 @@ public final class ManifestMessages {
           || !message.hasFormatVersion()
           || message.getFormatVersion() != FORMAT_VERSION
               && message.getFormatVersion() != ROOT_RESULT_FORMAT_VERSION
+              && message.getFormatVersion() != ROOT_AUXILIARY_FORMAT_VERSION
           || !message.hasTransactionId() || !message.hasOwnerEpoch() || !message.hasBaseSequence()
           || !message.hasBaseRevision() || !message.hasCandidateCount()
           || !message.hasTotalValueBytes() || !message.hasRootDigest()
           || !message.hasEventCount() || !message.hasTotalEventBytes()) throw invalid();
-      if ((message.getFormatVersion() == ROOT_RESULT_FORMAT_VERSION) != message.hasResult()) throw invalid();
-      requireLength(encoded.length, message.getFormatVersion() == ROOT_RESULT_FORMAT_VERSION
-          ? MAX_RESULT_ROOT_BYTES : MAX_ROOT_BYTES);
+      if (message.getFormatVersion() == FORMAT_VERSION
+          && (message.hasResult() || message.hasAuxiliary())
+          || message.getFormatVersion() == ROOT_RESULT_FORMAT_VERSION
+              && (!message.hasResult() || message.hasAuxiliary())
+          || message.getFormatVersion() == ROOT_AUXILIARY_FORMAT_VERSION
+              && !message.hasAuxiliary()) throw invalid();
+      requireLength(encoded.length, rootLimit(message.getFormatVersion()));
       byte[] txn = message.getTransactionId().toByteArray();
       if (txn.length != 16) throw invalid();
       boolean hasDirectory = message.hasDirectoryIdentity();
@@ -265,6 +282,15 @@ public final class ManifestMessages {
             message.getEventDirectoryItemCount(), message.getEventDirectoryTotalBytes(),
             message.getEventDirectoryPageCount(), message.getEventDirectoryLevel()));
       }
+      if (message.hasAuxiliary()) {
+        Optional<ResultReference> result = message.hasResult()
+            ? Optional.of(ResultMessages.decode(message.getResult())) : Optional.empty();
+        return ManifestRoot.restoreWithAuxiliary(TransactionId.fromBytes(txn), message.getOwnerEpoch(),
+            message.getBaseSequence(), message.getBaseRevision(), message.getCandidateCount(),
+            message.getTotalValueBytes(), directory, message.getEventCount(),
+            message.getTotalEventBytes(), eventDirectory, result,
+            decode(message.getAuxiliary()), ByteKey.copyOf(message.getRootDigest().toByteArray()));
+      }
       if (message.hasResult()) {
         return ManifestRoot.restoreWithResult(TransactionId.fromBytes(txn), message.getOwnerEpoch(),
             message.getBaseSequence(), message.getBaseRevision(), message.getCandidateCount(),
@@ -280,6 +306,180 @@ public final class ManifestMessages {
     } catch (InvalidProtocolBufferException | IllegalArgumentException | ArithmeticException failure) {
       throw new IllegalArgumentException("invalid persisted manifest root", failure);
     }
+  }
+
+  public static byte[] encode(PreparedAuxiliaryRecord record) {
+    var builder = CommitProtos.PreparedAuxiliaryRecord.newBuilder()
+        .setFormatVersion(1)
+        .setTransactionId(ByteString.copyFrom(record.transactionId().bytes()))
+        .setOwnerEpoch(record.ownerEpoch())
+        .setBaseSequence(record.baseSequence())
+        .setOrdinal(record.ordinal())
+        .setTargetRecordType(record.targetType().id())
+        .setTargetIdentity(ByteString.copyFrom(record.targetIdentity().bytes()))
+        .setPayload(ByteString.copyFrom(record.payload().bytes()))
+        .setDigest(ByteString.copyFrom(record.digest().bytes()));
+    byte[] encoded = builder.build().toByteArray();
+    requireLength(encoded.length, maxAuxiliaryRecordBytes());
+    return encoded;
+  }
+
+  public static PreparedAuxiliaryRecord decodeAuxiliaryRecord(byte[] encoded) {
+    requireLength(encoded.length, maxAuxiliaryRecordBytes());
+    try {
+      var message = CommitProtos.PreparedAuxiliaryRecord.parseFrom(encoded);
+      if (!message.getUnknownFields().asMap().isEmpty()
+          || !message.hasFormatVersion() || message.getFormatVersion() != 1
+          || !message.hasTransactionId() || !message.hasOwnerEpoch()
+          || !message.hasBaseSequence() || !message.hasOrdinal()
+          || !message.hasTargetRecordType() || !message.hasTargetIdentity()
+          || !message.hasPayload() || !message.hasDigest()) throw invalid();
+      byte[] txn = message.getTransactionId().toByteArray();
+      byte[] targetIdentity = message.getTargetIdentity().toByteArray();
+      byte[] payload = message.getPayload().toByteArray();
+      byte[] digest = message.getDigest().toByteArray();
+      if (txn.length != 16 || targetIdentity.length == 0
+          || targetIdentity.length > PreparedAuxiliaryRecord.MAX_TARGET_IDENTITY_BYTES
+          || payload.length == 0 || payload.length > PreparedAuxiliaryRecord.MAX_PAYLOAD_BYTES
+          || digest.length != 32 || message.getOrdinal() < 0) throw invalid();
+      return PreparedAuxiliaryRecord.restore(TransactionId.fromBytes(txn), message.getOwnerEpoch(),
+          message.getBaseSequence(), message.getOrdinal(),
+          SystemRecordType.fromId(message.getTargetRecordType()), ByteKey.copyOf(targetIdentity),
+          ByteKey.copyOf(payload), ByteKey.copyOf(digest));
+    } catch (InvalidProtocolBufferException | IllegalArgumentException | ArithmeticException failure) {
+      throw new IllegalArgumentException("invalid persisted auxiliary record", failure);
+    }
+  }
+
+  public static byte[] encode(AuxiliaryPage page) {
+    var builder = CommitProtos.AuxiliaryPage.newBuilder()
+        .setFormatVersion(1)
+        .setTransactionId(ByteString.copyFrom(page.transactionId().bytes()))
+        .setPageIndex(page.pageIndex())
+        .setPageDigest(ByteString.copyFrom(page.digest().bytes()));
+    for (AuxiliaryRecordReference record : page.records()) {
+      builder.addRecords(CommitProtos.AuxiliaryRecordReference.newBuilder()
+          .setOrdinal(record.ordinal())
+          .setIdentity(ByteString.copyFrom(record.identity().bytes()))
+          .setDigest(ByteString.copyFrom(record.digest().bytes()))
+          .setEncodedBytes(record.encodedBytes()));
+    }
+    byte[] encoded = builder.build().toByteArray();
+    requireLength(encoded.length, AuxiliaryPage.MAX_PAGE_BYTES);
+    return encoded;
+  }
+
+  public static AuxiliaryPage decodeAuxiliaryPage(byte[] encoded) {
+    requireLength(encoded.length, AuxiliaryPage.MAX_PAGE_BYTES);
+    try {
+      var message = CommitProtos.AuxiliaryPage.parseFrom(encoded);
+      if (!message.getUnknownFields().asMap().isEmpty()
+          || !message.hasFormatVersion() || message.getFormatVersion() != 1
+          || !message.hasTransactionId() || !message.hasPageIndex()
+          || !message.hasPageDigest() || message.getRecordsCount() > AuxiliaryPage.MAX_RECORDS) {
+        throw invalid();
+      }
+      byte[] txn = message.getTransactionId().toByteArray();
+      if (txn.length != 16) throw invalid();
+      var references = new ArrayList<AuxiliaryRecordReference>(message.getRecordsCount());
+      for (var record : message.getRecordsList()) {
+        if (!record.getUnknownFields().asMap().isEmpty() || !record.hasOrdinal()
+            || !record.hasIdentity() || !record.hasDigest() || !record.hasEncodedBytes()
+            || record.getOrdinal() < 0) throw invalid();
+        references.add(new AuxiliaryRecordReference(record.getOrdinal(),
+            ByteKey.copyOf(record.getIdentity().toByteArray()),
+            ByteKey.copyOf(record.getDigest().toByteArray()), record.getEncodedBytes()));
+      }
+      return AuxiliaryPage.restore(TransactionId.fromBytes(txn), message.getPageIndex(), references,
+          ByteKey.copyOf(message.getPageDigest().toByteArray()));
+    } catch (InvalidProtocolBufferException | IllegalArgumentException | ArithmeticException failure) {
+      throw new IllegalArgumentException("invalid persisted auxiliary page", failure);
+    }
+  }
+
+  public static byte[] encode(AuxiliaryDirectory directory) {
+    var builder = CommitProtos.AuxiliaryDirectory.newBuilder()
+        .setFormatVersion(1)
+        .setTransactionId(ByteString.copyFrom(directory.transactionId().bytes()))
+        .setDirectoryDigest(ByteString.copyFrom(directory.digest().bytes()))
+        .setItemCount(directory.itemCount())
+        .setTotalBytes(directory.totalBytes());
+    for (AuxiliaryPageReference page : directory.pages()) {
+      builder.addPages(CommitProtos.AuxiliaryPageReference.newBuilder()
+          .setPageIndex(page.pageIndex())
+          .setIdentity(ByteString.copyFrom(page.identity().bytes()))
+          .setDigest(ByteString.copyFrom(page.digest().bytes()))
+          .setFirstOrdinal(page.firstOrdinal())
+          .setLastOrdinal(page.lastOrdinal())
+          .setItemCount(page.itemCount())
+          .setPayloadBytes(page.payloadBytes()));
+    }
+    byte[] encoded = builder.build().toByteArray();
+    requireLength(encoded.length, 128 * 1024);
+    return encoded;
+  }
+
+  public static AuxiliaryDirectory decodeAuxiliaryDirectory(byte[] encoded) {
+    requireLength(encoded.length, 128 * 1024);
+    try {
+      var message = CommitProtos.AuxiliaryDirectory.parseFrom(encoded);
+      if (!message.getUnknownFields().asMap().isEmpty()
+          || !message.hasFormatVersion() || message.getFormatVersion() != 1
+          || !message.hasTransactionId() || !message.hasDirectoryDigest()
+          || !message.hasItemCount() || !message.hasTotalBytes()
+          || message.getPagesCount() > AuxiliaryReference.MAX_PAGES) throw invalid();
+      byte[] txn = message.getTransactionId().toByteArray();
+      if (txn.length != 16) throw invalid();
+      var pages = new ArrayList<AuxiliaryPageReference>(message.getPagesCount());
+      for (var page : message.getPagesList()) {
+        if (!page.getUnknownFields().asMap().isEmpty() || !page.hasPageIndex()
+            || !page.hasIdentity() || !page.hasDigest() || !page.hasFirstOrdinal()
+            || !page.hasLastOrdinal() || !page.hasItemCount() || !page.hasPayloadBytes()) {
+          throw invalid();
+        }
+        pages.add(new AuxiliaryPageReference(page.getPageIndex(),
+            ByteKey.copyOf(page.getIdentity().toByteArray()),
+            ByteKey.copyOf(page.getDigest().toByteArray()), page.getFirstOrdinal(),
+            page.getLastOrdinal(), page.getItemCount(), page.getPayloadBytes()));
+      }
+      AuxiliaryDirectory directory = AuxiliaryDirectory.restore(TransactionId.fromBytes(txn), pages,
+          ByteKey.copyOf(message.getDirectoryDigest().toByteArray()));
+      if (directory.itemCount() != message.getItemCount()
+          || directory.totalBytes() != message.getTotalBytes()) throw invalid();
+      return directory;
+    } catch (InvalidProtocolBufferException | IllegalArgumentException | ArithmeticException failure) {
+      throw new IllegalArgumentException("invalid persisted auxiliary directory", failure);
+    }
+  }
+
+  private static CommitProtos.AuxiliaryReference encode(AuxiliaryReference reference) {
+    return CommitProtos.AuxiliaryReference.newBuilder()
+        .setIdentity(ByteString.copyFrom(reference.identity().bytes()))
+        .setDigest(ByteString.copyFrom(reference.digest().bytes()))
+        .setItemCount(reference.itemCount())
+        .setTotalBytes(reference.totalBytes())
+        .setPageCount(reference.pageCount())
+        .build();
+  }
+
+  private static AuxiliaryReference decode(CommitProtos.AuxiliaryReference message) {
+    if (!message.getUnknownFields().asMap().isEmpty() || !message.hasIdentity()
+        || !message.hasDigest() || !message.hasItemCount() || !message.hasTotalBytes()
+        || !message.hasPageCount()) throw invalid();
+    return new AuxiliaryReference(ByteKey.copyOf(message.getIdentity().toByteArray()),
+        ByteKey.copyOf(message.getDigest().toByteArray()), message.getItemCount(),
+        message.getTotalBytes(), message.getPageCount());
+  }
+
+  private static int rootLimit(int formatVersion) {
+    return formatVersion == FORMAT_VERSION ? MAX_ROOT_BYTES
+        : formatVersion == ROOT_RESULT_FORMAT_VERSION ? MAX_RESULT_ROOT_BYTES
+            : MAX_AUXILIARY_ROOT_BYTES;
+  }
+
+  private static int maxAuxiliaryRecordBytes() {
+    return Math.addExact(PreparedAuxiliaryRecord.MAX_PAYLOAD_BYTES,
+        PreparedAuxiliaryRecord.MAX_TARGET_IDENTITY_BYTES + 1024);
   }
 
   public static byte[] encode(PreparedEvent event) {

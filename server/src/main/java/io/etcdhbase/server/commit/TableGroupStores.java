@@ -3,16 +3,20 @@ package io.etcdhbase.server.commit;
 import io.etcdhbase.admin.M3TableGroupPlan;
 import io.etcdhbase.core.commit.CommitFinalizationService;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
+import io.etcdhbase.core.commit.AuxiliaryMaterializationStore;
 import io.etcdhbase.core.commit.InvocationResultResolver;
 import io.etcdhbase.core.commit.ManifestCatalog;
 import io.etcdhbase.core.commit.ReadViewService;
 import io.etcdhbase.core.commit.ResultCatalog;
 import io.etcdhbase.core.commit.SnapshotPinConfiguration;
 import io.etcdhbase.core.commit.SnapshotPinManager;
+import io.etcdhbase.core.commit.SystemRecordAuxiliaryMaterializationStore;
 import io.etcdhbase.core.commit.TableGroupIdentityService;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
+import io.etcdhbase.hbase.codec.LeaseBindingMessages;
+import io.etcdhbase.hbase.codec.LeaseStateMessages;
 import io.etcdhbase.hbase.connection.HBaseRequestContext;
 import io.etcdhbase.hbase.storage.HBaseCommitControlStore;
 import io.etcdhbase.hbase.storage.HBaseCommitDecisionRepository;
@@ -43,6 +47,7 @@ public final class TableGroupStores {
   private final HBaseCommitDecisionRepository decisions;
   private final CommitOutcomeResolver outcomes;
   private final HBaseMaterializationStore materialization;
+  private final AuxiliaryMaterializationStore auxiliaryMaterialization;
   private final CommitFinalizationService finalizer;
   private final SnapshotPinManager pins;
   private final ReadViewService views;
@@ -53,7 +58,9 @@ public final class TableGroupStores {
       HBaseInvocationRepository invocations, HBaseManifestRepository manifestRepository,
       ManifestCatalog manifests, HBaseResultRepository resultRepository, ResultCatalog results,
       HBaseCommitDecisionRepository decisions, CommitOutcomeResolver outcomes,
-      HBaseMaterializationStore materialization, CommitFinalizationService finalizer,
+      HBaseMaterializationStore materialization,
+      AuxiliaryMaterializationStore auxiliaryMaterialization,
+      CommitFinalizationService finalizer,
       SnapshotPinManager pins, ReadViewService views, InvocationResultResolver invocationResults,
       long clusterId) {
     if (clusterId == 0) throw new IllegalArgumentException("table-group cluster ID must not be zero");
@@ -67,6 +74,7 @@ public final class TableGroupStores {
     this.decisions = decisions;
     this.outcomes = outcomes;
     this.materialization = materialization;
+    this.auxiliaryMaterialization = auxiliaryMaterialization;
     this.finalizer = finalizer;
     this.pins = pins;
     this.views = views;
@@ -84,6 +92,7 @@ public final class TableGroupStores {
   public HBaseCommitDecisionRepository decisions() { return decisions; }
   public CommitOutcomeResolver outcomes() { return outcomes; }
   public HBaseMaterializationStore materialization() { return materialization; }
+  public AuxiliaryMaterializationStore auxiliaryMaterialization() { return auxiliaryMaterialization; }
   public CommitFinalizationService finalizer() { return finalizer; }
   public SnapshotPinManager pins() { return pins; }
   public ReadViewService views() { return views; }
@@ -198,12 +207,14 @@ public final class TableGroupStores {
     var results = new ResultCatalog(resultRepository);
     var decisions = new HBaseCommitDecisionRepository(records);
     var outcomes = new CommitOutcomeResolver(control, decisions);
+    var auxiliaryMaterialization = new SystemRecordAuxiliaryMaterializationStore(records,
+        LeaseStateMessages::decode, LeaseBindingMessages::decode);
     var finalizer = new CommitFinalizationService(control, outcomes, decisions, manifests,
-        materialization, results);
+        materialization, results, auxiliaryMaterialization);
     var views = new ReadViewService(control, manifests, pins, system.profileFingerprint());
     var invocationResults = new InvocationResultResolver(invocations, outcomes, manifests, results);
     return new TableGroupStores(records, control, invocations, manifestRepository, manifests,
-        resultRepository, results, decisions, outcomes, materialization, finalizer, pins, views,
-        invocationResults, clusterId);
+        resultRepository, results, decisions, outcomes, materialization, auxiliaryMaterialization,
+        finalizer, pins, views, invocationResults, clusterId);
   }
 }

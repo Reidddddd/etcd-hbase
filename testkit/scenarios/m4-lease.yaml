@@ -1,0 +1,26 @@
+schema_version: 1
+id: m4-lease-v1
+protocol: etcd-v3.5.23
+steps:
+  - case_id: L05
+    id: native-baseline
+  - case_id: L01
+    id: auto-grant
+  - case_id: L01
+    id: auto-ttl
+  - case_id: L01
+    id: explicit-grant
+  - case_id: L01
+    id: explicit-ttl
+  - case_id: L01
+    id: duplicate-id
+  - case_id: L04
+    id: missing-ttl
+  - case_id: L01
+    id: negative-id
+  - case_id: L05
+    id: leases-list
+  - case_id: L01
+    id: oversized-ttl
+  - case_id: L04
+    id: zero-id-ttl

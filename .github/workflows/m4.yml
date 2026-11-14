@@ -1,0 +1,54 @@
+name: M4 Lease and Watch
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: m4-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  j40:
+    name: J40 Lease 管理与恢复
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 下载锁定的 Java 21
+        run: python3 scripts/dev/download-locked-jdk.py --output "$RUNNER_TEMP/m4-jdk.tar.gz"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: jdkfile
+          java-version: '21'
+          jdk-file: ${{ runner.temp }}/m4-jdk.tar.gz
+          cache: maven
+      - name: 验证 J40
+        env:
+          ETCD_HBASE_JDK21_HOME: ${{ env.JAVA_HOME }}
+        run: scripts/verify/m4.sh --scope public --task J40 --artifact-root ".artifacts/m4/ci-${{ github.run_id }}-${{ github.run_attempt }}"
+  j41:
+    name: J41 Lease 绑定与注册事务
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 下载锁定的 Java 21
+        run: python3 scripts/dev/download-locked-jdk.py --output "$RUNNER_TEMP/m4-jdk.tar.gz"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: jdkfile
+          java-version: '21'
+          jdk-file: ${{ runner.temp }}/m4-jdk.tar.gz
+          cache: maven
+      - name: 验证 J41
+        env:
+          ETCD_HBASE_JDK21_HOME: ${{ env.JAVA_HOME }}
+        run: scripts/verify/m4.sh --scope public --task J41 --artifact-root ".artifacts/m4/ci-${{ github.run_id }}-${{ github.run_attempt }}"

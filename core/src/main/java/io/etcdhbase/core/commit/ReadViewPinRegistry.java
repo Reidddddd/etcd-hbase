@@ -10,6 +10,12 @@ public interface ReadViewPinRegistry {
   /** Registration must race safely with GC; an in-memory/no-op pin is not a production implementation. */
   CompletableFuture<Pin> register(ReadView view, RequestScope scope);
 
+  /** Protects the auxiliary history at the captured sequence as well as any selected root. */
+  default CompletableFuture<Pin> registerAuxiliary(ReadView view, RequestScope scope) {
+    return CompletableFuture.failedFuture(new UnsupportedOperationException(
+        "auxiliary snapshot protection is not available"));
+  }
+
   interface Pin extends AutoCloseable {
     /** Monotonic generation for this registration slot. */
     long generation();

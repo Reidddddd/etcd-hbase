@@ -53,6 +53,16 @@ import org.junit.jupiter.api.Test;
 
 class ReadViewRecordStoreTest {
   @Test
+  void auxiliaryReadRejectsLegacyControlBeforeRegisteringAPin() {
+    Fixture fixture = currentReadFixture();
+    try (RequestScope scope = RequestScope.withoutDeadline()) {
+      assertThrows(CompletionException.class,
+          () -> fixture.views.openAuxiliary(digest(9), scope).join());
+      assertEquals(0, fixture.pinRegistrations.get());
+    }
+  }
+
+  @Test
   void currentReadOverlaysOnlyTheSelectedPendingTransactionBeforeRangeMerge() throws Exception {
     Fixture fixture = currentReadFixture();
     fixture.physical.pointUsesScanner = true;

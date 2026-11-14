@@ -281,6 +281,29 @@ public final class BudgetManager {
       }
     }
 
+    /** Charges one bounded internal scan page using its returned physical cost. */
+    public void chargeInternalScanPage(long physicalRows, long returnedCellBytes,
+        long scanRpcCalls) throws BackendFailure {
+      if (physicalRows < 0 || returnedCellBytes < 0 || scanRpcCalls < 1) {
+        throw new IllegalArgumentException("invalid internal scan-page cost");
+      }
+      synchronized (BudgetManager.this) {
+        requireActive();
+        boolean exceeds = physicalRows > readLimits.physicalRows() - this.physicalRows
+            || returnedCellBytes > readLimits.cellBytes() - cellBytes
+            || scanRpcCalls > readLimits.scanRpcCalls() - this.scanRpcCalls
+            || pages >= readLimits.pages();
+        if (exceeds) {
+          readExhausted = true;
+          throw new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT);
+        }
+        this.physicalRows = Math.addExact(this.physicalRows, physicalRows);
+        cellBytes = Math.addExact(cellBytes, returnedCellBytes);
+        this.scanRpcCalls = Math.addExact(this.scanRpcCalls, scanRpcCalls);
+        pages++;
+      }
+    }
+
     /** Charges a candidate before its value is fetched so limits bound attempted bytes too. */
     public void chargeCandidateRead(long bytes) throws BackendFailure {
       if (bytes < 0) throw new IllegalArgumentException("negative candidate read bytes");

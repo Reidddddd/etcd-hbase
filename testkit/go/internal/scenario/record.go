@@ -23,7 +23,8 @@ type runner struct {
 func (runner *runner) call(ctx context.Context, caseID, method string, request protoMessage, operation func(context.Context) (protoMessage, error)) (protoMessage, error) {
 	response, err := runner.callWithError(ctx, caseID, method, request, operation)
 	if err != nil {
-		return nil, fmt.Errorf("scenario %s failed with grpc_code=%s", method, status.Code(err))
+		return nil, fmt.Errorf("scenario %s failed with grpc_code=%s: %s", method,
+			status.Code(err), status.Convert(err).Message())
 	}
 	return response, nil
 }

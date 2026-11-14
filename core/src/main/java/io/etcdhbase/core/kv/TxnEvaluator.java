@@ -11,6 +11,9 @@ import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.commit.TxnReadSession;
 import io.etcdhbase.core.concurrent.ContinuationExecutor;
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.lease.LeaseBindingChange;
+import io.etcdhbase.core.lease.LeaseFailure;
+import io.etcdhbase.core.lease.LeaseStateLookup;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.core.scan.DirectRecordReader;
@@ -61,6 +64,9 @@ public final class TxnEvaluator {
     public ResultTree result() { return result; }
     public long candidateCount() { return working == null ? 0 : working.candidateCount(); }
     public long eventCount() { return working == null ? 0 : working.eventCount(); }
+    public List<LeaseBindingChange> leaseBindingChanges() {
+      return working == null ? List.of() : working.leaseBindingChanges();
+    }
     public AsyncCursor<PreparedCandidate> candidates() {
       return working == null ? AsyncCursor.fromIterator(List.<PreparedCandidate>of().iterator()) : working.candidates();
     }
@@ -125,6 +131,7 @@ public final class TxnEvaluator {
   private final ToIntFunction<ByteKey> bucket;
   private final SystemRecordStore worksetRecords;
   private final ManifestRepository worksetManifests;
+  private final LeaseStateLookup leaseStates;
   private final AtomicBoolean started = new AtomicBoolean();
 
   public TxnEvaluator(TxnReadSession session, CompareReadExecutor compares,
@@ -136,6 +143,14 @@ public final class TxnEvaluator {
   public TxnEvaluator(TxnReadSession session, CompareReadExecutor compares,
       BudgetManager.Account account, RequestScope scope, Limits limits,
       ToIntFunction<ByteKey> bucket, SystemRecordStore worksetRecords, ManifestRepository worksetManifests) {
+    this(session, compares, account, scope, limits, bucket, worksetRecords, worksetManifests, null);
+  }
+
+  /** Supplies the same-barrier Lease lookup only for an M4-enabled mutation runtime. */
+  public TxnEvaluator(TxnReadSession session, CompareReadExecutor compares,
+      BudgetManager.Account account, RequestScope scope, Limits limits,
+      ToIntFunction<ByteKey> bucket, SystemRecordStore worksetRecords,
+      ManifestRepository worksetManifests, LeaseStateLookup leaseStates) {
     this.session = Objects.requireNonNull(session, "session");
     this.compares = Objects.requireNonNull(compares, "compares");
     this.account = Objects.requireNonNull(account, "account");
@@ -147,6 +162,10 @@ public final class TxnEvaluator {
     }
     this.worksetRecords = worksetRecords;
     this.worksetManifests = worksetManifests;
+    this.leaseStates = leaseStates;
+    if (leaseStates != null && worksetRecords == null) {
+      throw new IllegalArgumentException("Lease-aware transactions require durable workset stores");
+    }
     if (!session.belongsTo(scope) || !account.belongsTo(scope)
         || !compares.belongsTo(session, account, scope)
         || limits.resultBytes() > account.reservation().output()
@@ -203,7 +222,7 @@ public final class TxnEvaluator {
       if (command.mayWrite()) {
         retainUntilDrain(requireMemory(BudgetManager.Memory.CANDIDATE, limits.workingBytes()));
         working = new TxnWorkingSet(invocation.orElseThrow(), limits.workingBytes(),
-            worksetRecords, worksetManifests, scope, account, bucket);
+            worksetRecords, worksetManifests, scope, account, bucket, leaseStates != null);
       }
       var state = new State(working, invocation, standaloneRange(command));
       CompletableFuture<Void> started = state.working == null
@@ -288,21 +307,38 @@ public final class TxnEvaluator {
       return new DirectRecordReader(session.reader(0), account, metadataBytes)
           .readForPreparation(command.key(), session.currentRevision(), ReadProjection.METADATA)
           .thenComposeAsync(point -> {
+            Optional<StoredRecord> previous;
             try (point) {
-              var prior = point.record().filter(record -> record.metadata().state() == StorageMetadata.State.LIVE)
-                  .orElseThrow(() -> new KvFailure(KvFailure.Reason.KEY_NOT_FOUND));
-              if (command.leaseIntent() == PutCommand.LeaseIntent.EXPLICIT || prior.metadata().leaseId() != 0) {
-                throw new KvFailure(KvFailure.Reason.LEASE_UNAVAILABLE);
-              }
+              previous = point.record().filter(record -> record.metadata().state() == StorageMetadata.State.LIVE);
+              if (previous.isEmpty()) throw new KvFailure(KvFailure.Reason.KEY_NOT_FOUND);
             }
-            return checkPut(writes, index + 1);
+            return validatePutLease(command, previous).thenComposeAsync(ignored ->
+                checkPut(writes, index + 1), CONTINUATION_EXECUTOR);
           }, CONTINUATION_EXECUTOR);
     }
-    if (command.leaseIntent() == PutCommand.LeaseIntent.EXPLICIT) {
-      return CompletableFuture.failedFuture(new KvFailure(KvFailure.Reason.LEASE_UNAVAILABLE));
-    }
-    return CompletableFuture.completedFuture(null).thenComposeAsync(ignored ->
+    return validatePutLease(command, Optional.empty()).thenComposeAsync(ignored ->
         checkPut(writes, index + 1), CONTINUATION_EXECUTOR);
+  }
+
+  private CompletableFuture<Void> validatePutLease(PutCommand command,
+      Optional<StoredRecord> previous) {
+    if (leaseStates == null) {
+      if (command.leaseIntent() == PutCommand.LeaseIntent.EXPLICIT
+          || previous.filter(record -> record.metadata().leaseId() != 0).isPresent()) {
+        return CompletableFuture.failedFuture(new KvFailure(KvFailure.Reason.LEASE_UNAVAILABLE));
+      }
+      return CompletableFuture.completedFuture(null);
+    }
+    if (command.leaseIntent() == PutCommand.LeaseIntent.EXPLICIT) {
+      return leaseStates.requireAttachable(command.leaseId()).thenApply(ignored -> null);
+    }
+    if (command.leaseIntent() == PutCommand.LeaseIntent.PRESERVE) {
+      long leaseId = previous.orElseThrow(() -> new KvFailure(KvFailure.Reason.KEY_NOT_FOUND))
+          .metadata().leaseId();
+      return leaseId == 0 ? CompletableFuture.completedFuture(null)
+          : leaseStates.requireAttachable(leaseId).thenApply(ignored -> null);
+    }
+    return CompletableFuture.completedFuture(null);
   }
 
   private CompletableFuture<List<ResultNode>> execute(BranchPlan plan,

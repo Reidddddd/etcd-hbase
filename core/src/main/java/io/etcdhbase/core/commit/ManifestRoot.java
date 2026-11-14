@@ -22,17 +22,19 @@ public final class ManifestRoot {
   private final long totalEventBytes;
   private final Optional<EventReference> eventDirectory;
   private final Optional<ResultReference> resultReference;
+  private final Optional<AuxiliaryReference> auxiliaryReference;
   private final ByteKey digest;
 
   private ManifestRoot(TransactionId transactionId, long ownerEpoch, long baseSequence,
       long baseRevision, long candidateCount, long totalValueBytes,
       Optional<ManifestChildReference> candidateDirectory, long eventCount, long totalEventBytes,
       Optional<EventReference> eventDirectory, Optional<ResultReference> resultReference,
-      ByteKey expectedDigest) {
+      Optional<AuxiliaryReference> auxiliaryReference, ByteKey expectedDigest) {
     this.transactionId = Objects.requireNonNull(transactionId, "transactionId");
     this.candidateDirectory = Objects.requireNonNull(candidateDirectory, "candidateDirectory");
     this.eventDirectory = Objects.requireNonNull(eventDirectory, "eventDirectory");
     this.resultReference = Objects.requireNonNull(resultReference, "resultReference");
+    this.auxiliaryReference = Objects.requireNonNull(auxiliaryReference, "auxiliaryReference");
     if (ownerEpoch <= 0 || baseSequence < 0 || baseRevision <= 0 || candidateCount < 0
         || candidateCount > MAX_CANDIDATES || totalValueBytes < 0
         || totalValueBytes > MAX_VALUE_BYTES || eventCount < 0 || eventCount > MAX_EVENTS
@@ -63,6 +65,11 @@ public final class ManifestRoot {
         throw new IllegalArgumentException("result belongs to a different commit attempt");
       }
     }
+    if (auxiliaryReference.isPresent()
+        && !auxiliaryReference.orElseThrow().identity().equals(
+            AuxiliaryDirectory.identityFor(transactionId))) {
+      throw new IllegalArgumentException("auxiliary root belongs to a different transaction");
+    }
     this.ownerEpoch = ownerEpoch;
     this.baseSequence = baseSequence;
     this.baseRevision = baseRevision;
@@ -72,7 +79,7 @@ public final class ManifestRoot {
     this.totalEventBytes = totalEventBytes;
     this.digest = calculateDigest(transactionId, ownerEpoch, baseSequence, baseRevision,
         candidateCount, totalValueBytes, candidateDirectory, eventCount, totalEventBytes,
-        eventDirectory, resultReference);
+        eventDirectory, resultReference, auxiliaryReference);
     if (expectedDigest != null && !this.digest.equals(expectedDigest)) {
       throw new IllegalArgumentException("manifest root digest mismatch");
     }
@@ -82,7 +89,8 @@ public final class ManifestRoot {
       long baseSequence, long baseRevision, long candidateCount, long totalValueBytes,
       Optional<ManifestChildReference> candidateDirectory) {
     return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
-        totalValueBytes, candidateDirectory, 0, 0, Optional.empty(), Optional.empty(), null);
+        totalValueBytes, candidateDirectory, 0, 0, Optional.empty(), Optional.empty(),
+        Optional.empty(), null);
   }
 
   public static ManifestRoot create(TransactionId transactionId, long ownerEpoch,
@@ -91,7 +99,7 @@ public final class ManifestRoot {
       Optional<EventReference> eventDirectory) {
     return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
         totalValueBytes, candidateDirectory, eventCount, totalEventBytes, eventDirectory,
-        Optional.empty(), null);
+        Optional.empty(), Optional.empty(), null);
   }
 
   public static ManifestRoot createWithResult(TransactionId transactionId, long ownerEpoch,
@@ -100,7 +108,34 @@ public final class ManifestRoot {
       Optional<EventReference> eventDirectory, ResultReference resultReference) {
     return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
         totalValueBytes, candidateDirectory, eventCount, totalEventBytes, eventDirectory,
-        Optional.of(Objects.requireNonNull(resultReference, "resultReference")), null);
+        Optional.of(Objects.requireNonNull(resultReference, "resultReference")), Optional.empty(), null);
+  }
+
+  public static ManifestRoot createWithAuxiliary(TransactionId transactionId, long ownerEpoch,
+      long baseSequence, long baseRevision, Optional<AuxiliaryReference> auxiliaryReference) {
+    return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, 0, 0,
+        Optional.empty(), 0, 0, Optional.empty(), Optional.empty(),
+        requireAuxiliary(auxiliaryReference), null);
+  }
+
+  public static ManifestRoot createWithAuxiliary(TransactionId transactionId, long ownerEpoch,
+      long baseSequence, long baseRevision, long candidateCount, long totalValueBytes,
+      Optional<ManifestChildReference> candidateDirectory, long eventCount, long totalEventBytes,
+      Optional<EventReference> eventDirectory, Optional<AuxiliaryReference> auxiliaryReference) {
+    return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
+        totalValueBytes, candidateDirectory, eventCount, totalEventBytes, eventDirectory,
+        Optional.empty(), requireAuxiliary(auxiliaryReference), null);
+  }
+
+  public static ManifestRoot createWithResultAndAuxiliary(TransactionId transactionId,
+      long ownerEpoch, long baseSequence, long baseRevision, long candidateCount,
+      long totalValueBytes, Optional<ManifestChildReference> candidateDirectory,
+      long eventCount, long totalEventBytes, Optional<EventReference> eventDirectory,
+      ResultReference resultReference, AuxiliaryReference auxiliaryReference) {
+    return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
+        totalValueBytes, candidateDirectory, eventCount, totalEventBytes, eventDirectory,
+        Optional.of(Objects.requireNonNull(resultReference, "resultReference")),
+        Optional.of(Objects.requireNonNull(auxiliaryReference, "auxiliaryReference")), null);
   }
 
   public static ManifestRoot restore(TransactionId transactionId, long ownerEpoch,
@@ -108,7 +143,7 @@ public final class ManifestRoot {
       Optional<ManifestChildReference> candidateDirectory, ByteKey digest) {
     return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
         totalValueBytes, candidateDirectory, 0, 0, Optional.empty(), Optional.empty(),
-        Objects.requireNonNull(digest, "digest"));
+        Optional.empty(), Objects.requireNonNull(digest, "digest"));
   }
 
   public static ManifestRoot restore(TransactionId transactionId, long ownerEpoch,
@@ -117,7 +152,7 @@ public final class ManifestRoot {
       Optional<EventReference> eventDirectory, ByteKey digest) {
     return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
         totalValueBytes, candidateDirectory, eventCount, totalEventBytes, eventDirectory,
-        Optional.empty(), Objects.requireNonNull(digest, "digest"));
+        Optional.empty(), Optional.empty(), Objects.requireNonNull(digest, "digest"));
   }
 
   public static ManifestRoot restoreWithResult(TransactionId transactionId, long ownerEpoch,
@@ -127,6 +162,18 @@ public final class ManifestRoot {
     return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
         totalValueBytes, candidateDirectory, eventCount, totalEventBytes, eventDirectory,
         Optional.of(Objects.requireNonNull(resultReference, "resultReference")),
+        Optional.empty(), Objects.requireNonNull(digest, "digest"));
+  }
+
+  public static ManifestRoot restoreWithAuxiliary(TransactionId transactionId, long ownerEpoch,
+      long baseSequence, long baseRevision, long candidateCount, long totalValueBytes,
+      Optional<ManifestChildReference> candidateDirectory, long eventCount, long totalEventBytes,
+      Optional<EventReference> eventDirectory, Optional<ResultReference> resultReference,
+      AuxiliaryReference auxiliaryReference, ByteKey digest) {
+    return new ManifestRoot(transactionId, ownerEpoch, baseSequence, baseRevision, candidateCount,
+        totalValueBytes, candidateDirectory, eventCount, totalEventBytes, eventDirectory,
+        Objects.requireNonNull(resultReference, "resultReference"),
+        Optional.of(Objects.requireNonNull(auxiliaryReference, "auxiliaryReference")),
         Objects.requireNonNull(digest, "digest"));
   }
 
@@ -141,6 +188,7 @@ public final class ManifestRoot {
   public long totalEventBytes() { return totalEventBytes; }
   public Optional<EventReference> eventDirectory() { return eventDirectory; }
   public Optional<ResultReference> resultReference() { return resultReference; }
+  public Optional<AuxiliaryReference> auxiliaryReference() { return auxiliaryReference; }
   public ByteKey digest() { return digest; }
   public boolean containsKeyChanges() { return candidateCount > 0; }
 
@@ -152,9 +200,9 @@ public final class ManifestRoot {
   private static ByteKey calculateDigest(TransactionId txn, long epoch, long sequence, long revision,
       long count, long valueBytes, Optional<ManifestChildReference> directory,
       long eventCount, long eventBytes, Optional<EventReference> eventDirectory,
-      Optional<ResultReference> resultReference) {
+      Optional<ResultReference> resultReference, Optional<AuxiliaryReference> auxiliaryReference) {
     return ManifestDigest.sha256(output -> {
-      output.writeInt(resultReference.isPresent() ? 3 : 2);
+      output.writeInt(auxiliaryReference.isPresent() ? 4 : resultReference.isPresent() ? 3 : 2);
       output.write(txn.bytes());
       output.writeLong(epoch);
       output.writeLong(sequence);
@@ -197,6 +245,21 @@ public final class ManifestRoot {
         output.writeInt(result.itemCount());
         output.writeLong(result.totalBytes());
       }
+      if (auxiliaryReference.isPresent()) {
+        AuxiliaryReference auxiliary = auxiliaryReference.orElseThrow();
+        ManifestDigest.writeBytes(output, auxiliary.identity().bytes());
+        output.write(auxiliary.digest().bytes());
+        output.writeLong(auxiliary.itemCount());
+        output.writeLong(auxiliary.totalBytes());
+        output.writeInt(auxiliary.pageCount());
+      }
     });
+  }
+
+  private static Optional<AuxiliaryReference> requireAuxiliary(
+      Optional<AuxiliaryReference> reference) {
+    Objects.requireNonNull(reference, "auxiliaryReference");
+    if (reference.isEmpty()) throw new IllegalArgumentException("auxiliary root is required");
+    return reference;
   }
 }

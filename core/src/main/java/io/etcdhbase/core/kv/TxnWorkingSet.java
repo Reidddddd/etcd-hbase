@@ -12,6 +12,7 @@ import io.etcdhbase.core.commit.ResultIdentity;
 import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.concurrent.ContinuationExecutor;
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.lease.LeaseBindingChange;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.core.storage.ScanDirection;
@@ -44,6 +45,7 @@ public final class TxnWorkingSet {
   private final PagedWorksetIndex index;
   private final PutPlanner planner = new PutPlanner();
   private final DeletePlanner deletePlanner = new DeletePlanner();
+  private final LeaseBindingChangeSet leaseBindingChanges;
   private boolean begun;
   private boolean updating;
   private boolean frozen;
@@ -53,6 +55,13 @@ public final class TxnWorkingSet {
   public TxnWorkingSet(InvocationBinding invocation, long maximumRetainedBytes,
       SystemRecordStore records, ManifestRepository manifests, RequestScope scope,
       BudgetManager.Account account, ToIntFunction<ByteKey> bucket) {
+    this(invocation, maximumRetainedBytes, records, manifests, scope, account, bucket, false);
+  }
+
+  /** Enables bounded Lease-delta tracking only when the table-group runtime has M4 enabled. */
+  TxnWorkingSet(InvocationBinding invocation, long maximumRetainedBytes,
+      SystemRecordStore records, ManifestRepository manifests, RequestScope scope,
+      BudgetManager.Account account, ToIntFunction<ByteKey> bucket, boolean trackLeaseBindings) {
     this.invocation = Objects.requireNonNull(invocation, "invocation");
     this.manifests = Objects.requireNonNull(manifests, "manifests");
     this.scope = Objects.requireNonNull(scope, "scope");
@@ -69,6 +78,7 @@ public final class TxnWorkingSet {
     int pageBytes = (int) Math.min(1024 * 1024, maximumRetainedBytes / PAGE_DEPTH_ALLOWANCE);
     this.index = new PagedWorksetIndex(ResultIdentity.from(invocation),
         Objects.requireNonNull(records, "records"), scope, account, pageBytes);
+    this.leaseBindingChanges = trackLeaseBindings ? new LeaseBindingChangeSet(maximumRetainedBytes) : null;
   }
 
   /** Must succeed before the evaluator can access or change this private workset. */
@@ -132,8 +142,11 @@ public final class TxnWorkingSet {
 
   private CompletableFuture<PutResult> preparePut(PutCommand command, Optional<StoredRecord> previous,
       int selected, boolean workingView) {
-    PutPlanner.Plan plan = workingView ? planner.planWorking(command, invocation, previous)
-        : planner.plan(command, invocation, previous);
+    PutPlanner.Plan plan = leaseBindingChanges == null
+        ? workingView ? planner.planWorking(command, invocation, previous)
+            : planner.plan(command, invocation, previous)
+        : workingView ? planner.planWorkingWithLease(command, invocation, previous)
+            : planner.planWithLease(command, invocation, previous);
     if (manifests.candidateBucket(plan.candidate()) != selected) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("data and manifest buckets differ"));
     }
@@ -142,10 +155,19 @@ public final class TxnWorkingSet {
         invocation.baseSequence(), invocation.baseRevision(), index.eventCount(), original.kind(),
         original.current(), original.previous());
     var reference = new PagedWorksetIndex.EventRef(selected, command.key(), event.ordinal(), event.digest());
+    if (leaseBindingChanges != null) {
+      try {
+        leaseBindingChanges.record(previous, plan.candidate().record());
+      } catch (BackendFailure failure) {
+        return CompletableFuture.failedFuture(failure);
+      }
+    }
     return manifests.createEvent(event, scope).thenCompose(created -> {
       requireCreated(created);
       return index.commitOperation(AsyncCursor.fromIterator(List.of(reference).iterator()));
-    }).thenApply(ignored -> plan.result());
+    }).thenApply(ignored -> {
+      return plan.result();
+    });
   }
 
   /** Streams a single ordered delete into one private operation checkpoint. */
@@ -222,7 +244,9 @@ public final class TxnWorkingSet {
         }
         StoredRecord observed = found.orElseThrow();
         validateObserved(observed);
-        var planned = deletePlanner.planWorking(invocation, Optional.of(observed), Math.addExact(firstOrdinal, count));
+        var planned = leaseBindingChanges == null
+            ? deletePlanner.planWorking(invocation, Optional.of(observed), Math.addExact(firstOrdinal, count))
+            : deletePlanner.planWorkingWithLease(invocation, Optional.of(observed), Math.addExact(firstOrdinal, count));
         if (planned.isEmpty()) {
           advance(result);
           return;
@@ -269,9 +293,14 @@ public final class TxnWorkingSet {
       }
       try {
         requireCreated(created);
+        if (leaseBindingChanges != null) {
+          leaseBindingChanges.record(Optional.of(observed), event.current());
+        }
         count = Math.addExact(count, 1);
         result.complete(Optional.of(new PagedWorksetIndex.EventRef(selected, observed.key(),
             event.ordinal(), event.digest())));
+      } catch (BackendFailure failureDuringTracking) {
+        result.completeExceptionally(failureDuringTracking);
       } catch (RuntimeException invalid) {
         result.completeExceptionally(invalid);
       } catch (Error fatal) {
@@ -284,6 +313,13 @@ public final class TxnWorkingSet {
   public boolean hasChanges() { return index.eventCount() > 0; }
   public long candidateCount() { return index.entryCount(); }
   public long eventCount() { return index.eventCount(); }
+
+  /** Returns immutable net binding changes after all private operations have completed. */
+  public synchronized List<LeaseBindingChange> leaseBindingChanges() {
+    requireReady();
+    if (!frozen || updating) throw new IllegalStateException("workset is not frozen");
+    return leaseBindingChanges == null ? List.of() : leaseBindingChanges.snapshot();
+  }
 
   /** Freezes the completed checkpoint before candidates and ordered events are streamed. */
   public synchronized void freeze() {

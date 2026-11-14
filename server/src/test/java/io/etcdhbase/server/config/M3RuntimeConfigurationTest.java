@@ -32,6 +32,21 @@ class M3RuntimeConfigurationTest {
   }
 
   @Test
+  void m4ExampleUsesExplicitLeaseTimingInputs() throws Exception {
+    Path example = Path.of("..", "config", "examples", "m4", "activation.json");
+    try (var input = Files.newInputStream(example)) {
+      var activation = new M3RuntimeConfigurationLoader().load(input);
+      assertTrue(activation.m4LeaseApiEnabled());
+      assertEquals(5, activation.leaseMinTtlSeconds());
+      assertEquals(1_000, activation.leaseClockUncertaintyMs());
+      assertEquals(1_024, activation.leaseCostLimits().maximumBindings());
+      assertEquals(4L << 20, activation.leaseCostLimits().maximumKeyBytes());
+      assertEquals(32L << 20, activation.leaseCostLimits().maximumRevokeCostBytes());
+      assertFalse(activation.readCacheEnabled());
+    }
+  }
+
+  @Test
   void acceptsAnExplicitUnsignedStableMemberIdentityAndPinConfiguration() {
     var configuration = load(valid());
     assertFalse(configuration.readCacheEnabled());
@@ -44,6 +59,7 @@ class M3RuntimeConfigurationTest {
   @Test
   void cacheDefaultsOffAndCannotBeEnabledWithoutIdentityLifecycleProof() {
     assertFalse(load(valid()).readCacheEnabled());
+    assertFalse(load(valid()).m4LeaseApiEnabled());
     assertFalse(load(valid().replace("\"pin_lease_ms\":60000", "\"pin_lease_ms\":60000,\"read_cache_enabled\":false"))
         .readCacheEnabled());
     var enabled = assertThrows(M3RuntimeConfiguration.CacheActivationUnavailable.class, () -> load(valid().replace(
@@ -53,6 +69,40 @@ class M3RuntimeConfigurationTest {
         "\"pin_lease_ms\":60000", "\"pin_lease_ms\":60000,\"read_cache_enabled\":null")));
     assertThrows(IllegalArgumentException.class, () -> load(valid().replace(
         "\"pin_lease_ms\":60000", "\"pin_lease_ms\":60000,\"read_cache_enabled\":\"true\"")));
+    assertThrows(IllegalArgumentException.class, () -> load(valid().replace(
+        "\"pin_lease_ms\":60000", "\"pin_lease_ms\":60000,\"m4_lease_api_enabled\":null")));
+    assertThrows(IllegalArgumentException.class, () -> load(valid().replace(
+        "\"pin_lease_ms\":60000", "\"pin_lease_ms\":60000,\"m4_lease_api_enabled\":\"false\"")));
+  }
+
+  @Test
+  void m4ActivationRequiresExplicitMinimumTtlAndClockBound() {
+    String enabled = valid().replace("\"pin_lease_ms\":60000",
+        "\"pin_lease_ms\":60000,\"m4_lease_api_enabled\":true");
+    assertThrows(IllegalArgumentException.class, () -> load(enabled));
+    assertThrows(IllegalArgumentException.class, () -> load(enabled.replace(
+        "\"m4_lease_api_enabled\":true", "\"m4_lease_api_enabled\":true,\"lease_min_ttl_seconds\":5")));
+    assertThrows(IllegalArgumentException.class, () -> load(valid().replace(
+        "\"pin_lease_ms\":60000", "\"pin_lease_ms\":60000,\"m4_lease_api_enabled\":true,"
+            + "\"lease_min_ttl_seconds\":5,\"lease_clock_uncertainty_ms\":0")));
+  }
+
+  @Test
+  void m4ActivationRequiresExplicitLeaseRevocationLimits() {
+    String enabled = valid().replace("\"pin_lease_ms\":60000",
+        "\"pin_lease_ms\":60000,\"m4_lease_api_enabled\":true,"
+            + "\"lease_min_ttl_seconds\":5,\"lease_clock_uncertainty_ms\":1000");
+    assertThrows(IllegalArgumentException.class, () -> load(enabled));
+    for (String field : new String[] {"lease_maximum_bindings", "lease_maximum_key_bytes",
+        "lease_maximum_revoke_cost_bytes"}) {
+      String withOneLimit = enabled.replace("\"lease_clock_uncertainty_ms\":1000",
+          "\"lease_clock_uncertainty_ms\":1000,\"" + field + "\":1");
+      assertThrows(IllegalArgumentException.class, () -> load(withOneLimit));
+    }
+    assertThrows(IllegalArgumentException.class, () -> load(enabled.replace(
+        "\"lease_clock_uncertainty_ms\":1000",
+        "\"lease_clock_uncertainty_ms\":1000,\"lease_maximum_bindings\":1025,"
+            + "\"lease_maximum_key_bytes\":4194304,\"lease_maximum_revoke_cost_bytes\":33554432")));
   }
 
   @Test

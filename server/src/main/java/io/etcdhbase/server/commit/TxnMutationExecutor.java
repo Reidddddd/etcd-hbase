@@ -53,6 +53,7 @@ public final class TxnMutationExecutor {
   private final TxnCommitPreparation preparation;
   private final CommitPublisher publisher;
   private final TxnExecutionLimits limits;
+  private final LeaseBindingMutationPlanner leaseBindings;
   private final Clock clock;
   private final RequestMetrics metrics;
 
@@ -62,7 +63,7 @@ public final class TxnMutationExecutor {
       HBaseConnectionFactory connections, StorageTableBinding primary, Executor backendWorker,
       ScanScheduler scans, TxnCommitPreparation preparation, CommitPublisher publisher, TxnExecutionLimits limits) {
     this(tableGroup, profileFingerprint, control, views, manifests, worksetRecords, worksetManifests, connections, primary,
-        backendWorker, scans, preparation, publisher, limits, Clock.systemUTC(), new RequestMetrics());
+        backendWorker, scans, preparation, publisher, limits, Clock.systemUTC(), new RequestMetrics(), null);
   }
 
   public TxnMutationExecutor(String tableGroup, ByteKey profileFingerprint,
@@ -72,7 +73,20 @@ public final class TxnMutationExecutor {
       ScanScheduler scans, TxnCommitPreparation preparation, CommitPublisher publisher,
       TxnExecutionLimits limits, RequestMetrics metrics) {
     this(tableGroup, profileFingerprint, control, views, manifests, worksetRecords, worksetManifests, connections, primary,
-        backendWorker, scans, preparation, publisher, limits, Clock.systemUTC(), metrics);
+        backendWorker, scans, preparation, publisher, limits, Clock.systemUTC(), metrics, null);
+  }
+
+  public TxnMutationExecutor(String tableGroup, ByteKey profileFingerprint,
+      CommitControlStore control, ReadViewService views, ManifestCatalog manifests,
+      SystemRecordStore worksetRecords, ManifestRepository worksetManifests,
+      HBaseConnectionFactory connections, StorageTableBinding primary, Executor backendWorker,
+      ScanScheduler scans, TxnCommitPreparation preparation, CommitPublisher publisher,
+      TxnExecutionLimits limits, LeaseBindingMutationPlanner leaseBindings,
+      RequestMetrics metrics) {
+    this(tableGroup, profileFingerprint, control, views, manifests, worksetRecords,
+        worksetManifests, connections, primary, backendWorker, scans, preparation,
+        publisher, limits, Clock.systemUTC(), metrics,
+        Objects.requireNonNull(leaseBindings, "leaseBindings"));
   }
 
   TxnMutationExecutor(String tableGroup, ByteKey profileFingerprint,
@@ -81,6 +95,18 @@ public final class TxnMutationExecutor {
       HBaseConnectionFactory connections, StorageTableBinding primary, Executor backendWorker,
       ScanScheduler scans, TxnCommitPreparation preparation, CommitPublisher publisher,
       TxnExecutionLimits limits, Clock clock, RequestMetrics metrics) {
+    this(tableGroup, profileFingerprint, control, views, manifests, worksetRecords,
+        worksetManifests, connections, primary, backendWorker, scans, preparation,
+        publisher, limits, clock, metrics, null);
+  }
+
+  private TxnMutationExecutor(String tableGroup, ByteKey profileFingerprint,
+      CommitControlStore control, ReadViewService views, ManifestCatalog manifests,
+      SystemRecordStore worksetRecords, ManifestRepository worksetManifests,
+      HBaseConnectionFactory connections, StorageTableBinding primary, Executor backendWorker,
+      ScanScheduler scans, TxnCommitPreparation preparation, CommitPublisher publisher,
+      TxnExecutionLimits limits, Clock clock, RequestMetrics metrics,
+      LeaseBindingMutationPlanner leaseBindings) {
     this.tableGroup = Objects.requireNonNull(tableGroup, "tableGroup");
     this.profileFingerprint = Objects.requireNonNull(profileFingerprint, "profileFingerprint");
     this.control = Objects.requireNonNull(control, "control");
@@ -95,6 +121,7 @@ public final class TxnMutationExecutor {
     this.preparation = Objects.requireNonNull(preparation, "preparation");
     this.publisher = Objects.requireNonNull(publisher, "publisher");
     this.limits = Objects.requireNonNull(limits, "limits");
+    this.leaseBindings = leaseBindings;
     this.clock = Objects.requireNonNull(clock, "clock");
     this.metrics = Objects.requireNonNull(metrics, "metrics");
     if (tableGroup.isBlank() || profileFingerprint.length() != 32
@@ -142,17 +169,26 @@ public final class TxnMutationExecutor {
         requireCurrentBase(observed.orElseThrow(() ->
             new IllegalStateException("authoritative commit control state is missing")).state(), binding, owner);
         return HBaseRecordStore.open(connections, identity, primary, scope, backendWorker);
-      }).thenCompose(physical -> TxnReadSession.open(views, List.of(), binding.authorizationScopeDigest(),
-          physical, manifests, primary.codec()::bucket, buckets, scope))
+      }).thenCompose(physical -> leaseBindings == null
+          ? TxnReadSession.open(views, List.of(), binding.authorizationScopeDigest(),
+              physical, manifests, primary.codec()::bucket, buckets, scope)
+          : TxnReadSession.openAuxiliary(views, List.of(), binding.authorizationScopeDigest(),
+              physical, manifests, primary.codec()::bucket, buckets, scope))
           .thenCompose(session -> {
             var compares = new CompareReadExecutor(session, scans, account, scope,
                 new CompareReadExecutor.Limits(buckets, limits.pageBytes(), limits.physicalRowsPerPage(),
                     limits.pointBytes()));
+            LeaseBindingMutationPlanner.MutationView leaseView = leaseBindings == null ? null
+                : leaseBindings.open(session.currentAuxiliaryView(), scope, account);
             var evaluator = new TxnEvaluator(session, compares, account, scope,
                 new TxnEvaluator.Limits(limits.pointBytes(), limits.resultBytes(), limits.workingBytes()),
-                primary.codec()::bucket, worksetRecords, worksetManifests);
-            return evaluator.evaluate(command, Optional.of(binding));
-          }).thenCompose(evaluated -> preparation.prepare(evaluated, binding, scope, account))
+                primary.codec()::bucket, worksetRecords, worksetManifests, leaseView);
+            return evaluator.evaluate(command, Optional.of(binding)).thenCompose(evaluated ->
+                leaseView == null
+                    ? preparation.prepare(evaluated, binding, scope, account)
+                    : leaseView.prepare(binding, evaluated.leaseBindingChanges()).thenCompose(auxiliary ->
+                        preparation.prepare(evaluated, binding, scope, account, auxiliary)));
+          })
           .exceptionallyCompose(failure -> {
             Throwable cause = CompletionFailures.unwrapCompletion(failure);
             return CompletableFuture.failedFuture(cause instanceof PhysicalRowLimitException

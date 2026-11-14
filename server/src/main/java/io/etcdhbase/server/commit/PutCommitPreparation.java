@@ -4,6 +4,7 @@ import io.etcdhbase.core.commit.InvocationBinding;
 import io.etcdhbase.core.commit.InvocationService;
 import io.etcdhbase.core.commit.ManifestPreparation;
 import io.etcdhbase.core.commit.ManifestRoot;
+import io.etcdhbase.core.commit.PreparedAuxiliaryRecord;
 import io.etcdhbase.core.commit.ResultCatalog;
 import io.etcdhbase.core.commit.ResultIdentity;
 import io.etcdhbase.core.commit.ResultPage;
@@ -61,9 +62,25 @@ public final class PutCommitPreparation {
   public CompletableFuture<Sealed> prepare(PutCommand command, InvocationBinding invocation,
       Optional<StoredRecord> base, RequestScope scope, BudgetManager.Account account,
       Supplier<CompletableFuture<Void>> finishPinnedRead) {
+    final PutPlanner.Plan plan;
+    try {
+      plan = planner.plan(command, invocation, base);
+    } catch (RuntimeException failure) {
+      return CompletableFuture.failedFuture(failure);
+    }
+    return prepare(plan, command, invocation, base, List.of(), scope, account, finishPinnedRead);
+  }
+
+  /** Seals a planned Put and any Lease binding updates under one manifest and one M2 decision. */
+  public CompletableFuture<Sealed> prepare(PutPlanner.Plan plan, PutCommand command,
+      InvocationBinding invocation, Optional<StoredRecord> base,
+      List<PreparedAuxiliaryRecord> auxiliaryRecords, RequestScope scope,
+      BudgetManager.Account account, Supplier<CompletableFuture<Void>> finishPinnedRead) {
+    Objects.requireNonNull(plan, "plan");
     Objects.requireNonNull(command, "command");
     Objects.requireNonNull(invocation, "invocation");
     Objects.requireNonNull(base, "base");
+    Objects.requireNonNull(auxiliaryRecords, "auxiliaryRecords");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
     Objects.requireNonNull(finishPinnedRead, "finishPinnedRead");
@@ -80,14 +97,17 @@ public final class PutCommitPreparation {
       retainUntilDrain(scope, requireMemory(account, BudgetManager.Memory.CANDIDATE,
           candidateBudget(command, base)));
       retainUntilDrain(scope, requireMemory(account, BudgetManager.Memory.IO, RESULT_IO_BYTES));
-      PutPlanner.Plan plan = planner.plan(command, invocation, base);
+      validatePlan(plan, invocation, command);
       byte[] encoded = ResultMessages.encode(plan.result());
       ResultIdentity identity = ResultIdentity.from(invocation);
       List<ResultPage> pages = ResultPreparation.split(identity, ByteBuffer.wrap(encoded));
-      operation = results.prepare(identity, pages, scope)
-          .thenCompose(reference -> manifests.prepareWithResult(invocation,
-              List.of(plan.candidate()).iterator(), List.of(plan.event()).iterator(),
-              reference, resultCatalog, finishPinnedRead, scope))
+      operation = results.prepare(identity, pages, scope).thenCompose(reference ->
+          auxiliaryRecords.isEmpty()
+              ? manifests.prepareWithResult(invocation, List.of(plan.candidate()).iterator(),
+                  List.of(plan.event()).iterator(), reference, resultCatalog, finishPinnedRead, scope)
+              : manifests.prepareWithResultAndAuxiliary(invocation,
+                  List.of(plan.candidate()).iterator(), List.of(plan.event()).iterator(),
+                  reference, resultCatalog, auxiliaryRecords.iterator(), finishPinnedRead, scope))
           .thenCompose(manifest -> invocations.transition(invocation,
               invocation.seal(manifest.systemIdentity()), scope)
               .thenApply(sealed -> new Sealed(sealed, manifest)));
@@ -101,6 +121,24 @@ public final class PutCommitPreparation {
     // This dependent is never exposed to callers, so cancelling a returned copy cannot suppress it.
     operation.whenComplete((ignored, failure) -> preparationDrained.complete(null));
     return operation.copy();
+  }
+
+  private static void validatePlan(PutPlanner.Plan plan, InvocationBinding invocation,
+      PutCommand command) {
+    var candidate = plan.candidate();
+    var event = plan.event();
+    if (!candidate.transactionId().equals(invocation.transactionId())
+        || candidate.ownerEpoch() != invocation.preparedOwnerEpoch()
+        || candidate.baseSequence() != invocation.baseSequence()
+        || candidate.baseRevision() != invocation.baseRevision()
+        || !event.transactionId().equals(invocation.transactionId())
+        || event.ownerEpoch() != invocation.preparedOwnerEpoch()
+        || event.baseSequence() != invocation.baseSequence()
+        || event.baseRevision() != invocation.baseRevision()
+        || !candidate.record().key().equals(command.key())
+        || !event.current().key().equals(command.key()) || event.ordinal() != 0) {
+      throw new IllegalArgumentException("planned Put differs from its invocation or request");
+    }
   }
 
   private static long candidateBudget(PutCommand command, Optional<StoredRecord> base) {

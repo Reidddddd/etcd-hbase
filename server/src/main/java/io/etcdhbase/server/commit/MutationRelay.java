@@ -8,6 +8,7 @@ import io.etcdhbase.core.commit.OwnerForwarding;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.kv.KvFailure;
+import io.etcdhbase.core.lease.LeaseFailure;
 import io.etcdhbase.core.request.RequestScope;
 import java.util.Objects;
 import java.util.Optional;
@@ -16,7 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Reads the authoritative owner and forwards at most once; a post-send failure remains unknown. */
 public final class MutationRelay {
-  public sealed interface Result permits KnownResult, KnownRejection, SemanticRejection, ResultUnknown {}
+  public sealed interface Result permits KnownResult, KnownRejection, SemanticRejection, LeaseRejection, ResultUnknown {}
   public record KnownResult(byte[] responseBytes) implements Result {
     public KnownResult { responseBytes = responseBytes.clone(); }
     @Override public byte[] responseBytes() { return responseBytes.clone(); }
@@ -26,6 +27,9 @@ public final class MutationRelay {
   }
   public record SemanticRejection(KvFailure.Reason reason) implements Result {
     public SemanticRejection { Objects.requireNonNull(reason, "reason"); }
+  }
+  public record LeaseRejection(LeaseFailure.Reason reason) implements Result {
+    public LeaseRejection { Objects.requireNonNull(reason, "reason"); }
   }
   public record ResultUnknown(BackendFailure.Category category) implements Result {
     public ResultUnknown {
@@ -129,6 +133,9 @@ public final class MutationRelay {
     }
     if (reply instanceof OwnerForwarding.SemanticRejected rejected) {
       return new SemanticRejection(rejected.reason());
+    }
+    if (reply instanceof OwnerForwarding.LeaseRejected rejected) {
+      return new LeaseRejection(rejected.reason());
     }
     return new ResultUnknown(((OwnerForwarding.Unknown) reply).category());
   }

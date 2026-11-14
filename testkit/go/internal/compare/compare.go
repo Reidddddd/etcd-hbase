@@ -39,6 +39,25 @@ func CompareM3RangeTraces(left, right io.Reader) error {
 	return compareTraces(left, right, m3RangePolicy)
 }
 
+// CompareM4LeaseTraces compares the J40 Lease surface with only the configured
+// minimum-TTL and whole-second remaining-TTL differences permitted.
+func CompareM4LeaseTraces(left, right io.Reader) error {
+	leftRecords, err := trace.ReadJSONL(left)
+	if err != nil {
+		return fmt.Errorf("read native M4 trace: %w", err)
+	}
+	rightRecords, err := trace.ReadJSONL(right)
+	if err != nil {
+		return fmt.Errorf("read target M4 trace: %w", err)
+	}
+	return CompareM4LeaseRecords(leftRecords, rightRecords)
+}
+
+// CompareM4LeaseRecords exposes the same strict M4 policy to native regressions.
+func CompareM4LeaseRecords(left, right []trace.Record) error {
+	return compare(left, right, m4LeasePolicy)
+}
+
 type tracePolicy int
 
 const (
@@ -47,6 +66,7 @@ const (
 	m3TxnPolicy
 	m3DeletePolicy
 	m3RangePolicy
+	m4LeasePolicy
 )
 
 func compareTraces(left, right io.Reader, policy tracePolicy) error {
@@ -94,10 +114,23 @@ func compare(left, right []trace.Record, policy tracePolicy) error {
 	if err != nil {
 		return err
 	}
-	if policy != standardPolicy && (leftScope == rightScope ||
+	if policy != standardPolicy && policy != m4LeasePolicy && (leftScope == rightScope ||
 		(leftScope != "native-etcd" && rightScope != "native-etcd") ||
 		(leftScope != "target-hbase" && rightScope != "target-hbase")) {
 		return errors.New("M3 comparison requires native and target traces")
+	}
+	if policy == m4LeasePolicy {
+		if (leftScope != "native-etcd" && leftScope != "target-hbase") ||
+			(leftScope != rightScope && leftScope != "native-etcd" && rightScope != "native-etcd") ||
+			(leftScope != rightScope && leftScope != "target-hbase" && rightScope != "target-hbase") {
+			return errors.New("M4 comparison requires native or target Lease traces")
+		}
+		if err := validateM4LeaseTrace(left); err != nil {
+			return fmt.Errorf("validate left M4 trace: %w", err)
+		}
+		if err := validateM4LeaseTrace(right); err != nil {
+			return fmt.Errorf("validate right M4 trace: %w", err)
+		}
 	}
 	leftNormalized, err := normalize(left)
 	if err != nil {
@@ -115,9 +148,18 @@ func compare(left, right []trace.Record, policy tracePolicy) error {
 		rightNormalized[index]["evidence_scope"] = leftNormalized[index]["evidence_scope"]
 		bothSucceeded := left[index].Error == nil && right[index].Error == nil &&
 			left[index].StreamTerminal == nil && right[index].StreamTerminal == nil
-		if policy != standardPolicy {
+		if policy == m4LeasePolicy && leftScope != rightScope && bothSucceeded {
+			if err := projectM4LeaseTerm(leftNormalized[index], rightNormalized[index], leftScope); err != nil {
+				return fmt.Errorf("trace record %d has invalid M4 response header: %w", index+1, err)
+			}
+		} else if policy != standardPolicy && policy != m4LeasePolicy {
 			if err := projectM3Term(leftNormalized[index], rightNormalized[index], leftScope, bothSucceeded, policy); err != nil {
 				return fmt.Errorf("trace record %d has invalid M3 header: %w", index+1, err)
+			}
+		}
+		if policy == m4LeasePolicy {
+			if err := projectM4LeaseResponseWindow(leftNormalized[index], rightNormalized[index], leftScope, rightScope); err != nil {
+				return fmt.Errorf("trace record %d violates the M4 Lease timing or ordering contract: %w", index+1, err)
 			}
 		}
 		if (policy == m3TxnPolicy || policy == m3DeletePolicy || policy == m3RangePolicy) && leftScope != rightScope && bothSucceeded {

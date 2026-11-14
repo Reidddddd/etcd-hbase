@@ -18,6 +18,7 @@ final class SnapshotPinRecordCodec {
   private static final int SHARD_MAGIC = 0x53505331;
   private static final int CONFIG_FORMAT_VERSION = 2;
   private static final int FORMAT_VERSION = 1;
+  private static final int AUXILIARY_SHARD_FORMAT_VERSION = 2;
   private static final int REGISTRY_ID_BYTES = 16;
   private static final int CHECKSUM_BYTES = 32;
   private static final int MAX_ROOT_ID_BYTES = 1024;
@@ -88,9 +89,12 @@ final class SnapshotPinRecordCodec {
   }
 
   static ByteKey encodeShard(SnapshotPinShard shard) {
+    boolean needsAuxiliaryFormat = shard.slots().stream().anyMatch(slot ->
+        slot.status() == SnapshotPinShard.Status.ACTIVE
+            && slot.requiredSequence() > 0 && slot.transactionId().isEmpty());
     return checksum(out -> {
       out.writeInt(SHARD_MAGIC);
-      out.writeInt(FORMAT_VERSION);
+      out.writeInt(needsAuxiliaryFormat ? AUXILIARY_SHARD_FORMAT_VERSION : FORMAT_VERSION);
       out.writeInt(shard.shard());
       out.writeLong(shard.generation());
       out.writeLong(shard.revisionFloor());
@@ -102,7 +106,10 @@ final class SnapshotPinRecordCodec {
 
   static SnapshotPinShard decodeShard(ByteKey encoded) {
     return decode(encoded, input -> {
-      if (input.readInt() != SHARD_MAGIC || input.readInt() != FORMAT_VERSION) {
+      int magic = input.readInt();
+      int version = input.readInt();
+      if (magic != SHARD_MAGIC || version != FORMAT_VERSION
+          && version != AUXILIARY_SHARD_FORMAT_VERSION) {
         throw new IllegalArgumentException("unsupported snapshot pin shard format");
       }
       int shard = input.readInt();
@@ -114,7 +121,14 @@ final class SnapshotPinRecordCodec {
         throw new IllegalArgumentException("snapshot pin shard has an invalid slot count");
       }
       var slots = new ArrayList<SnapshotPinShard.Slot>(count);
-      for (int index = 0; index < count; index++) slots.add(readSlot(input));
+      for (int index = 0; index < count; index++) {
+        var slot = readSlot(input);
+        if (version == FORMAT_VERSION && slot.status() == SnapshotPinShard.Status.ACTIVE
+            && slot.requiredSequence() > 0 && slot.transactionId().isEmpty()) {
+          throw new IllegalArgumentException("legacy pin shard contains an unbound sequence");
+        }
+        slots.add(slot);
+      }
       return new SnapshotPinShard(shard, generation, revisionFloor, sequenceFloor, slots);
     });
   }

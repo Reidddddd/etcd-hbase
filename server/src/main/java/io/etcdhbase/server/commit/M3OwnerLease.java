@@ -13,6 +13,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,8 +24,8 @@ final class M3OwnerLease implements AutoCloseable {
       Thread.ofVirtual().name("m3-owner-cleanup").start(task);
 
   private final Object lock = new Object();
-  private final CommitOwnerService owners;
-  private final CommitOwnerService.OwnerToken token;
+  private CommitOwnerService owners;
+  private CommitOwnerService.OwnerToken token;
   private final long leaseMillis;
   private final long heartbeatTimeoutMillis;
   private final Clock clock;
@@ -34,7 +35,10 @@ final class M3OwnerLease implements AutoCloseable {
   private boolean ready = true;
   private boolean stopping;
   private boolean stopCallbackFinished;
+  private boolean fenceTransition;
   private RequestScope inFlight;
+  private RequestScope transitionScope;
+  private CompletableFuture<Void> heartbeatCompletion = CompletableFuture.completedFuture(null);
   private Throwable stopFailure;
   private long verifiedDeadlineMillis;
 
@@ -107,8 +111,120 @@ final class M3OwnerLease implements AutoCloseable {
     });
   }
 
-  CommitOwnerService.OwnerToken token() { return token; }
-  boolean isReady() { synchronized (lock) { return ready && clock.millis() < verifiedDeadlineMillis; } }
+  CommitOwnerService.OwnerToken token() {
+    synchronized (lock) { return token; }
+  }
+
+  boolean isReady() {
+    synchronized (lock) {
+      return ready && !fenceTransition && clock.millis() < verifiedDeadlineMillis;
+    }
+  }
+
+  /**
+   * Changes the control store and/or fencing token while owner renewal remains verified.
+   * The transition is reserved against the periodic heartbeat, and both sides of the
+   * transition verify the same owner through the control row before the new token is exposed.
+   */
+  CompletableFuture<CommitOwnerService.OwnerToken> transitionFence(
+      CommitOwnerService nextOwners,
+      Function<CommitOwnerService.OwnerToken, CompletableFuture<CommitOwnerService.OwnerToken>> transition,
+      RequestScope scope) {
+    Objects.requireNonNull(nextOwners, "nextOwners");
+    Objects.requireNonNull(transition, "transition");
+    Objects.requireNonNull(scope, "scope");
+
+    CommitOwnerService previousOwners;
+    CommitOwnerService.OwnerToken previousToken;
+    CompletableFuture<Void> previousHeartbeat;
+    synchronized (lock) {
+      if (stopping || !ready || fenceTransition || clock.millis() >= verifiedDeadlineMillis
+          || scope.isClosed() || scope.isDeadlineExceeded()) {
+        return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+      }
+      fenceTransition = true;
+      transitionScope = scope;
+      previousOwners = owners;
+      previousToken = token;
+      previousHeartbeat = heartbeatCompletion;
+    }
+
+    CompletableFuture<TransitionResult> prepared = previousHeartbeat.thenCompose(ignored -> {
+      if (!scopeIsUsable(scope)) {
+        return CompletableFuture.failedFuture(scopeFailure(scope));
+      }
+      synchronized (lock) {
+        if (stopping || !fenceTransition) {
+          return CompletableFuture.failedFuture(
+              new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+        }
+      }
+      long refreshedDeadline = Math.addExact(clock.millis(), leaseMillis);
+      return previousOwners.heartbeat(previousToken, refreshedDeadline, scope)
+          .thenCompose(renewed -> {
+            if (!Boolean.TRUE.equals(renewed) || clock.millis() >= refreshedDeadline
+                || !scopeIsUsable(scope)) {
+              return CompletableFuture.failedFuture(scopeFailure(scope));
+            }
+            synchronized (lock) {
+              if (stopping || !fenceTransition) {
+                return CompletableFuture.failedFuture(
+                    new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+              }
+              verifiedDeadlineMillis = Math.max(verifiedDeadlineMillis, refreshedDeadline);
+            }
+            return transition.apply(previousToken).thenApply(nextToken -> {
+              if (nextToken == null || !nextToken.instance().equals(previousToken.instance())
+                  || nextToken.epoch() < previousToken.epoch()
+                  || clock.millis() >= refreshedDeadline || !scopeIsUsable(scope)) {
+                throw new CompletionException(scopeFailure(scope));
+              }
+              return new TransitionResult(nextToken, refreshedDeadline);
+            });
+          });
+    });
+
+    CompletableFuture<TransitionResult> verified = prepared.thenCompose(preparedToken -> {
+      long nextDeadline = Math.addExact(clock.millis(), leaseMillis);
+      if (clock.millis() >= preparedToken.deadlineMillis() || !scopeIsUsable(scope)) {
+        return CompletableFuture.failedFuture(scopeFailure(scope));
+      }
+      return nextOwners.heartbeat(preparedToken.token(), nextDeadline, scope)
+          .thenApply(renewed -> {
+            if (!Boolean.TRUE.equals(renewed) || clock.millis() >= nextDeadline
+                || !scopeIsUsable(scope)) {
+              throw new CompletionException(scopeFailure(scope));
+            }
+            return new TransitionResult(preparedToken.token(), nextDeadline);
+          });
+    });
+
+    return verified.handle((result, failure) -> {
+      DrainStatus status;
+      synchronized (lock) {
+        transitionScope = null;
+        fenceTransition = false;
+        if (failure == null && !stopping) {
+          owners = nextOwners;
+          token = result.token();
+          verifiedDeadlineMillis = result.deadlineMillis();
+        }
+        status = drainStatus();
+      }
+      if (failure != null) {
+        stop(LossReason.FENCE_TRANSITION_FAILED);
+        completeDrain(status);
+        throw new CompletionException(failure);
+      }
+      if (stopping) {
+        completeDrain(status);
+        throw new CompletionException(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+      }
+      completeDrain(status);
+      return result.token();
+    }).copy();
+  }
+
   CompletableFuture<Void> drained() { return drained.copy(); }
 
   boolean awaitTermination(Duration timeout) throws InterruptedException {
@@ -125,12 +241,25 @@ final class M3OwnerLease implements AutoCloseable {
     RequestScope scope;
     long previousDeadline;
     boolean expired;
+    CommitOwnerService activeOwners;
+    CommitOwnerService.OwnerToken activeToken;
+    CompletableFuture<Void> completion;
     synchronized (lock) {
-      if (stopping || inFlight != null) return;
+      if (stopping || fenceTransition || inFlight != null) return;
       previousDeadline = verifiedDeadlineMillis;
       expired = clock.millis() >= previousDeadline;
       scope = expired ? null : RequestScope.withTimeout(Duration.ofMillis(heartbeatTimeoutMillis));
-      if (!expired) inFlight = scope;
+      if (!expired) {
+        inFlight = scope;
+        completion = new CompletableFuture<>();
+        heartbeatCompletion = completion;
+        activeOwners = owners;
+        activeToken = token;
+      } else {
+        completion = null;
+        activeOwners = null;
+        activeToken = null;
+      }
     }
     if (expired) { stop(LossReason.LEASE_EXPIRED_BEFORE_RENEWAL); return; }
     ScheduledFuture<?> timeout;
@@ -140,7 +269,7 @@ final class M3OwnerLease implements AutoCloseable {
         scope.cancelAsync(CLEANUP);
       }, heartbeatTimeoutMillis, TimeUnit.MILLISECONDS);
       long deadline = Math.addExact(clock.millis(), leaseMillis);
-      owners.heartbeat(token, deadline, scope).whenComplete((renewed, failure) -> {
+      activeOwners.heartbeat(activeToken, deadline, scope).whenComplete((renewed, failure) -> {
         timeout.cancel(false);
         long now = clock.millis();
         if (failure != null || !Boolean.TRUE.equals(renewed)
@@ -151,19 +280,19 @@ final class M3OwnerLease implements AutoCloseable {
             if (!stopping) verifiedDeadlineMillis = Math.max(verifiedDeadlineMillis, deadline);
           }
         }
-        finishHeartbeat(scope);
+        finishHeartbeat(scope, completion);
       });
     } catch (RuntimeException failure) {
       stop(LossReason.HEARTBEAT_SCHEDULING_FAILED);
-      finishHeartbeat(scope);
+      finishHeartbeat(scope, completion);
     } catch (Error fatal) {
       stop(LossReason.HEARTBEAT_SCHEDULING_FAILED);
-      finishHeartbeat(scope);
+      finishHeartbeat(scope, completion);
       throw fatal;
     }
   }
 
-  private void finishHeartbeat(RequestScope scope) {
+  private void finishHeartbeat(RequestScope scope, CompletableFuture<Void> completion) {
     try {
       scope.closeAsync(CLEANUP);
     } catch (RuntimeException | Error failure) {
@@ -179,8 +308,12 @@ final class M3OwnerLease implements AutoCloseable {
             DrainStatus status;
             synchronized (lock) {
               if (inFlight == scope) inFlight = null;
+              if (heartbeatCompletion == completion) {
+                heartbeatCompletion = CompletableFuture.completedFuture(null);
+              }
               status = drainStatus();
             }
+            completion.complete(null);
             completeDrain(status);
           });
     }
@@ -196,11 +329,13 @@ final class M3OwnerLease implements AutoCloseable {
 
   private void stop(boolean lost, LossReason reason) {
     RequestScope cancel;
+    RequestScope cancelTransition;
     synchronized (lock) {
       if (stopping) return;
       stopping = true;
       ready = false;
       cancel = inFlight;
+      cancelTransition = transitionScope;
     }
     if (lost) LOGGER.warn("M3 table-group owner lease lost; reason={}", reason);
     timer.shutdown();
@@ -214,6 +349,13 @@ final class M3OwnerLease implements AutoCloseable {
       } catch (RuntimeException | Error failure) {
         recordFailure(failure);
       } finally {
+        try {
+          if (cancelTransition != null && cancelTransition != cancel) {
+            cancelTransition.cancelAsync(CLEANUP);
+          }
+        } catch (RuntimeException | Error failure) {
+          recordFailure(failure);
+        }
         DrainStatus status;
         synchronized (lock) {
           stopCallbackFinished = true;
@@ -233,8 +375,21 @@ final class M3OwnerLease implements AutoCloseable {
 
   /** Called under lock; no owned heartbeat may still retain a physical producer. */
   private DrainStatus drainStatus() {
-    return stopping && stopCallbackFinished && inFlight == null ? new DrainStatus(stopFailure) : null;
+    return stopping && stopCallbackFinished && inFlight == null && !fenceTransition
+        && transitionScope == null ? new DrainStatus(stopFailure) : null;
   }
+
+  private boolean scopeIsUsable(RequestScope scope) {
+    return !scope.isClosed() && !scope.isDeadlineExceeded();
+  }
+
+  private static BackendFailure scopeFailure(RequestScope scope) {
+    return new BackendFailure(scope.isDeadlineExceeded()
+        ? BackendFailure.Category.TIMEOUT : scope.isClosed()
+            ? BackendFailure.Category.CANCELLED : BackendFailure.Category.UNAVAILABLE);
+  }
+
+  private record TransitionResult(CommitOwnerService.OwnerToken token, long deadlineMillis) {}
 
   private void completeDrain(DrainStatus status) {
     if (status == null) return;
@@ -261,7 +416,8 @@ final class M3OwnerLease implements AutoCloseable {
     HEARTBEAT_REJECTED,
     LEASE_WINDOW_EXPIRED,
     HEARTBEAT_SCHEDULING_FAILED,
-    HEARTBEAT_CLEANUP_FAILED
+    HEARTBEAT_CLEANUP_FAILED,
+    FENCE_TRANSITION_FAILED
   }
 
   private static long millis(Duration value) {
