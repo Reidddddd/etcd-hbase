@@ -361,7 +361,7 @@ auth-control、外部密钥/KMS、HBase、证书或时钟健康失败分别命�
 | J51；J50 | 请求与后台隔离；轮换/撤销、授权 fence 与发布竞争；Watch/KeepAlive 失效、缓存联动、逐方法 C31 | 两个真实运行时与独立进程，ACL 收回、证书/凭据过期、挂起旧副本、迟到连接；用户失效后已选事务仍由获授权后台收尾 |
 | J52；J26/J27/J47 | C−1/C/C+1、重复/未来 Compact、physical 等待/超时、旧读完成或失效、Watch 取消、后台重启 | HISTORY/NATIVE MiniCluster；pin 注册/推进/撤销竞争、部分删除/ACK 丢失、旧 materializer、新提交与基线保留；不支持请求不可假成功 |
 | J53；J43/J52 | 孤儿根、未知决定、陈旧 renewalGeneration/expiry 窗口、session 清理、checkpoint 接管及长期 churn | 持续混合负载计逐类增长、前台/恢复配额；旧 worker 晚到和 guard 重插负例；物理代次重建失败/恢复/切换 |
-| J54；J03/J21 | MemberList→客户端 Sync→真实端点请求；Status 字段来源/投影；Alarm 过滤和全部明确拒绝 RPC | 两实例、目录发布竞争、过期/恶意地址、无 owner、指标不可得、状态目录不可达；Go client/etcdctl 消费者验证 |
+| J54；J03/J21 | MemberList→客户端 Sync→真实端点请求；Status 字段来源/投影；Alarm 过滤和全部明确拒绝 RPC | 两实例、目录发布竞争、过期/恶意地址、无 owner、指标不可得、状态目录不可达；用 Go client `Sync` 验证成员地址收敛与失败，用 `etcdctl member list` 和 `alarm list` 验证成员列表及告警过滤结果 |
 | J55；J05/J27/J50 | 两个 bootstrap 相同/不同计划、每一步故障与未知创建、重复启动、schema/盐不符 | 新表真实 descriptor、权限不足、部分表已建、ACTIVE 后重跑状态不变、全部进程重启及格式升级 |
 | J56；J06/J55.2/J50/J51.1 | 认证可达与数据未就绪、无 owner 只读、排空所有资源、已选事务接管 | 实际 Java 21 包/镜像；临时 K8s 单/全 Pod 删除、滚动/缩容、TLS/广告地址和连接分布，进程与集群测试分别记录 |
 | J57；J52/J55 | 切点 S/R、部分 snapshot/导入失败、摘要和引用闭包、Lease 过期策略、schema 回退 | 两布局 snapshot/导入及独立集群/表组读回；源旧副本迟到写、无 DDL 权限、禁止旧表名复用；RPO/RTO 按实测报告 |
@@ -394,12 +394,14 @@ B03/B06 的具体身份系统、凭据安全交接和网络策略，B04/B05 的�
 
 ## 16. 固定来源与代码核对入口
 
+上游 etcd v3.5.23 的行为来源固定在 commit `1cf4bc40111fd95d1e14a90a09a146357b15eb13`，与[协议来源锁](../../protocol/upstream-lock.json)中的 tag/revision 对应；下列 etcd 源码链接均固定到该 commit。
+
 - 需求：[主计划 §3.5、§4、§5.4、M5、§11.4](../../DEVELOPMENT_PLAN.md)，[API 矩阵](../api-matrix.md)，[Milvus 调用基线](../milvus-etcd-usage.md)。
 - 身份：[公开 SPI](../spi/m0-spi-contract.md)、[J04 实际认证与权限](../hbase/j04-backend-access.md)、`BackendIdentityProvider`、`HBaseBackendIdentityProvider`、`M3RuntimeGroups`、`ServiceAuthorizationContextReference`。
 - 回收：M2 §7/§9、M4 §7/§9；`CommitState`、`SnapshotPinManager`、`EventHistoryPinManager`、`EventHistoryRetention`、`HBaseMaterializationStore` 与 `HBaseSystemRecordStore`。
 - 初始化与发行：`M3TableGroupInitializer`、`SystemTableBinding`、`M3RuntimeConfiguration`、[J09 公开构建](../build/j09-public-delivery.md)、[发行决定](../../build/release-decisions.json)。
 - 固定 wire：[仓库 vendored rpc.proto](../../protocol/src/main/proto/etcd/api/etcdserverpb/rpc.proto)、[来源锁](../../protocol/upstream-lock.json)。
-- 原生 Compact/Range 边界：[v3.5.23 kvstore.go](https://github.com/etcd-io/etcd/blob/v3.5.23/server/mvcc/kvstore.go)、[kvstore_txn.go](https://github.com/etcd-io/etcd/blob/v3.5.23/server/mvcc/kvstore_txn.go)、[apply.go](https://github.com/etcd-io/etcd/blob/v3.5.23/server/etcdserver/apply.go)；Auth 错误和客户端刷新：[rpctypes](https://github.com/etcd-io/etcd/blob/v3.5.23/api/v3rpc/rpctypes/error.go)、[Go client](https://github.com/etcd-io/etcd/blob/v3.5.23/client/v3/client.go)。
+- 原生 Compact/Range 边界：[v3.5.23 kvstore.go](https://github.com/etcd-io/etcd/blob/1cf4bc40111fd95d1e14a90a09a146357b15eb13/server/mvcc/kvstore.go)、[kvstore_txn.go](https://github.com/etcd-io/etcd/blob/1cf4bc40111fd95d1e14a90a09a146357b15eb13/server/mvcc/kvstore_txn.go)、[apply.go](https://github.com/etcd-io/etcd/blob/1cf4bc40111fd95d1e14a90a09a146357b15eb13/server/etcdserver/apply.go)；Auth 错误和客户端刷新：[rpctypes](https://github.com/etcd-io/etcd/blob/1cf4bc40111fd95d1e14a90a09a146357b15eb13/api/v3rpc/rpctypes/error.go)、[Go client](https://github.com/etcd-io/etcd/blob/1cf4bc40111fd95d1e14a90a09a146357b15eb13/client/v3/client.go)。
 - HBase：[版本与删除语义](https://hbase.apache.org/book.html#versions)、[Snapshots](https://hbase.apache.org/book.html#ops.snapshots)、[安全](https://hbase.apache.org/book.html#security)。实际依赖以仓库 lock 为准，不从文档推出所有 client/server 组合兼容。
 - 密码封套：[JDK 21 Cipher](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/javax/crypto/Cipher.html)、[GCMParameterSpec](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/javax/crypto/spec/GCMParameterSpec.html)；同一密钥下 nonce 不得重复。
 - 部署：[Kubernetes Service](https://kubernetes.io/docs/concepts/services-networking/service/)、[探针](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/)、[Pod 终止](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination)、[gRPC 负载均衡](https://grpc.io/blog/grpc-load-balancing/)。
