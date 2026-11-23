@@ -1,0 +1,172 @@
+{
+  "schema": "etcd-hbase-m5-task/v1",
+  "task": "J50",
+  "status": "executable",
+  "scope": "public",
+  "execution_profile": "m5-j50-public",
+  "maven_reactor": "server",
+  "maven_profiles": [
+    {"module": "hbase", "id": "m5-j50-public"},
+    {"module": "server", "id": "m5-j50-public"}
+  ],
+  "backend_adapters": [
+    "kerberos-password",
+    "delegation-token",
+    "password-sasl"
+  ],
+  "layouts": ["auth-control", "secure-hbase-data"],
+  "scenarios": [
+    "opaque-token-and-encrypted-credential-envelope",
+    "actual-user-authentication-and-permission-check",
+    "two-user-identity-isolation",
+    "independent-process-session-resolution",
+    "full-process-stop-and-token-reactivation",
+    "persisted-delegation-token-session-across-process-restart",
+    "persisted-password-sasl-session-across-process-restart",
+    "scope-mismatch-rejected",
+    "ordinary-user-denied-auth-control-read",
+    "authenticate-rpc-to-non-owner-kv-txn-owner-revalidation",
+    "missing-or-zero-test-report-fails"
+  ],
+  "tests": [
+    {
+      "module": "grpc",
+      "kind": "surefire",
+      "class": "io.etcdhbase.grpc.protocol.ErrorProjectionTest",
+      "methods": ["keepsAuthenticationFailureDistinctFromPermissionDenied", "mapsAuthSessionFailuresToSafeClientErrors"]
+    },
+    {
+      "module": "grpc",
+      "kind": "surefire",
+      "class": "io.etcdhbase.grpc.service.SkeletonServiceTest",
+      "methods": ["authenticateRemainsUnimplementedUntilItsSessionHandlerIsAssembled"]
+    },
+    {
+      "module": "grpc",
+      "kind": "surefire",
+      "class": "io.etcdhbase.grpc.RequestScopeInterceptorTest",
+      "methods": ["carriesEtcdTokenMetadataOnlyInsideTheRequestContext", "rejectsDuplicateEtcdTokenMetadataWithoutEnteringTheService"]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.identity.HBaseBackendIdentityProviderTest",
+      "methods": [
+        "verifiesBackendBeforePublicationAndReusesOnlyTheIssuedIdentity",
+        "discardingUnpublishedIdentityReleasesCapacityAndRejectsFurtherBorrowing",
+        "releasingOnePublishedIdentityDoesNotCloseProviderOrAnotherIdentity",
+        "rejectsWrongScopeWithoutOpeningCredentialsOrConnections",
+        "authenticationFailureDoesNotFallBackToAnotherMechanism",
+        "permissionDenialClosesConnectionBeforeCredentials",
+        "timeoutKeepsCapacityUntilLateConnectionAndCredentialsHaveBeenClosed",
+        "cancellationAndShutdownCleanLateConnectionsWithoutCancellingTheResourceFuture",
+        "closeFailureRetainsCredentialsAndIsRetriedAtShutdown",
+        "trustedActivationUsesTheSameBackendVerificationWithoutPretendingToVerifyClientCredentials",
+        "cancellationDuringBlockingLoginRetainsCapacityAndClosesTheLateUser",
+        "shutdownDuringPermissionRpcWaitsForCompletionBeforeDestroyingUserCredentials",
+        "malformedCustomUserContextCannotLeaveAuthenticationUncompleted",
+        "lateCloseFailureRetainsCapacityAndCredentialsUntilShutdownRetries",
+        "oneFailedCloseDoesNotPreventOtherIdentitiesFromBeingReleased",
+        "failedOpenersAreClassifiedWithoutDiagnosticsAndRetireBeforeCapacityIsReused",
+        "sameNamedIdentitiesAndOtherProviderInstancesCannotBorrowEachOthersConnections",
+        "blockingResultCallbackDoesNotHoldTheProviderOrIdentityLock",
+        "blockingTimeoutCallbackDoesNotDelayAnotherAuthenticationDeadline",
+        "blockingFailureCallbackDoesNotDelayCleanupOrReleaseItsNotificationCapacity",
+        "blockingSuccessCallbackDoesNotDelayAnotherAuthenticationOrShutdown",
+        "blockingBackendCleanupDoesNotDelayFailureNotificationOrOtherDeadlines",
+        "notificationCapacityRejectsCredentialsAndTrustedActivationBeforeBackendWork",
+        "simpleDevelopmentRejectsPasswordsAndInvalidPrincipalsWithoutOpeningConnections",
+        "secureAdaptersRejectSimpleConfigurationAndExplicitFallback"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.codec.AuthControlKeyCodecTest",
+      "methods": ["sessionAndAuthorityKeysRoundTripWithTheirFullDigestIdentity", "slotKeyUsesBigEndianIndexAndRejectsInvalidIndices", "rejectsWrongDigestLengthTamperedSaltAndMalformedLength"]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.codec.AuthMessagesTest",
+      "methods": ["eachControlRecordRoundTripsWithoutSerializingBearerOrBackendHandle", "rejectsUnknownFieldsMissingFieldsUnknownEnumsAndMalformedLengths"]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.auth.AuthSessionServiceTest",
+      "methods": [
+        "authenticatesPersistsOnlyDigestAndEnvelopeAndResolvesOnAnotherReplica",
+        "globallyBoundedSlotsRejectASecondReplicaAndBackendFailureReleasesReservation",
+        "unknownSessionWriteOutcomeKeepsTheGlobalSlotReserved",
+        "revokedAuthorityRejectsAnOtherwiseActiveToken",
+        "activationIsDiscardedWhenAuthorityChangesBeforeIdentityIsPublished",
+        "activationFailureDoesNotReleaseOrCloseAnotherProviderOwnedContext",
+        "cancelledRequestReleasesIdentityThatActivatesLate"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.auth.ProviderSessionIdentityManagerTest",
+      "methods": [
+        "concurrentBorrowsShareColdActivationAndRetireOnlyAfterTheLastRelease",
+        "cancellingOneBorrowDoesNotCancelTheSharedColdActivation",
+        "lateActivationWithoutBorrowersIsClosedBeforeCapacityIsReused",
+        "deterministicActivationFailureIsBrieflyNegativeCached",
+        "concurrentColdActivationsRespectTheContainerLimit",
+        "retiringOneRequestClosesOnlyItsProviderContainer",
+        "failedProviderCloseRemainsOwnedUntilManagerRetriesCleanup",
+        "rejectsAnIdentityFromAnotherProviderAndClosesItsContainer"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.auth.AuthenticateRpcHandlerTest",
+      "methods": ["authenticatesAndReturnsOnlyTheIssuedOpaqueToken", "mapsCredentialRejectionWithoutReturningATokenOrSecret", "cancellationBeforeAuthenticateTokenSendRetiresTheUndeliveredSession"]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.SessionAuthorizationResolverTest",
+      "methods": [
+        "ownerResolvesMatchingDurableReferenceAndReleasesAfterPhysicalDrain",
+        "ownerRejectsReferenceWithReusedSlotGenerationAndReleasesResolvedIdentity",
+        "ownerRejectsIdentityFromAnotherTableGroupAndReleasesIt",
+        "ownerPreservesInvalidTokenSemanticsWhenSessionExpiresBeforeForwardedMutation",
+        "unauthenticatedPeerCannotResolveSession"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.OwnerForwardingProtocolMapperTest",
+      "methods": ["roundTripsInvalidTokenFailureWithoutDowngradingItsCategory"]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.TxnGatewayAuthenticationTest",
+      "methods": ["rangeUsesResolvedSessionIdentityAndReleasesOnlyAfterPhysicalReadDrains"]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.M5GatewayAuthenticationRpcTest",
+      "methods": ["authenticateOnAThenBRangeAndOwnerForwardingUseRevalidatedIdentityUntilPhysicalDrain"]
+    },
+    {
+      "module": "hbase",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.hbase.storage.HBaseAuthControlIT",
+      "methods": ["provisionsExactDescriptorAndPersistsSessionAuthorityAndSlotCas"]
+    },
+    {
+      "module": "server",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.server.M5AuthProcessIT",
+      "methods": ["sessionsActivateAllRegisteredHBaseMechanismsAcrossProcessesAndFullRestart"]
+    }
+  ]
+}

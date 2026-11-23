@@ -134,6 +134,61 @@ class RequestScopeInterceptorTest {
     }
   }
 
+  @Test
+  void carriesEtcdTokenMetadataOnlyInsideTheRequestContext() throws Exception {
+    var scheduler = new ScheduledThreadPoolExecutor(1);
+    var interceptor = new RequestScopeInterceptor(scheduler, 1,
+        Duration.ofSeconds(1), 1024, RequestCompletionRecorder.NOOP);
+    try {
+      var headers = new Metadata();
+      headers.put(EtcdAuthTokenMetadata.key(), "opaque-test-token");
+      var observed = new AtomicReference<java.util.Optional<String>>();
+      ServerCall.Listener<byte[]> listener = interceptor.interceptCall(newCall(
+          MethodDescriptor.MethodType.UNARY), headers, (call, ignoredHeaders) -> {
+            observed.set(RequestScopeInterceptor.currentAuthToken());
+            return new ServerCall.Listener<>() {};
+          });
+
+      assertEquals(java.util.Optional.of("opaque-test-token"), observed.get());
+      listener.onCancel();
+    } finally {
+      interceptor.close();
+      scheduler.shutdownNow();
+      assertTrue(scheduler.awaitTermination(5, TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
+  void rejectsDuplicateEtcdTokenMetadataWithoutEnteringTheService() throws Exception {
+    var scheduler = new ScheduledThreadPoolExecutor(1);
+    var interceptor = new RequestScopeInterceptor(scheduler, 1,
+        Duration.ofSeconds(1), 1024, RequestCompletionRecorder.NOOP);
+    try {
+      var headers = new Metadata();
+      headers.put(EtcdAuthTokenMetadata.key(), "first-token");
+      headers.put(EtcdAuthTokenMetadata.key(), "second-token");
+      var closed = new AtomicReference<Status>();
+      var terminated = new CountDownLatch(1);
+      var call = newCall(MethodDescriptor.MethodType.UNARY);
+      observeClose(call, closed, terminated);
+      var entered = new AtomicInteger();
+      interceptor.interceptCall(call, headers,
+          (unusedCall, ignoredHeaders) -> {
+            entered.incrementAndGet();
+            return new ServerCall.Listener<>() {};
+          });
+
+      assertTrue(terminated.await(1, TimeUnit.SECONDS));
+      assertEquals(Status.Code.UNAUTHENTICATED, closed.get().getCode());
+      assertEquals("etcdserver: invalid auth token", closed.get().getDescription());
+      assertEquals(0, entered.get());
+    } finally {
+      interceptor.close();
+      scheduler.shutdownNow();
+      assertTrue(scheduler.awaitTermination(5, TimeUnit.SECONDS));
+    }
+  }
+
   private static ServerCall<byte[], byte[]> newCall(MethodDescriptor.MethodType type) {
     var call = mock(ServerCall.class);
     when(call.getMethodDescriptor()).thenReturn(methodDescriptor(type));

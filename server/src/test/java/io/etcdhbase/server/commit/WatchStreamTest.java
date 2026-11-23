@@ -1649,7 +1649,9 @@ class WatchStreamTest {
   @Test
   void replayAuthenticationAndPermissionFailuresUseTheirRpcStatus() {
     for (BackendFailure.Category category : List.of(
-        BackendFailure.Category.AUTHENTICATION, BackendFailure.Category.PERMISSION)) {
+        BackendFailure.Category.AUTHENTICATION,
+        BackendFailure.Category.INVALID_AUTH_TOKEN,
+        BackendFailure.Category.PERMISSION)) {
       var subscription = new RecordingSubscription();
       subscription.termination = Optional.of(WatchTermination.failure(new BackendFailure(category)));
       var session = new RecordingSession(4, subscription);
@@ -1662,8 +1664,13 @@ class WatchStreamTest {
 
         assertEquals(1, observer.responses.size());
         assertTrue(observer.responses.getFirst().getCreated());
-        assertEquals(category == BackendFailure.Category.AUTHENTICATION
-            ? Status.Code.INVALID_ARGUMENT : Status.Code.PERMISSION_DENIED,
+        Status.Code expectedStatus = switch (category) {
+          case AUTHENTICATION -> Status.Code.INVALID_ARGUMENT;
+          case INVALID_AUTH_TOKEN -> Status.Code.UNAUTHENTICATED;
+          case PERMISSION -> Status.Code.PERMISSION_DENIED;
+          default -> throw new AssertionError("unexpected test category: " + category);
+        };
+        assertEquals(expectedStatus,
             Status.fromThrowable(observer.failure).getCode());
         assertEquals(1, subscription.closeCount.get());
         stream.close();

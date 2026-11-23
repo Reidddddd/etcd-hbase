@@ -24,11 +24,13 @@ import io.etcdhbase.grpc.protocol.TxnRequestMapper;
 import io.etcdhbase.grpc.protocol.TxnResponseEmitter;
 import io.etcdhbase.hbase.codec.ResultMessages;
 import io.etcdhbase.server.observability.RequestMetrics;
+import io.etcdhbase.server.auth.AuthSessionService;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import io.grpc.stub.StreamObserver;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -52,11 +54,22 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
   private final BudgetManager.Reservation reservation;
   private final Executor worker;
   private final RequestMetrics metrics;
+  private final AuthenticatedRequestIdentityResolver requestIdentities;
 
   public TxnGateway(String tableGroup, AuthorizedBackendIdentity identity, ByteKey authorizationDigest,
       long clusterId, long memberId, int maximumEtcdRequestBytes, CommitControlStore control,
       MutationRelay relay, InvocationResultResolver results, TxnReadExecutor reads,
       BudgetManager budgets, BudgetManager.Reservation reservation, Executor worker, RequestMetrics metrics) {
+    this(tableGroup, identity, authorizationDigest, clusterId, memberId, maximumEtcdRequestBytes,
+        control, relay, results, reads, budgets, reservation, worker, metrics, null);
+  }
+
+  /** Authenticated read requests resolve a fresh, request-owned identity from the durable session. */
+  public TxnGateway(String tableGroup, AuthorizedBackendIdentity identity, ByteKey authorizationDigest,
+      long clusterId, long memberId, int maximumEtcdRequestBytes, CommitControlStore control,
+      MutationRelay relay, InvocationResultResolver results, TxnReadExecutor reads,
+      BudgetManager budgets, BudgetManager.Reservation reservation, Executor worker,
+      RequestMetrics metrics, AuthSessionService authSessions) {
     this.tableGroup = Objects.requireNonNull(tableGroup, "tableGroup");
     this.identity = Objects.requireNonNull(identity, "identity");
     this.authorizationDigest = Objects.requireNonNull(authorizationDigest, "authorizationDigest");
@@ -68,6 +81,8 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
     this.reservation = Objects.requireNonNull(reservation, "reservation");
     this.worker = Objects.requireNonNull(worker, "worker");
     this.metrics = Objects.requireNonNull(metrics, "metrics");
+    this.requestIdentities = new AuthenticatedRequestIdentityResolver(tableGroup, identity,
+        authorizationDigest, authSessions);
     if (!identity.scope().tableGroupId().equals(tableGroup)
         || !identity.allowedTableGroupIds().contains(tableGroup)
         || authorizationDigest.length() != 32 || clusterId == 0 || memberId == 0
@@ -81,7 +96,13 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
 
   @Override
   public void accept(Rpc.TxnRequest request, StreamObserver<Rpc.TxnResponse> observer) {
-    accept(request, null, null, observer);
+    accept(request, null, null, RequestScopeInterceptor.currentAuthToken(),
+        RequestScopeInterceptor.currentScope(), observer);
+  }
+
+  void accept(Rpc.TxnRequest request, Optional<String> authToken, RequestScope scope,
+      StreamObserver<Rpc.TxnResponse> observer) {
+    accept(request, null, null, authToken, scope, observer);
   }
 
   /** A standalone range shares the read barrier while retaining standalone revision semantics. */
@@ -90,7 +111,8 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
     Objects.requireNonNull(observer, "observer");
     var transaction = Rpc.TxnRequest.newBuilder()
         .addSuccess(Rpc.RequestOp.newBuilder().setRequestRange(request)).build();
-    accept(transaction, null, request, new StreamObserver<>() {
+    accept(transaction, null, request, RequestScopeInterceptor.currentAuthToken(),
+        RequestScopeInterceptor.currentScope(), new StreamObserver<>() {
       @Override public void onNext(Rpc.TxnResponse response) {
         if (!response.hasHeader() || response.getResponsesCount() != 1
             || !response.getResponses(0).hasResponseRange()) {
@@ -110,7 +132,8 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
     Objects.requireNonNull(observer, "observer");
     var transaction = Rpc.TxnRequest.newBuilder()
         .addSuccess(Rpc.RequestOp.newBuilder().setRequestDeleteRange(request)).build();
-    accept(transaction, request, null, new StreamObserver<>() {
+    accept(transaction, request, null, RequestScopeInterceptor.currentAuthToken(),
+        RequestScopeInterceptor.currentScope(), new StreamObserver<>() {
       @Override public void onNext(Rpc.TxnResponse response) {
         if (!response.hasHeader() || response.getResponsesCount() != 1
             || !response.getResponses(0).hasResponseDeleteRange()) {
@@ -125,10 +148,11 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
   }
 
   private void accept(Rpc.TxnRequest request, Rpc.DeleteRangeRequest delete, Rpc.RangeRequest range,
-      StreamObserver<Rpc.TxnResponse> observer) {
+      Optional<String> authToken, RequestScope scope, StreamObserver<Rpc.TxnResponse> observer) {
     Objects.requireNonNull(request, "request");
+    Objects.requireNonNull(authToken, "authToken");
+    Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(observer, "observer");
-    RequestScope scope = RequestScopeInterceptor.currentScope();
     var terminal = new AtomicBoolean();
     var gatewayDrained = new CompletableFuture<Void>();
     var dispatchState = new AtomicInteger();
@@ -140,7 +164,8 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
           .orElseThrow(() -> new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
       PutCommitPreparation.retainUntilDrain(scope, input);
       worker.execute(() -> {
-        if (dispatchState.compareAndSet(0, 1)) begin(request, delete, range, observer, scope, account, terminal, gatewayDrained);
+        if (dispatchState.compareAndSet(0, 1)) begin(request, delete, range, authToken, observer,
+            scope, account, terminal, gatewayDrained);
       });
     } catch (BackendFailure | RuntimeException failure) {
       if (dispatchState.compareAndSet(0, 2)) {
@@ -157,7 +182,7 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
   }
 
   private void begin(Rpc.TxnRequest request, Rpc.DeleteRangeRequest delete, Rpc.RangeRequest range,
-      StreamObserver<Rpc.TxnResponse> observer,
+      Optional<String> authToken, StreamObserver<Rpc.TxnResponse> observer,
       RequestScope scope, BudgetManager.Account account, AtomicBoolean terminal,
       CompletableFuture<Void> gatewayDrained) {
     try {
@@ -171,34 +196,42 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
         TxnProtocolLimit.requireWithin(request, invocation.value().getMostSignificantBits(), maximumEtcdRequestBytes);
       }
       if (!command.mayWrite()) {
-        reads.execute(command, authorizationDigest, identity, scope, account, range == null).whenComplete((result, failure) ->
-            dispatchResponse(observer, scope, terminal, gatewayDrained, result, failure, range == null,
-                value -> TxnResponseEmitter.sendReadOnly(command, value, clusterId, memberId, scope, account,
-                    countOutput(observer, delete == null && range == null)),
-                ignored -> { }));
+        requestIdentities.resolve(authToken, scope).thenCompose(requestIdentity -> {
+          requestIdentity.releaseAfterPhysicalDrain(scope);
+          return reads.execute(command, requestIdentity.authorizationDigest(),
+              requestIdentity.identity(), scope, account, range == null);
+        }).whenComplete((result, failure) -> dispatchResponse(observer, scope, terminal,
+            gatewayDrained, result, failure, range == null,
+            value -> TxnResponseEmitter.sendReadOnly(command, value, clusterId, memberId, scope,
+                account, countOutput(observer, delete == null && range == null)),
+            ignored -> { }));
         return;
       }
       if (range != null) throw new IllegalStateException("standalone range cannot mutate");
-      ByteKey operation = delete == null ? MutationOperationEnvelope.transaction(request.toByteArray())
-          : MutationOperationEnvelope.deleteRange(delete.toByteArray());
-      ByteKey digest = MutationForwardRequest.digest(tableGroup, operation);
-      control.read(scope).thenCompose(observed -> {
-        var state = observed.orElseThrow(() ->
-            new IllegalStateException("authoritative commit control state is missing")).state();
-        long remaining = Math.min(scope.remainingDeadlineNanos(), MutationForwardRequest.MAX_TIMEOUT_NANOS);
-        if (state.ownerInstance().isEmpty() || remaining <= 0) {
-          return CompletableFuture.failedFuture(new BackendFailure(remaining <= 0
-              ? BackendFailure.Category.TIMEOUT : BackendFailure.Category.UNAVAILABLE));
-        }
-        var envelope = new MutationForwardRequest(tableGroup, invocation, digest, authorizationDigest,
-            ServiceAuthorizationContextReference.create(identity, authorizationDigest), state.ownerEpoch(),
-            remaining, 0, operation);
-        return relay.forward(envelope, scope);
-      }).thenCompose(reply -> resolveReply(reply, invocation, digest, scope, account))
-          .whenComplete((resolved, failure) -> dispatchResponse(observer, scope, terminal, gatewayDrained,
-              resolved, failure, true, value -> TxnResponseEmitter.sendResolved(command, value,
-                  ResultMessages::decodeTree, clusterId, memberId, scope, account, countOutput(observer, delete == null)),
-              value -> { if (value != null) value.close(); }));
+      requestIdentities.resolve(authToken, scope).thenCompose(requestIdentity -> {
+        requestIdentity.releaseAfterPhysicalDrain(scope);
+        ByteKey operation = delete == null
+            ? MutationOperationEnvelope.transaction(request.toByteArray())
+            : MutationOperationEnvelope.deleteRange(delete.toByteArray());
+        ByteKey digest = MutationForwardRequest.digest(tableGroup, operation);
+        return control.read(scope).thenCompose(observed -> {
+          var state = observed.orElseThrow(() ->
+              new IllegalStateException("authoritative commit control state is missing")).state();
+          long remaining = Math.min(scope.remainingDeadlineNanos(), MutationForwardRequest.MAX_TIMEOUT_NANOS);
+          if (state.ownerInstance().isEmpty() || remaining <= 0) {
+            return CompletableFuture.failedFuture(new BackendFailure(remaining <= 0
+                ? BackendFailure.Category.TIMEOUT : BackendFailure.Category.UNAVAILABLE));
+          }
+          var envelope = new MutationForwardRequest(tableGroup, invocation, digest,
+              requestIdentity.authorizationDigest(), requestIdentity.authorizationReference(),
+              state.ownerEpoch(), remaining, 0, operation);
+          return relay.forward(envelope, scope).thenCompose(reply -> resolveReply(reply, invocation,
+              digest, requestIdentity.authorizationDigest(), scope, account));
+        });
+      }).whenComplete((resolved, failure) -> dispatchResponse(observer, scope, terminal, gatewayDrained,
+          resolved, failure, true, value -> TxnResponseEmitter.sendResolved(command, value,
+              ResultMessages::decodeTree, clusterId, memberId, scope, account, countOutput(observer, delete == null)),
+          value -> { if (value != null) value.close(); }));
     } catch (RuntimeException failure) {
       gatewayDrained.complete(null);
       signalError(scope, observer, terminal, failure);
@@ -211,12 +244,13 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
 
   private CompletableFuture<InvocationResultResolver.ResolvedTransaction> resolveReply(
       MutationRelay.Result reply, InvocationId invocation, ByteKey digest,
+      ByteKey requestAuthorizationDigest,
       RequestScope scope, BudgetManager.Account account) {
     if (reply instanceof MutationRelay.KnownResult known) {
       if (!Arrays.equals(known.responseBytes(), invocation.bytes())) {
         return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN));
       }
-      return resolveOriginal(invocation, digest, scope, account);
+      return resolveOriginal(invocation, digest, requestAuthorizationDigest, scope, account);
     }
     if (reply instanceof MutationRelay.SemanticRejection semantic) {
       return CompletableFuture.failedFuture(new KvFailure(semantic.reason()));
@@ -230,7 +264,7 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
     if (!(reply instanceof MutationRelay.ResultUnknown unknown)) {
       return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN));
     }
-    return resolveOriginal(invocation, digest, scope, account)
+    return resolveOriginal(invocation, digest, requestAuthorizationDigest, scope, account)
         .exceptionallyCompose(failure -> {
           Throwable cause = CompletionFailures.unwrapCompletion(failure);
           if (cause instanceof Error fatal) return CompletableFuture.failedFuture(fatal);
@@ -239,9 +273,10 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
   }
 
   private CompletableFuture<InvocationResultResolver.ResolvedTransaction> resolveOriginal(
-      InvocationId invocation, ByteKey digest, RequestScope scope, BudgetManager.Account account) {
+      InvocationId invocation, ByteKey digest, ByteKey requestAuthorizationDigest,
+      RequestScope scope, BudgetManager.Account account) {
     long started = System.nanoTime();
-    return results.resolveTransaction(invocation, digest, authorizationDigest, scope, account)
+    return results.resolveTransaction(invocation, digest, requestAuthorizationDigest, scope, account)
         .whenComplete((ignored, failure) -> metrics.recordTxnStage(
             RequestMetrics.TxnStage.RESULT_RESOLUTION, Math.max(0, System.nanoTime() - started)));
   }

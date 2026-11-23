@@ -110,6 +110,80 @@ class HBaseBackendIdentityProviderTest {
   }
 
   @Test
+  void discardingUnpublishedIdentityReleasesCapacityAndRejectsFurtherBorrowing() throws Exception {
+    var issuedContext = new AtomicReference<HBaseUserContext>();
+    var openedConnection = new AtomicReference<AsyncConnection>();
+    try (var provider = provider(
+        (credentials, scope) -> {
+          HBaseUserContext context = context(credentials.principal());
+          issuedContext.set(context);
+          return context;
+        },
+        (backend, scope) -> CompletableFuture.completedFuture(null),
+        (configuration, user) -> {
+          AsyncConnection connection = mock(AsyncConnection.class);
+          openedConnection.set(connection);
+          return CompletableFuture.completedFuture(connection);
+        },
+        TIMEOUT,
+        1)) {
+      AuthorizedBackendIdentity first = authenticate(provider).get(5, TimeUnit.SECONDS);
+      HBaseUserContext firstContext = issuedContext.get();
+      AsyncConnection firstConnection = openedConnection.get();
+
+      provider.discardUnpublished(first).toCompletableFuture().get(5, TimeUnit.SECONDS);
+      verify(firstConnection).close();
+      verify(firstContext).close();
+      assertReason(Reason.INSUFFICIENT_PERMISSION, provider.connectionFor(first).toCompletableFuture());
+
+      AuthorizedBackendIdentity next = authenticate(provider).get(5, TimeUnit.SECONDS);
+      assertNotEquals(first.contextRef(), next.contextRef());
+    }
+  }
+
+  @Test
+  void releasingOnePublishedIdentityDoesNotCloseProviderOrAnotherIdentity() throws Exception {
+    var openedConnections = new java.util.concurrent.CopyOnWriteArrayList<AsyncConnection>();
+    var openedContexts = new java.util.concurrent.CopyOnWriteArrayList<HBaseUserContext>();
+    try (var provider = provider(
+        (credentials, scope) -> {
+          HBaseUserContext context = context(credentials.principal());
+          openedContexts.add(context);
+          return context;
+        },
+        (backend, scope) -> CompletableFuture.completedFuture(null),
+        (configuration, user) -> {
+          AsyncConnection connection = mock(AsyncConnection.class);
+          openedConnections.add(connection);
+          return CompletableFuture.completedFuture(connection);
+        },
+        TIMEOUT,
+        2)) {
+      AuthorizedBackendIdentity first = authenticate(provider, "alice").get(5, TimeUnit.SECONDS);
+      AuthorizedBackendIdentity second = authenticate(provider, "bob").get(5, TimeUnit.SECONDS);
+      AsyncConnection firstConnection = openedConnections.get(0);
+      AsyncConnection secondConnection = openedConnections.get(1);
+      HBaseUserContext firstContext = openedContexts.get(0);
+      HBaseUserContext secondContext = openedContexts.get(1);
+
+      provider.release(first).toCompletableFuture().get(5, TimeUnit.SECONDS);
+      provider.release(first).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+      verify(firstConnection, times(1)).close();
+      verify(firstContext, times(1)).close();
+      verify(secondConnection, never()).close();
+      verify(secondContext, never()).close();
+      assertReason(Reason.INSUFFICIENT_PERMISSION,
+          provider.connectionFor(first).toCompletableFuture());
+      assertSame(secondConnection,
+          provider.connectionFor(second).toCompletableFuture().get(5, TimeUnit.SECONDS));
+
+      AuthorizedBackendIdentity third = authenticate(provider, "carol").get(5, TimeUnit.SECONDS);
+      assertNotEquals(first.contextRef(), third.contextRef());
+    }
+  }
+
+  @Test
   void rejectsWrongScopeWithoutOpeningCredentialsOrConnections() throws Exception {
     var authenticator = mock(HBaseCredentialAuthenticator.class);
     try (var provider = provider(authenticator, (c, s) -> null, (c, u) -> null, TIMEOUT);

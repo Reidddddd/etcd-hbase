@@ -27,6 +27,7 @@ public final class BackendFailure extends Exception {
 
   public enum Category {
     AUTHENTICATION("backend authentication failed"),
+    INVALID_AUTH_TOKEN("etcd authentication token is invalid"),
     PERMISSION("backend permission was denied"),
     UNAVAILABLE("backend is unavailable"),
     TIMEOUT("backend operation timed out"),

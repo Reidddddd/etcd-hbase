@@ -50,6 +50,9 @@
     },
     "resources": {
       "$ref": "#/$defs/ResourceBudgets"
+    },
+    "authentication": {
+      "$ref": "#/$defs/M3AuthenticationConfiguration"
     }
   },
   "$defs": {
@@ -88,6 +91,28 @@
         },
         "table_group_id": {
           "$ref": "#/$defs/Identifier"
+        },
+        "tls": {
+          "$ref": "#/$defs/ListenerTls"
+        }
+      }
+    },
+    "ListenerTls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["certificate_file", "private_key_file"],
+      "properties": {
+        "certificate_file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
+        },
+        "private_key_file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
         }
       }
     },
@@ -512,6 +537,122 @@
           "const": 0
         }
       }
+    },
+    "M3AuthenticationConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trust_domain",
+        "session_ttl_millis",
+        "session_slots",
+        "maximum_identity_containers",
+        "auth_control",
+        "client_profiles",
+        "endpoint_bindings",
+        "background_identities",
+        "credential_key_ring"
+      ],
+      "properties": {
+        "trust_domain": {"$ref": "#/$defs/Identifier"},
+        "session_ttl_millis": {"type": "integer", "minimum": 1000, "maximum": 2592000000},
+        "session_slots": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "maximum_identity_containers": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "secret_directory": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/"},
+        "auth_control": {"$ref": "#/$defs/AuthControl"},
+        "client_profiles": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/ClientProfile"}},
+        "endpoint_bindings": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/EndpointBinding"}},
+        "background_identities": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/BackgroundIdentity"}},
+        "credential_key_ring": {"$ref": "#/$defs/CredentialKeyRing"}
+      }
+    },
+    "AuthControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hbase_profile_id", "salt_profile_id", "table_name", "provider_id", "client_profile_id", "identity"],
+      "properties": {
+        "hbase_profile_id": {"$ref": "#/$defs/Identifier"},
+        "salt_profile_id": {"$ref": "#/$defs/Identifier"},
+        "table_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$"},
+        "provider_id": {"$ref": "#/$defs/Identifier"},
+        "client_profile_id": {"$ref": "#/$defs/Identifier"},
+        "identity": {"$ref": "#/$defs/IdentityCredential"}
+      }
+    },
+    "ClientProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "hbase_profile_id", "authenticator_id", "hbase_site_file"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Identifier"},
+        "hbase_profile_id": {"$ref": "#/$defs/Identifier"},
+        "authenticator_id": {"$ref": "#/$defs/Identifier"},
+        "cluster_id": {"type": "string", "minLength": 1, "maxLength": 512},
+        "hbase_site_file": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/"}
+      }
+    },
+    "EndpointBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table_group_id", "provider_id", "client_profile_id"],
+      "properties": {
+        "table_group_id": {"$ref": "#/$defs/Identifier"},
+        "provider_id": {"$ref": "#/$defs/Identifier"},
+        "client_profile_id": {"$ref": "#/$defs/Identifier"}
+      }
+    },
+    "BackgroundIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table_group_id", "provider_id", "client_profile_id", "identity", "allowed_table_group_ids"],
+      "properties": {
+        "table_group_id": {"$ref": "#/$defs/Identifier"},
+        "provider_id": {"$ref": "#/$defs/Identifier"},
+        "client_profile_id": {"$ref": "#/$defs/Identifier"},
+        "identity": {"$ref": "#/$defs/IdentityCredential"},
+        "allowed_table_group_ids": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/Identifier"}}
+      }
+    },
+    "IdentityCredential": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "credential_reference"],
+      "properties": {
+        "source": {"$ref": "#/$defs/CredentialSource"},
+        "principal": {"type": "string", "minLength": 1, "maxLength": 512},
+        "credential_reference": {"$ref": "#/$defs/CredentialReference"}
+      }
+    },
+    "CredentialKeyRing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active_key_id", "keys"],
+      "properties": {
+        "active_key_id": {"$ref": "#/$defs/Identifier"},
+        "keys": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/$defs/KeyReference"}}
+      }
+    },
+    "KeyReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_id", "secret_reference"],
+      "properties": {
+        "key_id": {"$ref": "#/$defs/Identifier"},
+        "secret_reference": {"$ref": "#/$defs/SecretReference"}
+      }
+    },
+    "CredentialReference": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^(env://[A-Z][A-Z0-9_]{0,127}|secret://[A-Za-z0-9][A-Za-z0-9._/-]{0,240})$"
+    },
+    "SecretReference": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^secret://[A-Za-z0-9][A-Za-z0-9._/-]{0,240}$"
+    },
+    "CredentialSource": {
+      "type": "string",
+      "enum": ["CREDENTIAL_REFERENCE", "KERBEROS_KEYTAB", "KERBEROS_TICKET_CACHE"]
     },
     "AuthenticationMode": {
       "type": "string",

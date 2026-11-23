@@ -20,6 +20,9 @@ public final class RuntimeConfigurationValidator {
   public static void validate(RuntimeConfiguration configuration, long effectiveBytes) {
     InitializationConfigurationValidator.validate(configuration.initialization());
     validateBudgets(configuration.resources(), effectiveBytes);
+    if (configuration.authentication() != null) {
+      M3AuthenticationConfiguration.validateAgainst(configuration.authentication(), configuration);
+    }
     var groups =
         configuration.tableGroups().stream()
             .collect(Collectors.toMap(group -> group.id(), Function.identity()));

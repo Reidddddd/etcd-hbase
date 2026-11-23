@@ -9,6 +9,7 @@ import io.grpc.ServerInterceptor;
 import io.grpc.Status;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -23,6 +24,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class RequestScopeInterceptor implements ServerInterceptor, AutoCloseable {
   static final Context.Key<RequestScope> SCOPE = Context.key("etcd-hbase-request-scope");
   static final Context.Key<String> TRACE = Context.key("etcd-hbase-trace-id");
+  static final Context.Key<String> AUTH_TOKEN = Context.key("etcd-hbase-auth-token");
   private final ScheduledExecutorService scheduler;
   private final Semaphore admission;
   private final Object gate = new Object();
@@ -71,6 +73,11 @@ public final class RequestScopeInterceptor implements ServerInterceptor, AutoClo
 
   public static String currentTraceId() {
     return Objects.requireNonNull(TRACE.get(), "trace ID is available only inside an RPC");
+  }
+
+  /** The raw token is request-scoped and must never be copied into diagnostics or durable state. */
+  public static Optional<String> currentAuthToken() {
+    return Optional.ofNullable(AUTH_TOKEN.get());
   }
 
   public int activeRequests() {

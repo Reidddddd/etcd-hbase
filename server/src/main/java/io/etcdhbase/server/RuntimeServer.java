@@ -54,7 +54,7 @@ public final class RuntimeServer implements AutoCloseable {
       M3RuntimeConfiguration activation,
       Optional<LongFunction<LeaseTimeSource>> leaseTimeSourceFactory) throws IOException {
     RuntimeConfigurationValidator.validate(configuration, 1);
-    requireDevelopmentActivation(configuration);
+    requireRuntimeActivation(configuration, true);
     var groups = leaseTimeSourceFactory.isPresent()
         ? M3RuntimeGroups.openWithLeaseTimeSource(
             configuration, activation, leaseTimeSourceFactory.orElseThrow())
@@ -64,7 +64,7 @@ public final class RuntimeServer implements AutoCloseable {
       for (var listener : configuration.listeners()) {
         opened.add(Bootstrap.startConfigured(listener, configuration.resources(),
             groups.service(listener.tableGroupId()), groups.leaseService(listener.tableGroupId()),
-            groups.watchService(listener.tableGroupId()),
+            groups.watchService(listener.tableGroupId()), groups.authService(listener.tableGroupId()),
             groups.metrics(listener.tableGroupId())));
       }
       if (!groups.isReady()) throw new IllegalStateException("M3 table group lost readiness during startup");
@@ -85,7 +85,7 @@ public final class RuntimeServer implements AutoCloseable {
 
   public static RuntimeServer start(RuntimeConfiguration configuration) throws IOException {
     RuntimeConfigurationValidator.validate(configuration, 1);
-    requireDevelopmentActivation(configuration);
+    requireRuntimeActivation(configuration, false);
     List<Bootstrap> opened = new ArrayList<>();
     try {
       for (var listener : configuration.listeners()) {
@@ -102,7 +102,8 @@ public final class RuntimeServer implements AutoCloseable {
     }
   }
 
-  private static void requireDevelopmentActivation(RuntimeConfiguration configuration) {
+  private static void requireRuntimeActivation(RuntimeConfiguration configuration,
+      boolean m3Activated) {
     for (var listener : configuration.listeners()) {
       var group =
           configuration.tableGroups().stream()
@@ -114,10 +115,14 @@ public final class RuntimeServer implements AutoCloseable {
               .filter(value -> value.id().equals(group.hbaseProfileId()))
               .findFirst()
               .orElseThrow();
-      if (backend.authenticationMode() != AuthenticationMode.DEV_NO_AUTH) {
+      if (backend.authenticationMode() != AuthenticationMode.DEV_NO_AUTH
+          && (!m3Activated || configuration.authentication() == null)) {
         throw new IllegalArgumentException(
             "target identity and TLS activation are not configured");
       }
+    }
+    if (!m3Activated && configuration.authentication() != null) {
+      throw new IllegalArgumentException("M5 authentication requires M3 runtime activation");
     }
   }
 

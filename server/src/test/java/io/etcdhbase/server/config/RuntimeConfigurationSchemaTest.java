@@ -132,6 +132,13 @@ class RuntimeConfigurationSchemaTest {
     if (recordType == io.etcdhbase.admin.config.InitializationConfiguration.HBaseProfile.class) {
       expectedRequiredNames.remove("credential_reference");
     }
+    for (RecordComponent component : recordType.getRecordComponents()) {
+      var property = component.getAccessor().getAnnotation(
+          com.fasterxml.jackson.annotation.JsonProperty.class);
+      if (property != null && !property.required()) {
+        expectedRequiredNames.remove(toSnakeCase(component.getName()));
+      }
+    }
     Set<String> requiredNames = new HashSet<>();
     resolved.path("required").forEach(value -> requiredNames.add(value.asText()));
     assertEquals(

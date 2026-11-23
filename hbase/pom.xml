@@ -127,6 +127,25 @@
   </build>
   <profiles>
     <profile>
+      <id>m5-j50-public</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <skipITs>false</skipITs>
+              <failIfNoTests>true</failIfNoTests>
+              <includes combine.self="override">
+                <include>**/HBaseAuthControlIT.java</include>
+              </includes>
+              <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
       <id>m3-j28-history-public</id>
       <build>
         <plugins>

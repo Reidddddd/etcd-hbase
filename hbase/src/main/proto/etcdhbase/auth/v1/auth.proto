@@ -1,0 +1,76 @@
+syntax = "proto3";
+package etcdhbase.auth.v1;
+option java_package = "io.etcdhbase.hbase.auth.proto";
+option java_outer_classname = "AuthProtos";
+
+// Auth-control records are independent from the etcd wire schema and M2 commit records.
+message AuthSessionRecord {
+  optional uint32 format_version = 1;
+  optional bytes session_id = 2;
+  optional bytes token_digest = 3;
+  optional bytes subject_digest = 4;
+  optional string trust_domain = 5;
+  optional string provider_id = 6;
+  optional string table_group_id = 7;
+  optional string connection_profile_id = 8;
+  optional bytes dataset_digest = 9;
+  optional int64 credential_generation = 10;
+  optional int64 authorization_generation = 11;
+  optional int64 created_at_epoch_millis = 12;
+  optional int64 expires_at_epoch_millis = 13;
+  optional uint32 slot_index = 14;
+  optional int64 slot_generation = 15;
+  optional AuthSessionStatus status = 16;
+  optional CredentialEnvelope credential_envelope = 17;
+}
+
+message CredentialEnvelope {
+  optional string key_id = 1;
+  optional uint32 aad_version = 2;
+  optional bytes nonce = 3;
+  optional bytes ciphertext = 4;
+}
+
+enum AuthSessionStatus {
+  AUTH_SESSION_STATUS_UNSPECIFIED = 0;
+  AUTH_SESSION_PREPARING = 1;
+  AUTH_SESSION_ACTIVE = 2;
+  AUTH_SESSION_RETIRING = 3;
+  AUTH_SESSION_REVOKED = 4;
+  AUTH_SESSION_EXPIRED = 5;
+}
+
+message AuthSlotRecord {
+  optional uint32 format_version = 1;
+  optional uint32 index = 2;
+  optional int64 generation = 3;
+  optional bytes session_id = 4;
+  optional string operation_id = 5;
+  optional AuthSlotStatus status = 6;
+}
+
+enum AuthSlotStatus {
+  AUTH_SLOT_STATUS_UNSPECIFIED = 0;
+  AUTH_SLOT_EMPTY = 1;
+  AUTH_SLOT_RESERVED = 2;
+  AUTH_SLOT_ACTIVE = 3;
+  AUTH_SLOT_RETIRING = 4;
+}
+
+message SubjectAuthorityRecord {
+  optional uint32 format_version = 1;
+  optional bytes subject_digest = 2;
+  optional string trust_domain = 3;
+  optional string provider_id = 4;
+  optional string table_group_id = 5;
+  optional string connection_profile_id = 6;
+  optional int64 credential_generation = 7;
+  optional int64 authorization_generation = 8;
+  optional SubjectAuthorityStatus status = 9;
+}
+
+enum SubjectAuthorityStatus {
+  SUBJECT_AUTHORITY_STATUS_UNSPECIFIED = 0;
+  SUBJECT_AUTHORITY_ACTIVE = 1;
+  SUBJECT_AUTHORITY_REVOKED = 2;
+}

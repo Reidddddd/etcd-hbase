@@ -148,6 +148,23 @@ class RuntimeConfigurationLoaderTest {
   }
 
   @Test
+  void loadsOptionalListenerTlsAndRejectsUnsafeMaterialReferences() throws Exception {
+    var tree = mapper.readTree(example());
+    var tls = ((ObjectNode) tree.path("listeners").path(0)).putObject("tls");
+    tls.put("certificate_file", "/run/secrets/server.crt");
+    tls.put("private_key_file", "/run/secrets/server.key");
+    var loaded = load(mapper.writeValueAsBytes(tree));
+    assertEquals("/run/secrets/server.crt", loaded.listeners().getFirst().tls().certificateFile());
+    assertEquals("/run/secrets/server.key", loaded.listeners().getFirst().tls().privateKeyFile());
+
+    rejects(configuration -> listenerTls(configuration)
+        .put("certificate_file", "relative/server.crt"));
+    rejects(configuration -> listenerTls(configuration)
+        .put("private_key_file", "/run/secrets/server.crt"));
+    rejects(configuration -> listenerTls(configuration).put("password", "private-sentinel"));
+  }
+
+  @Test
   void detectsFixedPortAliasesButAllowsIndependentEphemeralBindings() throws Exception {
     var tree = mapper.readTree(example());
     var listeners = (com.fasterxml.jackson.databind.node.ArrayNode) tree.path("listeners");
@@ -196,6 +213,10 @@ class RuntimeConfigurationLoaderTest {
 
   private RuntimeConfiguration load(byte[] bytes) {
     return loader.load(new ByteArrayInputStream(bytes), Map.of());
+  }
+
+  private static ObjectNode listenerTls(JsonNode tree) {
+    return ((ObjectNode) tree.path("listeners").path(0)).putObject("tls");
   }
 
   private void rejects(Consumer<JsonNode> change) throws Exception {

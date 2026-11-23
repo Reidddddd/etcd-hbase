@@ -20,6 +20,7 @@ import io.etcdhbase.grpc.protocol.PutProtocolLimit;
 import io.etcdhbase.grpc.protocol.PutResponseEmitter;
 import io.etcdhbase.hbase.codec.ResultMessages;
 import io.etcdhbase.server.observability.RequestMetrics;
+import io.etcdhbase.server.auth.AuthSessionService;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import io.grpc.stub.StreamObserver;
 import java.util.Arrays;
@@ -45,6 +46,7 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
   private final BudgetManager.Reservation reservation;
   private final Executor worker;
   private final RequestMetrics metrics;
+  private final AuthenticatedRequestIdentityResolver requestIdentities;
 
   /** The caller supplies the actual serving identity and a bounded, lifecycle-owned worker. */
   public PutGateway(String tableGroup, AuthorizedBackendIdentity identity, ByteKey authorizationDigest,
@@ -61,6 +63,16 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
       CommitControlStore control, MutationRelay relay,
       InvocationResultResolver results, BudgetManager budgets, BudgetManager.Reservation reservation,
       Executor worker, RequestMetrics metrics) {
+    this(tableGroup, identity, authorizationDigest, clusterId, memberId, maximumEtcdRequestBytes,
+        control, relay, results, budgets, reservation, worker, metrics, null);
+  }
+
+  /** Authenticated mutations forward a durable session reference for owner-side revalidation. */
+  public PutGateway(String tableGroup, AuthorizedBackendIdentity identity, ByteKey authorizationDigest,
+      long clusterId, long memberId, int maximumEtcdRequestBytes,
+      CommitControlStore control, MutationRelay relay,
+      InvocationResultResolver results, BudgetManager budgets, BudgetManager.Reservation reservation,
+      Executor worker, RequestMetrics metrics, AuthSessionService authSessions) {
     this.tableGroup = Objects.requireNonNull(tableGroup, "tableGroup");
     this.identity = Objects.requireNonNull(identity, "identity");
     this.authorizationDigest = Objects.requireNonNull(authorizationDigest, "authorizationDigest");
@@ -71,6 +83,8 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
     this.reservation = Objects.requireNonNull(reservation, "reservation");
     this.worker = Objects.requireNonNull(worker, "worker");
     this.metrics = Objects.requireNonNull(metrics, "metrics");
+    this.requestIdentities = new AuthenticatedRequestIdentityResolver(tableGroup, identity,
+        authorizationDigest, authSessions);
     if (!identity.scope().tableGroupId().equals(tableGroup)
         || !identity.allowedTableGroupIds().contains(tableGroup)
         || authorizationDigest.length() != 32 || clusterId == 0 || memberId == 0
@@ -88,12 +102,13 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
     Objects.requireNonNull(request, "request");
     Objects.requireNonNull(observer, "observer");
     RequestScope scope = RequestScopeInterceptor.currentScope();
+    var authToken = RequestScopeInterceptor.currentAuthToken();
     var terminal = new AtomicBoolean();
     var gatewayDrained = new CompletableFuture<Void>();
     var dispatchState = new AtomicInteger();
     if (!scope.startIfOpen(() -> scope.trackPhysicalProducer(gatewayDrained))) return;
     try {
-      scheduleRequest(request, observer, scope, terminal, gatewayDrained, dispatchState);
+      scheduleRequest(request, observer, scope, authToken, terminal, gatewayDrained, dispatchState);
     } catch (BackendFailure | RuntimeException failure) {
       if (dispatchState.compareAndSet(0, 2)) {
         gatewayDrained.complete(null);
@@ -109,7 +124,8 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
   }
 
   private void scheduleRequest(Rpc.PutRequest request, StreamObserver<Rpc.PutResponse> observer,
-      RequestScope scope, AtomicBoolean terminal, CompletableFuture<Void> gatewayDrained,
+      RequestScope scope, java.util.Optional<String> authToken, AtomicBoolean terminal,
+      CompletableFuture<Void> gatewayDrained,
       AtomicInteger dispatchState) throws BackendFailure {
     BudgetManager.Account account = budgets.admit(tableGroup, scope, reservation);
     long inputBytes = Math.addExact(1024L, Math.multiplyExact(4L, request.getSerializedSize()));
@@ -118,13 +134,14 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
     PutCommitPreparation.retainUntilDrain(scope, inputLease);
     worker.execute(() -> {
       if (dispatchState.compareAndSet(0, 1)) {
-        begin(request, observer, scope, account, terminal, gatewayDrained);
+        begin(request, observer, scope, authToken, account, terminal, gatewayDrained);
       }
     });
   }
 
   private void begin(Rpc.PutRequest request, StreamObserver<Rpc.PutResponse> observer,
-      RequestScope scope, BudgetManager.Account account, AtomicBoolean terminal,
+      RequestScope scope, java.util.Optional<String> authToken, BudgetManager.Account account,
+      AtomicBoolean terminal,
       CompletableFuture<Void> gatewayDrained) {
     try {
       PutCommand command = PutRequestMapper.fromWire(request);
@@ -136,21 +153,24 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
         throw new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT);
       }
       ByteKey digest = MutationForwardRequest.digest(tableGroup, operation);
-      CompletableFuture<InvocationResultResolver.ResolvedResult> result = control.read(scope)
-          .thenCompose(observed -> {
-            var state = observed.orElseThrow(() ->
-                new IllegalStateException("authoritative commit control state is missing")).state();
-            long remaining = Math.min(scope.remainingDeadlineNanos(), MutationForwardRequest.MAX_TIMEOUT_NANOS);
-            if (state.ownerInstance().isEmpty() || remaining <= 0) {
-              return CompletableFuture.failedFuture(new BackendFailure(remaining <= 0
-                  ? BackendFailure.Category.TIMEOUT : BackendFailure.Category.UNAVAILABLE));
-            }
-            var envelope = new MutationForwardRequest(tableGroup, invocation, digest,
-                authorizationDigest,
-                ServiceAuthorizationContextReference.create(identity, authorizationDigest),
-                state.ownerEpoch(), remaining, 0, operation);
-            return relay.forward(envelope, scope);
-          }).thenCompose(reply -> resolveReply(reply, invocation, digest, scope, account));
+      CompletableFuture<InvocationResultResolver.ResolvedResult> result = requestIdentities
+          .resolve(authToken, scope).thenCompose(requestIdentity -> {
+            requestIdentity.releaseAfterPhysicalDrain(scope);
+            return control.read(scope).thenCompose(observed -> {
+              var state = observed.orElseThrow(() ->
+                  new IllegalStateException("authoritative commit control state is missing")).state();
+              long remaining = Math.min(scope.remainingDeadlineNanos(), MutationForwardRequest.MAX_TIMEOUT_NANOS);
+              if (state.ownerInstance().isEmpty() || remaining <= 0) {
+                return CompletableFuture.failedFuture(new BackendFailure(remaining <= 0
+                    ? BackendFailure.Category.TIMEOUT : BackendFailure.Category.UNAVAILABLE));
+              }
+              var envelope = new MutationForwardRequest(tableGroup, invocation, digest,
+                  requestIdentity.authorizationDigest(), requestIdentity.authorizationReference(),
+                  state.ownerEpoch(), remaining, 0, operation);
+              return relay.forward(envelope, scope).thenCompose(reply -> resolveReply(reply,
+                  invocation, digest, requestIdentity.authorizationDigest(), scope, account));
+            });
+          });
       result.whenComplete((resolved, failure) -> dispatchResponse(command, observer, scope, account,
           terminal, gatewayDrained, resolved, failure));
     } catch (BackendFailure | RuntimeException failure) {
@@ -165,12 +185,13 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
 
   private CompletableFuture<InvocationResultResolver.ResolvedResult> resolveReply(
       MutationRelay.Result reply, InvocationId invocation, ByteKey digest,
+      ByteKey requestAuthorizationDigest,
       RequestScope scope, BudgetManager.Account account) {
     if (reply instanceof MutationRelay.KnownResult known) {
       if (!Arrays.equals(known.responseBytes(), invocation.bytes())) {
         return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN));
       }
-      return resolveOriginal(invocation, digest, scope, account);
+      return resolveOriginal(invocation, digest, requestAuthorizationDigest, scope, account);
     }
     if (reply instanceof MutationRelay.SemanticRejection semantic) {
       return CompletableFuture.failedFuture(new KvFailure(semantic.reason()));
@@ -186,7 +207,7 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
     }
     // A lost owner reply may follow a completed publication. Resolve this same invocation;
     // never submit the mutation again or infer success from an incomplete decision.
-    return resolveOriginal(invocation, digest, scope, account)
+    return resolveOriginal(invocation, digest, requestAuthorizationDigest, scope, account)
         .exceptionallyCompose(failure -> {
           Throwable cause = CompletionFailures.unwrapCompletion(failure);
           if (cause instanceof Error fatal) return CompletableFuture.failedFuture(fatal);
@@ -195,9 +216,10 @@ public final class PutGateway implements BiConsumer<Rpc.PutRequest, StreamObserv
   }
 
   private CompletableFuture<InvocationResultResolver.ResolvedResult> resolveOriginal(
-      InvocationId invocation, ByteKey digest, RequestScope scope, BudgetManager.Account account) {
+      InvocationId invocation, ByteKey digest, ByteKey requestAuthorizationDigest,
+      RequestScope scope, BudgetManager.Account account) {
     long started = System.nanoTime();
-    return results.resolve(invocation, digest, authorizationDigest, scope, account)
+    return results.resolve(invocation, digest, requestAuthorizationDigest, scope, account)
         .whenComplete((ignored, failure) -> metrics.recordPutStage(
             RequestMetrics.PutStage.RESULT_RESOLUTION, Math.max(0, System.nanoTime() - started)));
   }
