@@ -1,6 +1,7 @@
 package io.etcdhbase.grpc.protocol;
 
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.auth.AuthSessionException;
 import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.lease.LeaseFailure;
 import io.grpc.Status;
@@ -27,6 +28,9 @@ public final class ErrorProjection {
     Throwable cause = unwrap(Objects.requireNonNull(failure, "failure"));
     if (cause instanceof BackendFailure backendFailure) {
       return projectBackendFailure(backendFailure);
+    }
+    if (cause instanceof AuthSessionException authFailure) {
+      return projectAuthFailure(authFailure);
     }
     if (cause instanceof KvFailure kvFailure) {
       return projectKvFailure(kvFailure);
@@ -60,12 +64,25 @@ public final class ErrorProjection {
   private static StatusRuntimeException projectBackendFailure(BackendFailure failure) {
     return switch (failure.category()) {
       case AUTHENTICATION -> status(Status.INVALID_ARGUMENT, AUTHENTICATION_MESSAGE);
+      case INVALID_AUTH_TOKEN -> status(Status.UNAUTHENTICATED, "etcdserver: invalid auth token");
       case PERMISSION -> status(Status.PERMISSION_DENIED, PERMISSION_MESSAGE);
       case UNAVAILABLE -> status(Status.UNAVAILABLE, failure.safeMessage());
       case TIMEOUT -> status(Status.DEADLINE_EXCEEDED, failure.safeMessage());
       case CANCELLED -> status(Status.CANCELLED, failure.safeMessage());
       case RESOURCE_LIMIT -> status(Status.RESOURCE_EXHAUSTED, failure.safeMessage());
       case UNKNOWN -> status(Status.INTERNAL, failure.safeMessage());
+    };
+  }
+
+  private static StatusRuntimeException projectAuthFailure(AuthSessionException failure) {
+    return switch (failure.reason()) {
+      case INVALID_CREDENTIALS -> status(Status.INVALID_ARGUMENT, AUTHENTICATION_MESSAGE);
+      case PERMISSION_DENIED -> status(Status.PERMISSION_DENIED, PERMISSION_MESSAGE);
+      case INVALID_TOKEN -> status(Status.UNAUTHENTICATED, "etcdserver: invalid auth token");
+      case RESOURCE_LIMIT -> status(Status.RESOURCE_EXHAUSTED,
+          safeMessage(BackendFailure.Category.RESOURCE_LIMIT));
+      case DEPENDENCY_UNAVAILABLE -> status(Status.UNAVAILABLE,
+          safeMessage(BackendFailure.Category.UNAVAILABLE));
     };
   }
 

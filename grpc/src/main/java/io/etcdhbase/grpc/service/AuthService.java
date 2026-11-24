@@ -3,9 +3,24 @@ package io.etcdhbase.grpc.service;
 import etcdserverpb.AuthGrpc;
 import etcdserverpb.Rpc;
 import io.grpc.stub.StreamObserver;
+import java.util.Objects;
+import java.util.function.BiConsumer;
 
-/** M0 Auth service surface; operations remain explicitly unimplemented. */
+/** Auth service surface with an optional Authenticate handler; management methods remain unimplemented. */
 public final class AuthService extends AuthGrpc.AuthImplBase {
+  private final BiConsumer<Rpc.AuthenticateRequest, StreamObserver<Rpc.AuthenticateResponse>>
+      authenticateHandler;
+
+  public AuthService() {
+    this.authenticateHandler = null;
+  }
+
+  public AuthService(
+      BiConsumer<Rpc.AuthenticateRequest, StreamObserver<Rpc.AuthenticateResponse>>
+          authenticateHandler) {
+    this.authenticateHandler = Objects.requireNonNull(authenticateHandler, "authenticateHandler");
+  }
+
   @Override
   public void authEnable(
       Rpc.AuthEnableRequest request, StreamObserver<Rpc.AuthEnableResponse> responseObserver) {
@@ -27,7 +42,11 @@ public final class AuthService extends AuthGrpc.AuthImplBase {
   @Override
   public void authenticate(
       Rpc.AuthenticateRequest request, StreamObserver<Rpc.AuthenticateResponse> responseObserver) {
-    UnimplementedStreams.failUnary(responseObserver, "Auth.Authenticate");
+    if (authenticateHandler == null) {
+      UnimplementedStreams.failUnary(responseObserver, "Auth.Authenticate");
+    } else {
+      authenticateHandler.accept(request, responseObserver);
+    }
   }
 
   @Override

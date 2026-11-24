@@ -228,6 +228,30 @@ public final class HBaseBackendIdentityProvider
     }
   }
 
+  /** Releases a provider-owned identity that has not been handed to a business request. */
+  public CompletionStage<Void> discardUnpublished(AuthorizedBackendIdentity identity) {
+    Objects.requireNonNull(identity, "identity");
+    Attempt attempt;
+    synchronized (gate) {
+      if (closed) return rejected(Reason.BACKEND_UNAVAILABLE);
+      attempt = contexts.get(identity.contextRef());
+    }
+    if (attempt == null) return CompletableFuture.completedFuture(null);
+    return attempt.discardUnpublished(identity);
+  }
+
+  /** Releases one published identity without closing this provider or other identity contexts. */
+  public CompletionStage<Void> release(AuthorizedBackendIdentity identity) {
+    Objects.requireNonNull(identity, "identity");
+    Attempt attempt;
+    synchronized (gate) {
+      if (closed) return rejected(Reason.BACKEND_UNAVAILABLE);
+      attempt = contexts.get(identity.contextRef());
+    }
+    if (attempt == null) return CompletableFuture.completedFuture(null);
+    return attempt.release(identity);
+  }
+
   @Override
   public void close() {
     ArrayList<Attempt> snapshot;
@@ -310,6 +334,7 @@ public final class HBaseBackendIdentityProvider
     boolean resourcesClosed;
     boolean notificationScheduled;
     boolean notificationFinished;
+    final CompletableFuture<Void> resourcesReleased = new CompletableFuture<>();
 
     Attempt(BackendCredentials credentials, Callable<? extends HBaseUserContext> userSource) {
       this.credentials = credentials;
@@ -478,7 +503,28 @@ public final class HBaseBackendIdentityProvider
           return;
         }
       }
-      retire(this);
+      HBaseBackendIdentityProvider.this.retire(this);
+    }
+
+    CompletionStage<Void> discardUnpublished(AuthorizedBackendIdentity expected) {
+      return retire(expected);
+    }
+
+    CompletionStage<Void> release(AuthorizedBackendIdentity expected) {
+      return retire(expected);
+    }
+
+    private CompletionStage<Void> retire(AuthorizedBackendIdentity expected) {
+      synchronized (this) {
+        if (identity != expected) {
+          return HBaseBackendIdentityProvider.rejected(Reason.INSUFFICIENT_PERMISSION);
+        }
+        if (resourcesClosed) return CompletableFuture.completedFuture(null);
+        stopped = true;
+      }
+      notifyResult(null, Reason.CANCELLED);
+      cleanup();
+      return resourcesReleased.minimalCompletionStage();
     }
 
     /** Retains capacity and credentials if a connection could not be closed; close() retries it. */
@@ -507,6 +553,9 @@ public final class HBaseBackendIdentityProvider
           resourcesClosed = success;
           cleaning = false;
         }
+        if (success) resourcesReleased.complete(null);
+        else resourcesReleased.completeExceptionally(
+            new IllegalStateException("backend identity resource cleanup failed"));
       }
       if (success) {
         retireWhenFinished();

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.auth.AuthSessionException;
 import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.lease.LeaseFailure;
 import io.grpc.Status;
@@ -69,6 +70,8 @@ class ErrorProjectionTest {
   void keepsAuthenticationFailureDistinctFromPermissionDenied() {
     StatusRuntimeException authentication =
         ErrorProjection.project(new BackendFailure(BackendFailure.Category.AUTHENTICATION));
+    StatusRuntimeException invalidToken =
+        ErrorProjection.project(new BackendFailure(BackendFailure.Category.INVALID_AUTH_TOKEN));
     StatusRuntimeException permission =
         ErrorProjection.project(new BackendFailure(BackendFailure.Category.PERMISSION));
 
@@ -76,7 +79,27 @@ class ErrorProjectionTest {
         authentication,
         Status.Code.INVALID_ARGUMENT,
         "etcdserver: authentication failed, invalid user ID or password");
+    assertStatus(invalidToken, Status.Code.UNAUTHENTICATED, "etcdserver: invalid auth token");
     assertStatus(permission, Status.Code.PERMISSION_DENIED, "etcdserver: permission denied");
+  }
+
+  @Test
+  void mapsAuthSessionFailuresToSafeClientErrors() {
+    assertStatus(ErrorProjection.project(new AuthSessionException(
+        AuthSessionException.Reason.INVALID_CREDENTIALS)), Status.Code.INVALID_ARGUMENT,
+        "etcdserver: authentication failed, invalid user ID or password");
+    assertStatus(ErrorProjection.project(new AuthSessionException(
+        AuthSessionException.Reason.PERMISSION_DENIED)), Status.Code.PERMISSION_DENIED,
+        "etcdserver: permission denied");
+    assertStatus(ErrorProjection.project(new AuthSessionException(
+        AuthSessionException.Reason.INVALID_TOKEN)), Status.Code.UNAUTHENTICATED,
+        "etcdserver: invalid auth token");
+    assertStatus(ErrorProjection.project(new AuthSessionException(
+        AuthSessionException.Reason.RESOURCE_LIMIT)), Status.Code.RESOURCE_EXHAUSTED,
+        "backend resource limit was reached");
+    assertStatus(ErrorProjection.project(new AuthSessionException(
+        AuthSessionException.Reason.DEPENDENCY_UNAVAILABLE)), Status.Code.UNAVAILABLE,
+        "backend is unavailable");
   }
 
   @Test

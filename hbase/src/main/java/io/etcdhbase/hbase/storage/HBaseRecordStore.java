@@ -60,14 +60,14 @@ public final class HBaseRecordStore implements RecordStore {
     this.worker = worker;
   }
 
+  /** Opens with a binding validated when the table group was configured. */
   public static CompletableFuture<HBaseRecordStore> open(HBaseConnectionFactory factory,
       AuthorizedBackendIdentity identity, StorageTableBinding binding, RequestScope scope, Executor worker) {
     var request = new HBaseRequestContext(scope);
     return request.borrowConnection(factory, identity).thenCompose(connection ->
-        request.execute(() -> connection.getAdmin().getDescriptor(binding.table())).thenApply(descriptor -> {
-          binding.validate(descriptor);
-          return new HBaseRecordStore(connection, binding, scope, worker);
-        })).exceptionallyCompose(failure -> CompletableFuture.failedFuture(HBaseFailures.classify(failure)));
+        request.execute(() -> CompletableFuture.completedFuture(
+            new HBaseRecordStore(connection, binding, scope, worker))))
+        .exceptionallyCompose(failure -> CompletableFuture.failedFuture(HBaseFailures.classify(failure)));
   }
 
   @Override

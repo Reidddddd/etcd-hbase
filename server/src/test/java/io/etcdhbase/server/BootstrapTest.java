@@ -12,9 +12,16 @@ import io.etcdhbase.grpc.service.KvService;
 import io.etcdhbase.grpc.service.LeaseService;
 import io.etcdhbase.grpc.service.MaintenanceService;
 import io.etcdhbase.grpc.service.WatchService;
+import io.etcdhbase.server.observability.RequestMetrics;
+import etcdserverpb.AuthGrpc;
+import etcdserverpb.Rpc;
 import io.grpc.CallOptions;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerMethodDefinition;
 import io.grpc.ServerServiceDefinition;
@@ -33,8 +40,75 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class BootstrapTest {
+  @Test
+  void bindsTheAuthenticateHandlerSuppliedByTheTableGroupRuntime() throws Exception {
+    var listener = new io.etcdhbase.server.config.RuntimeConfiguration.Listener(
+        "j50-auth", "127.0.0.1", 0, "group");
+    var resources = new io.etcdhbase.server.config.RuntimeConfiguration.ResourceBudgets(
+        65_536, 2, 3_000, 1_048_576, 2_097_152, 4, 0);
+    var auth = new AuthService((request, observer) -> {
+      observer.onNext(Rpc.AuthenticateResponse.newBuilder().setToken("opaque-token").build());
+      observer.onCompleted();
+    });
+    try (Bootstrap bootstrap = Bootstrap.startConfigured(listener, resources, new KvService(),
+        new LeaseService(), new WatchService(), auth, new RequestMetrics())) {
+      ManagedChannel channel = ManagedChannelBuilder
+          .forAddress("127.0.0.1", bootstrap.boundListener().port())
+          .usePlaintext().build();
+      try {
+        Rpc.AuthenticateResponse response = AuthGrpc.newBlockingStub(channel)
+            .withDeadlineAfter(2, TimeUnit.SECONDS)
+            .authenticate(Rpc.AuthenticateRequest.newBuilder()
+                .setName("milvus-service").setPassword("request-secret").build());
+        assertEquals("opaque-token", response.getToken());
+      } finally {
+        channel.shutdownNow();
+        assertTrue(channel.awaitTermination(2, TimeUnit.SECONDS));
+      }
+    }
+  }
+
+  @Test
+  void servesAuthenticateHandlerOverConfiguredTls(@TempDir java.nio.file.Path directory)
+      throws Exception {
+    try (TestTlsCertificate certificate = TestTlsCertificate.createWithDnsSans(
+             directory, "localhost", List.of("localhost"))) {
+      var listener = new io.etcdhbase.server.config.RuntimeConfiguration.Listener(
+          "secure", "127.0.0.1", 0, "secure-group",
+          new io.etcdhbase.server.config.RuntimeConfiguration.Tls(
+              certificate.certificate().toString(), certificate.privateKey().toString()));
+      var resources = new io.etcdhbase.server.config.RuntimeConfiguration.ResourceBudgets(
+          65_536, 2, 3_000, 1_048_576, 2_097_152, 4, 0);
+      var auth = new AuthService((request, observer) -> {
+        observer.onNext(Rpc.AuthenticateResponse.newBuilder().setToken("tls-token").build());
+        observer.onCompleted();
+      });
+      try (Bootstrap bootstrap = Bootstrap.startConfigured(listener, resources, new KvService(),
+          new LeaseService(), new WatchService(), auth, new RequestMetrics())) {
+        SslContext clientTls = GrpcSslContexts.configure(SslContextBuilder.forClient()
+            .trustManager(certificate.certificate().toFile())).build();
+        ManagedChannel channel = NettyChannelBuilder.forAddress("127.0.0.1",
+                bootstrap.boundListener().port())
+            .sslContext(clientTls)
+            .overrideAuthority("localhost")
+            .build();
+        try {
+          Rpc.AuthenticateResponse response = AuthGrpc.newBlockingStub(channel)
+              .withDeadlineAfter(3, TimeUnit.SECONDS)
+              .authenticate(Rpc.AuthenticateRequest.newBuilder()
+                  .setName("milvus-service").setPassword("request-secret").build());
+          assertEquals("tls-token", response.getToken());
+        } finally {
+          channel.shutdownNow();
+          assertTrue(channel.awaitTermination(2, TimeUnit.SECONDS));
+        }
+      }
+    }
+  }
+
   @Test
   void registersAllFortyOneMethodsAndNeverReturnsBusinessSuccess() throws Exception {
     try (Bootstrap bootstrap =

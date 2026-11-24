@@ -841,7 +841,7 @@ final class WatchHistoryReplay implements AutoCloseable {
         case RESOURCE_LIMIT -> WatchTermination.resourceLimit(RESOURCE_LIMIT_REASON);
         case CANCELLED -> WatchTermination.cancelled(backendFailure.safeMessage());
         case UNAVAILABLE -> WatchTermination.unavailable(backendFailure.safeMessage());
-        case AUTHENTICATION, PERMISSION, TIMEOUT, UNKNOWN ->
+        case AUTHENTICATION, INVALID_AUTH_TOKEN, PERMISSION, TIMEOUT, UNKNOWN ->
             WatchTermination.failure(backendFailure);
       };
     }

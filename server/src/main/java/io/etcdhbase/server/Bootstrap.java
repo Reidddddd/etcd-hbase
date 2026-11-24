@@ -11,9 +11,15 @@ import io.etcdhbase.server.config.ListenerAddress;
 import io.etcdhbase.server.config.RuntimeConfiguration;
 import io.etcdhbase.server.observability.RequestMetrics;
 import io.grpc.Server;
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
@@ -57,7 +63,9 @@ public final class Bootstrap implements AutoCloseable {
         binding.port(),
         binding.tableGroupId(),
         new RuntimeConfiguration.ResourceBudgets(65536, 64, 5000, 1048576, 2097152, 16, 0),
-        new KvService(), new LeaseService(), new WatchService(), new RequestMetrics());
+        null,
+        new KvService(), new LeaseService(), new WatchService(), new AuthService(),
+        new ClusterService(), new MaintenanceService(), new RequestMetrics());
   }
 
   static Bootstrap startConfigured(
@@ -90,19 +98,42 @@ public final class Bootstrap implements AutoCloseable {
   static Bootstrap startConfigured(
       RuntimeConfiguration.Listener binding, RuntimeConfiguration.ResourceBudgets resources,
       KvService kv, LeaseService lease, WatchService watch, RequestMetrics metrics) throws IOException {
+    return startConfigured(binding, resources, kv, lease, watch, new AuthService(), metrics);
+  }
+
+  /** Binds the Authenticate handler selected by the activated table-group runtime. */
+  static Bootstrap startConfigured(
+      RuntimeConfiguration.Listener binding, RuntimeConfiguration.ResourceBudgets resources,
+      KvService kv, LeaseService lease, WatchService watch, AuthService auth, RequestMetrics metrics)
+      throws IOException {
+    return startConfigured(binding, resources, kv, lease, watch, auth,
+        new ClusterService(), new MaintenanceService(), metrics);
+  }
+
+  /** Binds table-group-specific management handlers in place of the default M0 stubs. */
+  static Bootstrap startConfigured(
+      RuntimeConfiguration.Listener binding, RuntimeConfiguration.ResourceBudgets resources,
+      KvService kv, LeaseService lease, WatchService watch, AuthService auth,
+      ClusterService cluster, MaintenanceService maintenance, RequestMetrics metrics)
+      throws IOException {
     String host = ListenerAddress.parse(binding.bindHost()).connectionName();
     if (host.equals("localhost")) host = "127.0.0.1";
-    return start(host, binding.port(), binding.tableGroupId(), resources, kv, lease, watch, metrics);
+    return start(host, binding.port(), binding.tableGroupId(), resources, binding.tls(),
+        kv, lease, watch, auth, cluster, maintenance, metrics);
   }
 
   private static Bootstrap start(
       String host, int port, String tableGroup, RuntimeConfiguration.ResourceBudgets resources,
-      KvService kv, LeaseService lease, WatchService watch, RequestMetrics metrics)
-      throws IOException {
+      RuntimeConfiguration.Tls tls, KvService kv, LeaseService lease, WatchService watch, AuthService auth,
+      ClusterService cluster, MaintenanceService maintenance, RequestMetrics metrics) throws IOException {
     Objects.requireNonNull(kv, "kv");
     Objects.requireNonNull(lease, "lease");
     Objects.requireNonNull(watch, "watch");
+    Objects.requireNonNull(auth, "auth");
+    Objects.requireNonNull(cluster, "cluster");
+    Objects.requireNonNull(maintenance, "maintenance");
     Objects.requireNonNull(metrics, "metrics");
+    SslContext tlsContext = tls == null ? null : serverTls(tls);
     var deadlines =
         new java.util.concurrent.ScheduledThreadPoolExecutor(
             1, Thread.ofPlatform().daemon().name("grpc-request-deadline-", 0).factory());
@@ -115,17 +146,17 @@ public final class Bootstrap implements AutoCloseable {
             Duration.ofMillis(resources.requestDeadlineMs()),
             resources.maxRequestBytes(),
             metrics);
-    Server server =
-        NettyServerBuilder.forAddress(new InetSocketAddress(host, port))
-            .maxInboundMessageSize(resources.maxRpcBytes())
-            .intercept(requests)
-            .addService(kv)
-            .addService(watch)
-            .addService(lease)
-            .addService(new AuthService())
-            .addService(new ClusterService())
-            .addService(new MaintenanceService())
-            .build();
+    NettyServerBuilder builder = NettyServerBuilder.forAddress(new InetSocketAddress(host, port))
+        .maxInboundMessageSize(resources.maxRpcBytes())
+        .intercept(requests);
+    if (tlsContext != null) builder.sslContext(tlsContext);
+    Server server = builder.addService(kv)
+        .addService(watch)
+        .addService(lease)
+        .addService(auth)
+        .addService(cluster)
+        .addService(maintenance)
+        .build();
     try {
       server.start();
       return new Bootstrap(server, host, tableGroup, deadlines, requests, metrics);
@@ -134,6 +165,20 @@ public final class Bootstrap implements AutoCloseable {
       deadlines.shutdownNow();
       requests.close();
       throw failure;
+    }
+  }
+
+  private static SslContext serverTls(RuntimeConfiguration.Tls tls) throws IOException {
+    File certificate = Path.of(tls.certificateFile()).toFile();
+    File privateKey = Path.of(tls.privateKeyFile()).toFile();
+    if (!Files.isRegularFile(certificate.toPath()) || !Files.isReadable(certificate.toPath())
+        || !Files.isRegularFile(privateKey.toPath()) || !Files.isReadable(privateKey.toPath())) {
+      throw new IOException("listener TLS material is unavailable");
+    }
+    try {
+      return GrpcSslContexts.configure(SslContextBuilder.forServer(certificate, privateKey)).build();
+    } catch (IOException | RuntimeException failure) {
+      throw new IOException("listener TLS configuration is invalid");
     }
   }
 

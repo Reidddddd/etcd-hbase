@@ -63,10 +63,21 @@ final class RequestLifecycle<RequestT, ResponseT> {
       Metadata headers, ServerCallHandler<RequestT, ResponseT> next) {
     context.addListener(cancellation, Runnable::run);
     if (finished.get()) return new ServerCall.Listener<>() {};
-    var requestContext =
-        context
-            .withValue(RequestScopeInterceptor.SCOPE, scope)
-            .withValue(RequestScopeInterceptor.TRACE, traceId);
+    final java.util.Optional<String> authToken;
+    try {
+      authToken = EtcdAuthTokenMetadata.read(headers);
+    } catch (RuntimeException malformedMetadata) {
+      observedCall.close(
+          Status.UNAUTHENTICATED.withDescription("etcdserver: invalid auth token"),
+          new Metadata());
+      return new ServerCall.Listener<>() {};
+    }
+    var requestContext = context.withValue(RequestScopeInterceptor.SCOPE, scope)
+        .withValue(RequestScopeInterceptor.TRACE, traceId);
+    if (authToken.isPresent()) {
+      requestContext = requestContext.withValue(
+          RequestScopeInterceptor.AUTH_TOKEN, authToken.orElseThrow());
+    }
     var listener = Contexts.interceptCall(requestContext, observedCall, headers, next);
     return new ForwardingServerCallListener.SimpleForwardingServerCallListener<>(listener) {
       @Override

@@ -928,7 +928,9 @@ class WatchHistoryReplayTest {
   @Test
   void authenticationAndPermissionFailuresRemainTypedDuringReplay() throws Exception {
     for (BackendFailure.Category category : List.of(
-        BackendFailure.Category.AUTHENTICATION, BackendFailure.Category.PERMISSION)) {
+        BackendFailure.Category.AUTHENTICATION,
+        BackendFailure.Category.INVALID_AUTH_TOKEN,
+        BackendFailure.Category.PERMISSION)) {
       var fixture = new ReplayFixture();
       BackendFailure failure = new BackendFailure(category);
       when(fixture.selected.readPublishedState(any(RequestScope.class),

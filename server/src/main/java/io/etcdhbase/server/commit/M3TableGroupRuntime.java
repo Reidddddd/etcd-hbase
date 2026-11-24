@@ -40,6 +40,7 @@ import io.etcdhbase.core.scan.ScanScheduler;
 import io.etcdhbase.grpc.service.KvService;
 import io.etcdhbase.grpc.service.LeaseService;
 import io.etcdhbase.grpc.service.WatchService;
+import io.etcdhbase.grpc.service.AuthService;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.LeaseStateMessages;
 import io.etcdhbase.hbase.codec.LeaseBindingMessages;
@@ -50,12 +51,9 @@ import io.etcdhbase.server.config.M3RuntimeConfiguration;
 import io.etcdhbase.server.config.RuntimeConfiguration;
 import io.etcdhbase.server.observability.RequestMetrics;
 import io.etcdhbase.server.config.M3MemoryReservations;
+import io.etcdhbase.server.auth.AuthSessionService;
+import io.etcdhbase.server.auth.AuthenticateRpcHandler;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Clock;
 import java.util.Objects;
@@ -93,18 +91,20 @@ public final class M3TableGroupRuntime implements AutoCloseable {
   private final KvService kvService;
   private final LeaseService leaseService;
   private final WatchService watchService;
+  private final AuthService authService;
   private final Optional<LeaseTimeSource> leaseTime;
   private final long clusterId;
   private final long memberId;
   private final RequestMetrics metrics;
 
   private M3TableGroupRuntime(Pending resources, KvService kvService, LeaseService leaseService,
-      WatchService watchService,
+      WatchService watchService, AuthService authService,
       Optional<LeaseTimeSource> leaseTime, long clusterId, long memberId, RequestMetrics metrics) {
     this.resources = resources;
     this.kvService = kvService;
     this.leaseService = leaseService;
     this.watchService = watchService;
+    this.authService = Objects.requireNonNull(authService, "authService");
     this.leaseTime = Objects.requireNonNull(leaseTime, "leaseTime");
     this.clusterId = clusterId;
     this.memberId = memberId;
@@ -121,7 +121,19 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       AuthorizedBackendIdentity identity, BudgetManager budgets, ScanScheduler scans,
       RequestScope startup) throws Exception {
     return openInternal(plan, activation, limits, connections, identity, budgets, scans, startup,
-        Optional.empty(), SYSTEM_LEASE_TIME_SOURCE, null, null);
+        Optional.empty(), SYSTEM_LEASE_TIME_SOURCE, null, null, null);
+  }
+
+  /** Opens the data path with durable session resolution for requests and owner forwarding. */
+  public static M3TableGroupRuntime openAuthenticated(M3TableGroupPlan plan,
+      M3RuntimeConfiguration activation, RuntimeConfiguration.ResourceBudgets limits,
+      HBaseConnectionFactory connections, AuthorizedBackendIdentity identity,
+      BudgetManager budgets, ScanScheduler scans, RequestScope startup,
+      OwnerForwardingRuntime ownerForwarding, ScheduledExecutorService leaseTimers,
+      LongFunction<AuthSessionService> authSessionFactory) throws Exception {
+    return openInternal(plan, activation, limits, connections, identity, budgets, scans, startup,
+        Optional.empty(), SYSTEM_LEASE_TIME_SOURCE, ownerForwarding, leaseTimers,
+        Objects.requireNonNull(authSessionFactory, "authSessionFactory"));
   }
 
   /** Uses an explicit time source for runtime readiness and lease-boundary tests. */
@@ -143,7 +155,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       ScheduledExecutorService leaseTimers) throws Exception {
     return openInternal(plan, activation, limits, connections, identity, budgets, scans, startup,
         Optional.empty(), (uncertaintyMillis, ignoredDriftPpm) ->
-            leaseTimeSourceFactory.apply(uncertaintyMillis), ownerForwarding, leaseTimers);
+            leaseTimeSourceFactory.apply(uncertaintyMillis), ownerForwarding, leaseTimers, null);
   }
 
   /** Internal assembly path; public configuration still rejects cache activation. */
@@ -152,7 +164,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       AuthorizedBackendIdentity identity, BudgetManager budgets, ScanScheduler scans,
       RequestScope startup, Optional<CacheLimits> cacheLimits) throws Exception {
     return openInternal(plan, activation, limits, connections, identity, budgets, scans, startup,
-        cacheLimits, SYSTEM_LEASE_TIME_SOURCE, null, null);
+        cacheLimits, SYSTEM_LEASE_TIME_SOURCE, null, null, null);
   }
 
   public static M3TableGroupRuntime open(M3TableGroupPlan plan, M3RuntimeConfiguration activation,
@@ -160,7 +172,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       AuthorizedBackendIdentity identity, BudgetManager budgets, ScanScheduler scans,
       RequestScope startup, OwnerForwardingRuntime ownerForwarding) throws Exception {
     return openInternal(plan, activation, limits, connections, identity, budgets, scans, startup,
-        Optional.empty(), SYSTEM_LEASE_TIME_SOURCE, ownerForwarding, null);
+        Optional.empty(), SYSTEM_LEASE_TIME_SOURCE, ownerForwarding, null, null);
   }
 
   /** Opens one table-group runtime with process-shared owner routing and Lease stream timers. */
@@ -170,7 +182,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       RequestScope startup, OwnerForwardingRuntime ownerForwarding,
       ScheduledExecutorService leaseTimers) throws Exception {
     return openInternal(plan, activation, limits, connections, identity, budgets, scans, startup,
-        Optional.empty(), SYSTEM_LEASE_TIME_SOURCE, ownerForwarding, leaseTimers);
+        Optional.empty(), SYSTEM_LEASE_TIME_SOURCE, ownerForwarding, leaseTimers, null);
   }
 
   private static M3TableGroupRuntime openInternal(M3TableGroupPlan plan,
@@ -179,7 +191,8 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       ScanScheduler scans, RequestScope startup, Optional<CacheLimits> cacheLimits,
       BiFunction<Long, Integer, LeaseTimeSource> leaseTimeSourceFactory,
       OwnerForwardingRuntime ownerForwarding,
-      ScheduledExecutorService leaseTimers) throws Exception {
+      ScheduledExecutorService leaseTimers,
+      LongFunction<AuthSessionService> authSessionFactory) throws Exception {
     Objects.requireNonNull(plan, "plan");
     Objects.requireNonNull(activation, "activation");
     Objects.requireNonNull(limits, "limits");
@@ -201,6 +214,9 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     try {
       var stores = await(TableGroupStores.openConfigured(connections, identity, plan,
           activation.pinConfiguration(), startup), startup);
+      AuthSessionService authSessions = authSessionFactory == null ? null
+          : Objects.requireNonNull(authSessionFactory.apply(stores.clusterId()),
+              "authenticated session service");
       if (!activation.m4LeaseApiEnabled()) {
         verifyLeaseDisabledFormat(stores, startup);
       }
@@ -251,7 +267,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
             business.lease().orElseThrow(), startup);
       }
       ServiceComponents services = assembleService(plan, activation, limits, identity, authorization, budgets,
-          pending, stores, invocations, owner, business, ownerForwarding);
+          pending, stores, invocations, owner, business, ownerForwarding, authSessions);
       await(pending.initialReadiness(), startup);
       startup.closeAsync(CLEANUP);
       await(CompletableFuture.allOf(startup.cleanupCompletion().toCompletableFuture(),
@@ -261,7 +277,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
             new BackendFailure(BackendFailure.Category.UNAVAILABLE));
       }
       return new M3TableGroupRuntime(pending, services.kvService(), services.leaseService(),
-          services.watchService(),
+          services.watchService(), services.authService(),
           leaseTime, stores.clusterId(), activation.memberIdBits(), business.metrics());
     } catch (Exception failure) {
       throw new StartupException(failure, abort(startup, pending, failure));
@@ -556,7 +572,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       LeaseTimeSource time, LeaseBindingMutationPlanner bindingPlanner) {}
 
   private record ServiceComponents(KvService kvService, LeaseService leaseService,
-      WatchService watchService) {}
+      WatchService watchService, AuthService authService) {}
 
   record CacheLimits(long maximumBytes, int maximumEntries, int maximumRecords,
       int maximumDecisions, long maximumCandidateBytes, BudgetManager.Reservation proofReservation,
@@ -707,13 +723,14 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       M3RuntimeConfiguration activation, RuntimeConfiguration.ResourceBudgets limits,
       AuthorizedBackendIdentity identity, ByteKey authorization, BudgetManager budgets, Pending pending,
       TableGroupStores stores, InvocationService invocations, M3OwnerLease owner,
-      BusinessComponents business, OwnerForwardingRuntime ownerForwarding) {
-    var receiver = new MutationForwardReceiver(stores.control(), invocations,
-        (peer, request, scope) -> {
-          boolean trustedPeer = ownerForwarding == null
-              ? owner.currentToken().map(token -> token.instance().equals(peer)).orElse(false)
-              : ownerForwarding.isTrustedPeerIdentity(peer);
-          if (!trustedPeer || !request.tableGroupId().equals(plan.source().tableGroupId())
+      BusinessComponents business, OwnerForwardingRuntime ownerForwarding,
+      AuthSessionService authSessions) {
+    java.util.function.Predicate<String> trustedPeer = peer -> ownerForwarding == null
+        ? owner.currentToken().map(token -> token.instance().equals(peer)).orElse(false)
+        : ownerForwarding.isTrustedPeerIdentity(peer);
+    MutationForwardReceiver.AuthorizationResolver authorizationResolver = authSessions == null
+        ? (peer, request, scope) -> {
+          if (!trustedPeer.test(peer) || !request.tableGroupId().equals(plan.source().tableGroupId())
               || !authorization.equals(request.authorizationScopeDigest())
               || !ServiceAuthorizationContextReference.matches(identity, authorization,
                   request.authorizationContextReference())) {
@@ -722,7 +739,10 @@ public final class M3TableGroupRuntime implements AutoCloseable {
           }
           return CompletableFuture.completedFuture(
               new MutationForwardReceiver.VerifiedAuthorization(identity, authorization));
-        },
+        }
+        : new SessionAuthorizationResolver(plan.source().tableGroupId(), authSessions, trustedPeer);
+    var receiver = new MutationForwardReceiver(stores.control(), invocations,
+        authorizationResolver,
         (request, binding, principal, scope) -> switch (MutationOperationEnvelope.kind(request.operationBytes())) {
           case PUT -> business.putProcessor().process(request, binding, principal, scope);
           case TRANSACTION, DELETE_RANGE -> business.txnProcessor().process(request, binding, principal, scope);
@@ -753,10 +773,12 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     }
     var gateway = new PutGateway(plan.source().tableGroupId(), identity, authorization,
         stores.clusterId(), activation.memberIdBits(), activation.maxEtcdRequestBytes(),
-        stores.control(), relay, stores.invocationResults(), budgets, REQUEST_MEMORY, pending.worker, business.metrics());
+        stores.control(), relay, stores.invocationResults(), budgets, REQUEST_MEMORY, pending.worker,
+        business.metrics(), authSessions);
     var txnGateway = new TxnGateway(plan.source().tableGroupId(), identity, authorization,
         stores.clusterId(), activation.memberIdBits(), activation.maxEtcdRequestBytes(),
-        stores.control(), relay, stores.invocationResults(), business.txnReads(), budgets, REQUEST_MEMORY, pending.worker, business.metrics());
+        stores.control(), relay, stores.invocationResults(), business.txnReads(), budgets,
+        REQUEST_MEMORY, pending.worker, business.metrics(), authSessions);
     LeaseService leaseService = new LeaseService();
     WatchService watchService = new WatchService();
     if (business.lease().isPresent()) {
@@ -795,8 +817,10 @@ public final class M3TableGroupRuntime implements AutoCloseable {
           selectedEvents, authorization, business.metrics());
       watchService = new WatchService(watchGateway.handler());
     }
+    AuthService authService = authSessions == null ? new AuthService()
+        : new AuthService(new AuthenticateRpcHandler(authSessions));
     return new ServiceComponents(new KvService(gateway, txnGateway, txnGateway::deleteRange,
-        txnGateway::range), leaseService, watchService);
+        txnGateway::range), leaseService, watchService, authService);
   }
 
   private static MutationRelay localOwnerRelay(String tableGroupId, CommitControlStore control,
@@ -821,6 +845,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
   public KvService kvService() { return kvService; }
   public LeaseService leaseService() { return leaseService; }
   public WatchService watchService() { return watchService; }
+  public AuthService authService() { return authService; }
   public CompletableFuture<SharedEventTailer> eventTailerReady() { return resources.eventTailerReady(); }
   public Optional<SharedEventTailer> eventTailer() { return resources.eventTailer(); }
   public long clusterId() { return clusterId; }
@@ -881,25 +906,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
   }
 
   private static ByteKey authorizationDigest(AuthorizedBackendIdentity identity) {
-    if (identity.allowedTableGroupIds().size() > 64) {
-      throw new IllegalArgumentException("identity has too many authorized table groups");
-    }
-    try {
-      var bytes = new ByteArrayOutputStream();
-      try (var output = new DataOutputStream(bytes)) {
-        output.writeInt(1);
-        output.writeUTF(identity.providerId());
-        output.writeUTF(identity.subject());
-        output.writeUTF(identity.scope().tableGroupId());
-        output.writeUTF(identity.scope().connectionProfileId());
-        output.writeLong(identity.credentialGeneration());
-        output.writeInt(identity.allowedTableGroupIds().size());
-        for (String group : identity.allowedTableGroupIds().stream().sorted().toList()) output.writeUTF(group);
-      }
-      return ByteKey.copyOf(MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()));
-    } catch (IOException | NoSuchAlgorithmException failure) {
-      throw new IllegalStateException("cannot derive the authorization scope digest", failure);
-    }
+    return AuthorizationScopeDigest.fromIdentity(identity);
   }
 
   private static <T> T await(CompletableFuture<T> future, RequestScope scope) throws Exception {

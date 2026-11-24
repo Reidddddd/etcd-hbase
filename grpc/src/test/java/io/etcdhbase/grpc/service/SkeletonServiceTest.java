@@ -71,6 +71,31 @@ class SkeletonServiceTest {
   }
 
   @Test
+  void authenticateRemainsUnimplementedUntilItsSessionHandlerIsAssembled() {
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    StreamObserver<Rpc.AuthenticateResponse> observer = new StreamObserver<>() {
+      @Override public void onNext(Rpc.AuthenticateResponse value) {
+        throw new AssertionError("unexpected authentication response");
+      }
+      @Override public void onError(Throwable value) { failure.set(value); }
+      @Override public void onCompleted() { throw new AssertionError("unexpected completion"); }
+    };
+    Rpc.AuthenticateRequest request = Rpc.AuthenticateRequest.newBuilder()
+        .setName("milvus-service").setPassword("test-secret").build();
+    new AuthService().authenticate(request, observer);
+    assertEquals(Status.Code.UNIMPLEMENTED, Status.fromThrowable(failure.get()).getCode());
+
+    AtomicReference<Rpc.AuthenticateRequest> forwarded = new AtomicReference<>();
+    AtomicReference<StreamObserver<Rpc.AuthenticateResponse>> destination = new AtomicReference<>();
+    new AuthService((value, response) -> {
+      forwarded.set(value);
+      destination.set(response);
+    }).authenticate(request, observer);
+    assertSame(request, forwarded.get());
+    assertSame(observer, destination.get());
+  }
+
+  @Test
   void emptyHalfClosedStreamFailsOnceWithoutReturningAResponse() {
     AtomicInteger terminalCount = new AtomicInteger();
     StreamObserver<Rpc.WatchRequest> requests =
