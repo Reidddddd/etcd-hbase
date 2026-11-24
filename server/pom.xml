@@ -38,8 +38,11 @@
               <failIfNoTests>true</failIfNoTests>
               <includes combine.self="override">
                 <include>**/M5AuthProcessIT.java</include>
+                <include>**/M5AuthenticateGatewayProcessIT.java</include>
               </includes>
-              <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
+              <!-- Each class starts a new MiniKDC; Kerberos Config is cached per JVM. -->
+              <reuseForks>false</reuseForks>
+              <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
             </configuration>
           </plugin>
         </plugins>

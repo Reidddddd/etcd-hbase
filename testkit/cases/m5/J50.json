@@ -26,6 +26,9 @@
     "scope-mismatch-rejected",
     "ordinary-user-denied-auth-control-read",
     "authenticate-rpc-to-non-owner-kv-txn-owner-revalidation",
+    "authenticate-on-a-b-real-rpc-kv-owner-forwarding-full-stop-restart",
+    "authenticated-delete-range-through-non-owner-to-current-owner",
+    "provider-capacity-retained-until-physical-producer-drain",
     "missing-or-zero-test-report-fails"
   ],
   "tests": [
@@ -123,6 +126,12 @@
     {
       "module": "server",
       "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.AuthenticatedRequestIdentityDrainTest",
+      "methods": ["cancelledRequestRetainsProviderCapacityUntilExceptionalPhysicalDrain"]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
       "class": "io.etcdhbase.server.auth.AuthenticateRpcHandlerTest",
       "methods": ["authenticatesAndReturnsOnlyTheIssuedOpaqueToken", "mapsCredentialRejectionWithoutReturningATokenOrSecret", "cancellationBeforeAuthenticateTokenSendRetiresTheUndeliveredSession"]
     },
@@ -167,6 +176,12 @@
       "kind": "failsafe",
       "class": "io.etcdhbase.server.M5AuthProcessIT",
       "methods": ["sessionsActivateAllRegisteredHBaseMechanismsAcrossProcessesAndFullRestart"]
+    },
+    {
+      "module": "server",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.server.M5AuthenticateGatewayProcessIT",
+      "methods": ["authenticatesOnAThenUsesBGetPutTxnAndReactivatesAfterFullStop"]
     }
   ]
 }

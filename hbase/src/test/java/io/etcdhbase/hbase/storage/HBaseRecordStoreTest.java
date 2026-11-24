@@ -68,6 +68,24 @@ import org.mockito.ArgumentCaptor;
 
 class HBaseRecordStoreTest {
   @Test
+  void openDoesNotRequireDescriptorAdminPermissionFromRequestIdentity() {
+    var connection = mock(AsyncConnection.class);
+    var admin = mock(AsyncAdmin.class);
+    var factory = mock(HBaseConnectionFactory.class);
+    var identity = mock(AuthorizedBackendIdentity.class);
+    var binding = binding();
+    doReturn(CompletableFuture.completedFuture(connection)).when(factory).connectionFor(identity);
+    doReturn(admin).when(connection).getAdmin();
+    doReturn(CompletableFuture.failedFuture(new SecurityException("descriptor access denied")))
+        .when(admin).getDescriptor(binding.table());
+    try (var scope = RequestScope.withoutDeadline()) {
+      var store = HBaseRecordStore.open(factory, identity, binding, scope, Runnable::run).join();
+      assertInstanceOf(HBaseRecordStore.class, store);
+      verify(admin, never()).getDescriptor(binding.table());
+    }
+  }
+
+  @Test
   void cancellationDoesNotReleaseAnOperationBeforeItsBackendCallback() {
     var connection = mock(AsyncConnection.class);
     var admin = mock(AsyncAdmin.class);

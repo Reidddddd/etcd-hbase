@@ -43,6 +43,9 @@ J50_SCENARIOS = {
     "scope-mismatch-rejected",
     "ordinary-user-denied-auth-control-read",
     "authenticate-rpc-to-non-owner-kv-txn-owner-revalidation",
+    "authenticate-on-a-b-real-rpc-kv-owner-forwarding-full-stop-restart",
+    "authenticated-delete-range-through-non-owner-to-current-owner",
+    "provider-capacity-retained-until-physical-producer-drain",
     "missing-or-zero-test-report-fails",
 }
 J50_REQUIRED_TESTS = {
@@ -50,6 +53,8 @@ J50_REQUIRED_TESTS = {
         {"provisionsExactDescriptorAndPersistsSessionAuthorityAndSlotCas"},
     ("server", "failsafe", "io.etcdhbase.server.M5AuthProcessIT"):
         {"sessionsActivateAllRegisteredHBaseMechanismsAcrossProcessesAndFullRestart"},
+    ("server", "failsafe", "io.etcdhbase.server.M5AuthenticateGatewayProcessIT"):
+        {"authenticatesOnAThenUsesBGetPutTxnAndReactivatesAfterFullStop"},
     ("server", "surefire", "io.etcdhbase.server.auth.AuthSessionServiceTest"):
         {"authenticatesPersistsOnlyDigestAndEnvelopeAndResolvesOnAnotherReplica",
          "unknownSessionWriteOutcomeKeepsTheGlobalSlotReserved",
@@ -58,6 +63,8 @@ J50_REQUIRED_TESTS = {
         {"concurrentBorrowsShareColdActivationAndRetireOnlyAfterTheLastRelease",
          "cancellingOneBorrowDoesNotCancelTheSharedColdActivation",
          "lateActivationWithoutBorrowersIsClosedBeforeCapacityIsReused"},
+    ("server", "surefire", "io.etcdhbase.server.commit.AuthenticatedRequestIdentityDrainTest"):
+        {"cancelledRequestRetainsProviderCapacityUntilExceptionalPhysicalDrain"},
     ("server", "surefire", "io.etcdhbase.server.auth.AuthenticateRpcHandlerTest"):
         {"authenticatesAndReturnsOnlyTheIssuedOpaqueToken",
          "mapsCredentialRejectionWithoutReturningATokenOrSecret",
@@ -263,11 +270,14 @@ def _validate_maven_profile(repo: Path, module: str, profile_id: str) -> None:
         raise ReportError(f"execution profile can silently skip integration tests: {module}/{profile_id}")
     includes = {include.text for include in configuration.findall("m:includes/m:include", namespace)}
     required = {
-        "hbase": "**/HBaseAuthControlIT.java",
-        "server": "**/M5AuthProcessIT.java",
-    }.get(module)
-    if required is not None and required not in includes:
+        "hbase": {"**/HBaseAuthControlIT.java"},
+        "server": {"**/M5AuthProcessIT.java", "**/M5AuthenticateGatewayProcessIT.java"},
+    }.get(module, set())
+    if not required.issubset(includes):
         raise ReportError(f"execution profile does not include required IT: {module}/{profile_id}")
+    if (module == "server" and profile_id == "m5-j50-public"
+            and configuration.findtext("m:reuseForks", namespaces=namespace) != "false"):
+        raise ReportError("J50 server profile must isolate Kerberos MiniKDC tests by JVM")
 
 
 def _validate_all(registered: dict[str, dict[str, object]]) -> None:

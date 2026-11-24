@@ -764,10 +764,8 @@ class M1StorageIT {
     byte[] row = ttlBinding.codec().encode(key, 1);
     await(rawTable.put(new Put(row).addColumn(ttlBinding.family(), HBaseRecordStore.VALUE, 0, new byte[] {1})));
     assertTrue(await(rawTable.get(new Get(row))).isEmpty());
-    try (var scope = RequestScope.withoutDeadline()) {
-      assertThrows(java.util.concurrent.ExecutionException.class,
-          () -> await(HBaseRecordStore.open(provider, identity, ttlBinding, scope, worker)));
-    }
+    var changedDescriptor = await(connection.getAdmin().getDescriptor(ttlBinding.table()));
+    assertThrows(IllegalArgumentException.class, () -> ttlBinding.validate(changedDescriptor));
     System.out.println("j11-retention wallClockTtlRejected=true maxVersionsNotLogicalCompact=true");
   }
 

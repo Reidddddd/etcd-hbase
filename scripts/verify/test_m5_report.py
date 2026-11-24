@@ -30,7 +30,8 @@ class M5ReportTest(unittest.TestCase):
         (self.registry / "J50.json").write_text(
             json.dumps(self.task, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self._write_profile("hbase", "**/HBaseAuthControlIT.java")
-        self._write_profile("server", "**/M5AuthProcessIT.java")
+        self._write_profile("server", "**/M5AuthProcessIT.java",
+                            "**/M5AuthenticateGatewayProcessIT.java")
         self._write_test_sources()
 
     def _write_test_sources(self) -> None:
@@ -44,12 +45,14 @@ class M5ReportTest(unittest.TestCase):
             declarations = "\n".join(f"  void {method}() {{}}" for method in sorted(methods))
             path.write_text(f"class TestSource {{\n{declarations}\n}}\n", encoding="utf-8")
 
-    def _write_profile(self, module: str, include: str) -> None:
+    def _write_profile(self, module: str, *includes: str) -> None:
+        include_xml = "\n".join(f"<include>{include}</include>" for include in includes)
         profile = f"""<project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
   <profiles><profile><id>m5-j50-public</id><build><plugins><plugin>
     <artifactId>maven-failsafe-plugin</artifactId><configuration>
-      <skipITs>false</skipITs><includes><include>{include}</include></includes>
+      <skipITs>false</skipITs><includes>{include_xml}</includes>
+      {"<reuseForks>false</reuseForks>" if module == "server" else ""}
     </configuration>
   </plugin></plugins></build></profile></profiles>
 </project>
@@ -103,7 +106,8 @@ class M5ReportTest(unittest.TestCase):
             for test in self.task["tests"] if test["kind"] == "surefire"
         })
         self.assertEqual(",".join(expected_surefire), surefire)
-        self.assertEqual("HBaseAuthControlIT,M5AuthProcessIT", failsafe)
+        self.assertEqual(
+            "HBaseAuthControlIT,M5AuthProcessIT,M5AuthenticateGatewayProcessIT", failsafe)
 
     def test_registry_rejects_duplicate_json_keys_and_unknown_tasks(self) -> None:
         path = self.registry / "J50.json"
@@ -146,6 +150,27 @@ class M5ReportTest(unittest.TestCase):
         with self.assertRaisesRegex(m5_report.ReportError,
                                     "J50 required test methods are missing: "
                                     "io.etcdhbase.server.commit.M5GatewayAuthenticationRpcTest"):
+            m5_report._validate_registry(self.registry)
+
+    def test_registry_requires_real_cross_process_authenticate_gateway_suite(self) -> None:
+        required_class = "io.etcdhbase.server.M5AuthenticateGatewayProcessIT"
+        self.task["tests"] = [entry for entry in self.task["tests"]
+                              if entry["class"] != required_class]
+        (self.registry / "J50.json").write_text(
+            json.dumps(self.task, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(m5_report.ReportError,
+                                    "J50 required test methods are missing: "
+                                    "io.etcdhbase.server.M5AuthenticateGatewayProcessIT"):
+            m5_report._validate_registry(self.registry)
+
+    def test_server_profile_isolates_temporary_kerberos_realms_by_jvm(self) -> None:
+        path = self.repo / "server/pom.xml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(content.replace("<reuseForks>false</reuseForks>", ""), encoding="utf-8")
+
+        with self.assertRaisesRegex(m5_report.ReportError,
+                                    "J50 server profile must isolate Kerberos MiniKDC tests by JVM"):
             m5_report._validate_registry(self.registry)
 
     def test_registry_rejects_missing_or_skippable_maven_profile(self) -> None:

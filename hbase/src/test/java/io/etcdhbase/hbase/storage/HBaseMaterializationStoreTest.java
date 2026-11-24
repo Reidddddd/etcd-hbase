@@ -1,17 +1,31 @@
 package io.etcdhbase.hbase.storage;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
+import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.request.RequestScope;
+import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.RowFenceMessages;
 import io.etcdhbase.hbase.codec.StorageMessages;
+import io.etcdhbase.spi.identity.AuthenticationScope;
+import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import io.etcdhbase.spi.salt.HashSaltStrategy;
 import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.AsyncAdmin;
+import org.apache.hadoop.hbase.client.AsyncConnection;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Result;
@@ -21,6 +35,41 @@ import org.junit.jupiter.api.Test;
 
 class HBaseMaterializationStoreTest {
   private static final String PLAN = "a".repeat(64);
+
+  @Test
+  void rejectsInvalidStorageDescriptorDuringTableGroupStartup() {
+    var salt = new HashSaltStrategy();
+    var system = new SystemTableBinding(TableName.valueOf("group_system"), new byte[] {'s'},
+        "group-a", "salt-a", salt);
+    var primary = new StorageTableBinding(TableName.valueOf("group_kv"), new byte[] {'d'},
+        StorageTableBinding.Layout.NATIVE, salt);
+    var identity = new AuthorizedBackendIdentity("provider", "subject", "context",
+        new AuthenticationScope("group-a", "profile-a"), Set.of("group-a"), 0);
+    var systemTable = ownedDescriptor(systemDescriptor(system, salt));
+    var primaryTable = ownedDescriptor(primary.descriptor());
+    var ttlFamily = ColumnFamilyDescriptorBuilder.newBuilder(
+        primaryTable.getColumnFamily(primary.family())).setTimeToLive(60).build();
+    var invalidPrimaryTable = TableDescriptorBuilder.newBuilder(primaryTable)
+        .modifyColumnFamily(ttlFamily).build();
+    var connection = mock(AsyncConnection.class);
+    var admin = mock(AsyncAdmin.class);
+    var factory = mock(HBaseConnectionFactory.class);
+    doReturn(CompletableFuture.completedFuture(connection)).when(factory).connectionFor(identity);
+    doReturn(admin).when(connection).getAdmin();
+    doReturn(CompletableFuture.completedFuture(systemTable)).when(admin).getDescriptor(system.table());
+    doReturn(CompletableFuture.completedFuture(invalidPrimaryTable))
+        .when(admin).getDescriptor(primary.table());
+
+    try (var scope = RequestScope.withoutDeadline()) {
+      var failure = assertThrows(CompletionException.class, () ->
+          HBaseMaterializationStore.openForTableGroup(factory, identity, system, primary,
+              Optional.empty(), scope).join());
+      var backendFailure = assertInstanceOf(BackendFailure.class, failure.getCause());
+      assertInstanceOf(IllegalArgumentException.class, backendFailure.getCause());
+      verify(admin).getDescriptor(system.table());
+      verify(admin).getDescriptor(primary.table());
+    }
+  }
 
   @Test
   void requiresSystemAndDataTablesToBelongToTheSameProvisionedGroup() {
