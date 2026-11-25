@@ -23,6 +23,11 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import org.apache.hadoop.hbase.client.Delete;
+import org.apache.hadoop.hbase.client.RowMutations;
+import io.etcdhbase.core.commit.RetirementTombstone;
+import io.etcdhbase.core.commit.SystemRecordRetirement;
+import io.etcdhbase.hbase.codec.SystemRecordRetirementMessages;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.client.AdvancedScanResultConsumer;
@@ -37,12 +42,14 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
 
 /** Strong-read, exact-CAS adapter for immutable system records; borrowed connections stay shared. */
-public final class HBaseSystemRecordStore implements SystemRecordStore {
+public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRecordRetirement {
   public static final int MAX_RECORD_BYTES = 9 * 1024 * 1024;
   public static final int MAX_EXPIRY_CHECKPOINT_SCAN_BYTES = 1 << 20;
   private static final int MAX_SCAN_ENTRIES = 1024;
   private static final long MAX_SCAN_BYTES = 8L << 20;
   private static final byte[] VALUE = {'r'};
+  /** Retirement tombstone; independent of VALUE so existing value-only reads stay exact. */
+  private static final byte[] TOMBSTONE = {'t'};
 
   private final AsyncConnection connection;
   private final SystemTableBinding binding;
@@ -117,8 +124,14 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     byte[] row = binding.row(type, identity);
     byte[] bytes = checkedValue(value);
     Put put = put(row, bytes);
-    return execute(scope, logicalMutationPayloadBytes(row, bytes.length), table -> table.checkAndMutate(
-        CheckAndMutate.newBuilder(row).ifNotExists(binding.family(), VALUE).build(put)))
+    // A retired identity keeps its tombstone cell, so an absent VALUE is not permission to
+    // recreate it. Retiring and creating must exclude each other on the same row.
+    var mutation = CheckAndMutate.newBuilder(row)
+        .ifNotExists(binding.family(), VALUE)
+        .ifNotExists(binding.family(), TOMBSTONE)
+        .build(put);
+    return execute(scope, logicalMutationPayloadBytes(row, bytes.length),
+        table -> table.checkAndMutate(mutation))
         .thenCompose(result -> result.isSuccess()
             ? CompletableFuture.completedFuture(CreateResult.CREATED)
             : read(type, identity, scope).thenApply(existing -> existing
@@ -144,7 +157,9 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     if (expected.isPresent()) {
       builder.ifEquals(binding.family(), VALUE, checkedValue(expected.orElseThrow()));
     } else {
+      // "Must not exist" includes retired identities: their tombstone blocks recreation.
       builder.ifNotExists(binding.family(), VALUE);
+      builder.ifNotExists(binding.family(), TOMBSTONE);
     }
     return execute(scope, payloadBytes, table -> table.checkAndMutate(builder.build(put(row, bytes))))
         .thenApply(result -> result.isSuccess());
@@ -486,6 +501,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
 
   static Optional<ByteKey> decode(Result result, byte[] family) {
     if (result.isEmpty()) return Optional.empty();
+    if (isRetired(result, family)) return Optional.empty();
     int expectedLength = validatedValueLength(result);
     // Check the already-decoded cell before getValue makes another potentially large copy.
     // This does not impose a bound on the HBase client's incoming RPC frame.
@@ -497,15 +513,114 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     return Optional.of(ByteKey.copyOf(bytes));
   }
 
+  /**
+   * A retired identity keeps only its tombstone cell. This must decide from the cell qualifier
+   * alone: calling getValue here would copy an oversized value before the size guard rejects it.
+   */
+  private static boolean isRetired(Result result, byte[] family) {
+    Cell[] cells = result.rawCells();
+    return cells != null && cells.length == 1
+        && CellUtil.matchingFamily(cells[0], family)
+        && CellUtil.matchingQualifier(cells[0], TOMBSTONE);
+  }
+
   private static int validatedValueLength(Result result) {
     Cell[] cells = result.rawCells();
     if (cells == null || cells.length != 1
         || !CellUtil.matchingQualifier(cells[0], VALUE)) {
+      if (cells != null && cells.length == 1 && CellUtil.matchingQualifier(cells[0], TOMBSTONE)) {
+        throw new IllegalArgumentException("retired system record has no value to decode");
+      }
       throw new IllegalArgumentException("system record contains an unexpected cell layout");
     }
     int length = cells[0].getValueLength();
     validateValueLength(length);
     return length;
+  }
+
+  /** The profile this store's table group is bound to; a permit must match it exactly. */
+  public ByteKey profileFingerprint() {
+    return binding.profileFingerprint();
+  }
+
+  @Override
+  public CompletableFuture<Optional<RetirementTombstone>> readTombstone(
+      SystemRecordType type, ByteKey identity, RequestScope scope) {
+    requireTypeSupported(type);
+    byte[] row = binding.row(type, identity);
+    return execute(scope, logicalReadPayloadBytes(row), table -> table.get(
+            new Get(row).setConsistency(Consistency.STRONG).addFamily(binding.family())))
+        .thenApply(result -> {
+          if (result.isEmpty()) return Optional.<RetirementTombstone>empty();
+          byte[] encoded = result.getValue(binding.family(), TOMBSTONE);
+          if (encoded == null) return Optional.<RetirementTombstone>empty();
+          RetirementTombstone tombstone = SystemRecordRetirementMessages.decode(encoded);
+          if (tombstone.type() != type || !tombstone.identity().equals(identity)) {
+            throw new IllegalArgumentException("retirement tombstone does not match its row");
+          }
+          return Optional.of(tombstone);
+        });
+  }
+
+  @Override
+  public CompletableFuture<Outcome> retire(SystemRecordType type, ByteKey identity, ByteKey expected,
+      Permit permit, Reason reason, RequestScope scope) {
+    requireTypeSupported(type);
+    Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(expected, "expected");
+    Objects.requireNonNull(permit, "permit");
+    Objects.requireNonNull(reason, "reason");
+    permit.requireUsable(binding.profileFingerprint(), scope);
+    byte[] row = binding.row(type, identity);
+    byte[] observed = checkedValue(expected);
+    var tombstone = new RetirementTombstone(type, identity, digestOf(observed),
+        permit.generation(), permit.operationId(), reason, permit.safeRevision(),
+        permit.safeSequence());
+    byte[] encodedTombstone = SystemRecordRetirementMessages.encode(tombstone);
+    var retirement = new RowMutations(row);
+    try {
+      retirement.add(new Put(row).setDurability(Durability.SYNC_WAL)
+          .addColumn(binding.family(), TOMBSTONE, encodedTombstone));
+      retirement.add(new Delete(row).setDurability(Durability.SYNC_WAL)
+          .addColumns(binding.family(), VALUE));
+    } catch (java.io.IOException failure) {
+      return CompletableFuture.failedFuture(failure);
+    }
+    var mutation = CheckAndMutate.newBuilder(row)
+        .ifEquals(binding.family(), VALUE, observed)
+        .ifNotExists(binding.family(), TOMBSTONE)
+        .build(retirement);
+    long payloadBytes = logicalMutationPayloadBytes(row,
+        Math.addExact(observed.length, encodedTombstone.length));
+    return execute(scope, payloadBytes, table -> table.checkAndMutate(mutation))
+        .thenCompose(updated -> updated.isSuccess()
+            ? CompletableFuture.completedFuture(new Outcome(true, false, 0))
+            : readTombstone(type, identity, scope).thenApply(existing -> {
+                if (existing.isPresent()) {
+                  requireSameRetirement(existing.orElseThrow(), tombstone);
+                  return new Outcome(false, true, 0);
+                }
+                throw new CompletionException(
+                    new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+              }));
+  }
+
+  private static void requireSameRetirement(RetirementTombstone stored,
+      RetirementTombstone proposed) {
+    if (stored.type() != proposed.type() || !stored.identity().equals(proposed.identity())
+        || !stored.retiredValueDigest().equals(proposed.retiredValueDigest())
+        || stored.maintenanceGeneration() != proposed.maintenanceGeneration()
+        || !stored.operationId().equals(proposed.operationId())) {
+      throw new IllegalArgumentException("retirement tombstone conflicts with the stored value");
+    }
+  }
+
+  private static ByteKey digestOf(byte[] value) {
+    try {
+      return ByteKey.copyOf(java.security.MessageDigest.getInstance("SHA-256").digest(value));
+    } catch (java.security.NoSuchAlgorithmException unavailable) {
+      throw new IllegalStateException("SHA-256 is unavailable", unavailable);
+    }
   }
 
   private Put put(byte[] row, byte[] value) {

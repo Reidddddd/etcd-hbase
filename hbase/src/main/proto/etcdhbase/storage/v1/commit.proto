@@ -452,3 +452,16 @@ message RowFence {
   optional int64 owner_epoch = 9;
   optional int64 base_sequence = 10;
 }
+
+// Durable replacement for one retired system record (§6.3 of the M5 design).
+message SystemRecordRetirement {
+  optional uint32 format_version = 1;
+  optional uint32 record_type = 2;
+  optional bytes identity = 3;
+  optional bytes retired_value_digest = 4;
+  optional int64 maintenance_generation = 5;
+  optional bytes operation_id = 6;
+  optional string reason = 7;
+  optional int64 retired_revision = 8;
+  optional int64 retired_sequence = 9;
+}
