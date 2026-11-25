@@ -19,13 +19,34 @@
     "NATIVE"
   ],
   "scenarios": [
-    "logical-selection-and-unknown-outcome",
-    "independent-pin-floors",
     "exact-kv-version-delete-and-baseline-retention",
+    "independent-pin-floors",
     "late-materializer-new-write-and-cancellation",
-    "native-v3.5.23-compact-range-watch-oracle"
+    "logical-selection-and-unknown-outcome",
+    "native-v3.5.23-compact-range-watch-oracle",
+    "owner-lane-compact-rpc-and-physical-boundary"
   ],
   "tests": [
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.CommitStateTest",
+      "methods": [
+        "auxiliaryUpgradeFencesOldEpochAndPreservesWatermarks",
+        "leaseBindingUpgradeFencesTheAuxiliaryOwnerBeforeChangingCapabilities",
+        "leaseExpiryUpgradeFencesBindingWritersBeforeEnablingCheckpointProgress",
+        "eventIndexUpgradeFencesOldOwnerAndRejectsPendingOrExpiredWork",
+        "eventRegistrySelectionFencesOldOwnerAndSurvivesControlUpdates",
+        "authorizationBarrierIsIndependentOfControlFormatAndPreservesOwnerFence",
+        "authorizationBarrierAdvancesMonotonicallyWithoutReplacingSelectedPublication",
+        "authorizationBarrierRestoreRejectsNegativeAndOverflowDoesNotWrap",
+        "eventRegistryAttemptsAreDurablyBounded",
+        "metadataOnlyPublicationDoesNotAdvanceRevisionAndKeyChangesAdvanceItOnce",
+        "ownerEpochFencesOldOwnersAndExpiredLeaseCanBeClaimed",
+        "restoreRejectsBrokenOwnerWatermarkAndPublicationInvariants",
+        "counterAndRevisionExhaustionFailsWithoutWrapping"
+      ]
+    },
     {
       "module": "core",
       "kind": "surefire",
@@ -46,81 +67,33 @@
     {
       "module": "core",
       "kind": "surefire",
-      "class": "io.etcdhbase.core.commit.GcCoordinatorTest",
+      "class": "io.etcdhbase.core.commit.EventIndexBackfillMaterializerTest",
       "methods": [
-        "requiresConfirmedLogicalOperationAndBothIndependentPinFloors",
-        "staleOwnerCannotObtainDeletionPermissionEvenAfterLogicalSelection"
-      ]
-    },
-    {
-      "module": "hbase",
-      "kind": "surefire",
-      "class": "io.etcdhbase.hbase.codec.CommitControlMessagesTest",
-      "methods": [
-        "auxiliaryControlFormatRoundTripsWithoutChangingLegacyBytes",
-        "compactIdentitySurvivesOwnerPublicationAndAuthorizationUpdates",
-        "initialAndPendingPublicationStatesRoundTrip",
-        "authorizationBarrierPresenceIsIndependentOfControlFormatAndEventRegistry",
-        "missingRequiredFieldsAndCorruptNestedValuesAreRejected",
-        "manifestRootAcceptsItsMaximumAndRejectsTheNextByte",
-        "decoderRejectsControlMessagesAboveTheByteLimit"
-      ]
-    },
-    {
-      "module": "hbase",
-      "kind": "surefire",
-      "class": "io.etcdhbase.hbase.storage.SystemTableBindingTest",
-      "methods": [
-        "acceptsTheExactDurableSingleVersionSystemTable",
-        "resultCapabilityIsExplicitAndDoesNotChangeLegacyValidation",
-        "compactRecordsRequireExplicitDescriptorCapability",
-        "rejectsTableFamilyProfileCategoryAndDurabilityMismatches",
-        "rejectsExpiringOrMultiVersionFamilies",
-        "rejectsDifferentRoutingParametersWithTheSameProfileId"
-      ]
-    },
-    {
-      "module": "hbase",
-      "kind": "surefire",
-      "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordStoreScanTest",
-      "methods": [
-        "cancelledScanRetainsPhysicalOwnershipUntilHBaseSignalsCompletion",
-        "rejectsCompactRecordsBeforeTouchingAnUndeclaredTable",
-        "rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable",
-        "rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent",
-        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent"
-      ]
-    },
-    {
-      "module": "hbase",
-      "kind": "failsafe",
-      "class": "io.etcdhbase.hbase.storage.J52HistoryCollectionIT",
-      "methods": [
-        "preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts",
-        "resolvesLostDeleteAcknowledgementAndReplansWhenANewerNativeWriteWins",
-        "cancellationRetainsPhysicalProducerUntilLateDeleteDrains",
-        "rejectsPermissionFromAnotherPinRegistryBeforeDeletingData",
-        "rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization"
+        "initialPreflightAcceptsNewerFinalizedSequencesOutsideCapturedLegacyWindow",
+        "initialPreflightStillRejectsOwnerCompactAndCapturedUpperChanges"
       ]
     },
     {
       "module": "core",
       "kind": "surefire",
-      "class": "io.etcdhbase.core.commit.CommitStateTest",
+      "class": "io.etcdhbase.core.commit.EventIndexMaterializerTest",
       "methods": [
-        "auxiliaryUpgradeFencesOldEpochAndPreservesWatermarks",
-        "leaseBindingUpgradeFencesTheAuxiliaryOwnerBeforeChangingCapabilities",
-        "leaseExpiryUpgradeFencesBindingWritersBeforeEnablingCheckpointProgress",
-        "eventIndexUpgradeFencesOldOwnerAndRejectsPendingOrExpiredWork",
-        "eventRegistrySelectionFencesOldOwnerAndSurvivesControlUpdates",
-        "authorizationBarrierIsIndependentOfControlFormatAndPreservesOwnerFence",
-        "authorizationBarrierAdvancesMonotonicallyWithoutReplacingSelectedPublication",
-        "authorizationBarrierRestoreRejectsNegativeAndOverflowDoesNotWrap",
-        "eventRegistryAttemptsAreDurablyBounded",
-        "metadataOnlyPublicationDoesNotAdvanceRevisionAndKeyChangesAdvanceItOnce",
-        "ownerEpochFencesOldOwnersAndExpiredLeaseCanBeClaimed",
-        "restoreRejectsBrokenOwnerWatermarkAndPublicationInvariants",
-        "counterAndRevisionExhaustionFailsWithoutWrapping"
+        "initialCheckpointMustCaptureTheCurrentFinalizedBarrier",
+        "initialCheckpointCannotSkipOrInventRetainedDecisionBoundaries",
+        "backfillVerifiesLegacyDecisionBeforeSelectionAndRecoversIndexAfterSelection",
+        "failedIndexWriteCannotMaterializeCheckpointAndSelectedRecoveryRetries",
+        "persistsSelectedIndexAndReplaysIdentically",
+        "resolvesUnknownWriteFromDurableValueAndRejectsConflicts",
+        "metadataOnlyDoesNotCreateAnIndex"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.GcCoordinatorTest",
+      "methods": [
+        "requiresConfirmedLogicalOperationAndBothIndependentPinFloors",
+        "staleOwnerCannotObtainDeletionPermissionEvenAfterLogicalSelection"
       ]
     },
     {
@@ -163,46 +136,17 @@
       ]
     },
     {
-      "module": "core",
-      "kind": "surefire",
-      "class": "io.etcdhbase.core.commit.EventIndexMaterializerTest",
-      "methods": [
-        "initialCheckpointMustCaptureTheCurrentFinalizedBarrier",
-        "initialCheckpointCannotSkipOrInventRetainedDecisionBoundaries",
-        "backfillVerifiesLegacyDecisionBeforeSelectionAndRecoversIndexAfterSelection",
-        "failedIndexWriteCannotMaterializeCheckpointAndSelectedRecoveryRetries",
-        "persistsSelectedIndexAndReplaysIdentically",
-        "resolvesUnknownWriteFromDurableValueAndRejectsConflicts",
-        "metadataOnlyDoesNotCreateAnIndex"
-      ]
-    },
-    {
-      "module": "core",
-      "kind": "surefire",
-      "class": "io.etcdhbase.core.commit.EventIndexBackfillMaterializerTest",
-      "methods": [
-        "initialPreflightAcceptsNewerFinalizedSequencesOutsideCapturedLegacyWindow",
-        "initialPreflightStillRejectsOwnerCompactAndCapturedUpperChanges"
-      ]
-    },
-    {
       "module": "hbase",
       "kind": "surefire",
-      "class": "io.etcdhbase.hbase.storage.HBaseMaterializationStoreTest",
+      "class": "io.etcdhbase.hbase.codec.CommitControlMessagesTest",
       "methods": [
-        "rejectsInvalidStorageDescriptorDuringTableGroupStartup",
-        "requiresSystemAndDataTablesToBelongToTheSameProvisionedGroup",
-        "requiresTheCurrentTableToBelongToTheHistoryGroup",
-        "rejectsOversizedUnknownQualifierBeforeAccessingItsBackingArray",
-        "rejectsOversizedCellsBeforeAccessingTheirBackingArrays"
-      ]
-    },
-    {
-      "module": "hbase",
-      "kind": "surefire",
-      "class": "io.etcdhbase.hbase.storage.HBaseCommitControlStoreTest",
-      "methods": [
-        "authorizationBarrierTransitionIsIndependentOfEventRegistryFormat"
+        "auxiliaryControlFormatRoundTripsWithoutChangingLegacyBytes",
+        "compactIdentitySurvivesOwnerPublicationAndAuthorizationUpdates",
+        "initialAndPendingPublicationStatesRoundTrip",
+        "authorizationBarrierPresenceIsIndependentOfControlFormatAndEventRegistry",
+        "missingRequiredFieldsAndCorruptNestedValuesAreRejected",
+        "manifestRootAcceptsItsMaximumAndRejectsTheNextByte",
+        "decoderRejectsControlMessagesAboveTheByteLimit"
       ]
     },
     {
@@ -221,6 +165,79 @@
         "candidateRowsReuseTheKvOrderedKeyBytesWithoutChangingEscapeFormat",
         "kvRowsContinueToAllowAnEmptyLogicalKey",
         "rejectsUnknownTypesInvalidSaltAndMalformedLengths"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseCommitControlStoreTest",
+      "methods": [
+        "authorizationBarrierTransitionIsIndependentOfEventRegistryFormat"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseMaterializationStoreTest",
+      "methods": [
+        "rejectsInvalidStorageDescriptorDuringTableGroupStartup",
+        "requiresSystemAndDataTablesToBelongToTheSameProvisionedGroup",
+        "requiresTheCurrentTableToBelongToTheHistoryGroup",
+        "rejectsOversizedUnknownQualifierBeforeAccessingItsBackingArray",
+        "rejectsOversizedCellsBeforeAccessingTheirBackingArrays"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordStoreScanTest",
+      "methods": [
+        "cancelledScanRetainsPhysicalOwnershipUntilHBaseSignalsCompletion",
+        "rejectsCompactRecordsBeforeTouchingAnUndeclaredTable",
+        "rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable",
+        "rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent",
+        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.hbase.storage.J52HistoryCollectionIT",
+      "methods": [
+        "preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts",
+        "resolvesLostDeleteAcknowledgementAndReplansWhenANewerNativeWriteWins",
+        "cancellationRetainsPhysicalProducerUntilLateDeleteDrains",
+        "rejectsPermissionFromAnotherPinRegistryBeforeDeletingData",
+        "rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.SystemTableBindingTest",
+      "methods": [
+        "acceptsTheExactDurableSingleVersionSystemTable",
+        "resultCapabilityIsExplicitAndDoesNotChangeLegacyValidation",
+        "compactRecordsRequireExplicitDescriptorCapability",
+        "rejectsTableFamilyProfileCategoryAndDurabilityMismatches",
+        "rejectsExpiringOrMultiVersionFamilies",
+        "rejectsDifferentRoutingParametersWithTheSameProfileId"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.CompactGatewayTest",
+      "methods": [
+        "logicalSelectionReturnsTheResponseRevisionAndItsServingHeader",
+        "physicalCompactWaitsForItsOwnBoundedHistoryDeletion",
+        "physicalCompactReportsFailureWhenHistoryDeletionFails",
+        "physicalCompactFailsClosedWhenNoHistoryCollectorIsWired",
+        "logicalCompactStillSucceedsWithoutAHistoryCollector",
+        "repeatedCompactIsReportedAsCompactedRatherThanSucceeding",
+        "futureCompactIsRejectedWithoutAdvancingTheBoundary",
+        "missingOwnerFailsClosedWithoutAttemptingAControlWrite",
+        "cancelledRequestDoesNotSendAResponse"
       ]
     }
   ]

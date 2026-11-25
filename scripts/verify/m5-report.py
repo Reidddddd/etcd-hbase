@@ -448,6 +448,16 @@ J52_REQUIRED_TESTS = {
         'rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization',
         'resolvesLostDeleteAcknowledgementAndReplansWhenANewerNativeWriteWins',
     },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.CompactGatewayTest'): {
+        'logicalSelectionReturnsTheResponseRevisionAndItsServingHeader',
+        'physicalCompactWaitsForItsOwnBoundedHistoryDeletion',
+        'physicalCompactFailsClosedWhenNoHistoryCollectorIsWired',
+        'logicalCompactStillSucceedsWithoutAHistoryCollector',
+        'repeatedCompactIsReportedAsCompactedRatherThanSucceeding',
+        'futureCompactIsRejectedWithoutAdvancingTheBoundary',
+        'missingOwnerFailsClosedWithoutAttemptingAControlWrite',
+        'cancelledRequestDoesNotSendAResponse',
+    },
 }
 
 
@@ -458,6 +468,7 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "logical-selection-and-unknown-outcome", "independent-pin-floors",
         "exact-kv-version-delete-and-baseline-retention", "late-materializer-new-write-and-cancellation",
         "native-v3.5.23-compact-range-watch-oracle",
+        "owner-lane-compact-rpc-and-physical-boundary",
     }
     scenarios = task.get("scenarios", [])
     if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)
@@ -466,7 +477,7 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
     if task.get("maven_profiles") != [{"module": "hbase", "id": "m5-j52-public"}]:
         raise ReportError("J52 must execute its real storage integration profile")
     _validate_maven_profile(repo, "hbase", "m5-j52-public")
-    _validate_suites(task, repo, "J52", J52_REQUIRED_TESTS, {"core", "hbase"})
+    _validate_suites(task, repo, "J52", J52_REQUIRED_TESTS, {"core", "hbase", "server"})
 
 
 def _verify_j52_oracle(commands: list[dict[str, object]], artifact_root: Path) -> None:
