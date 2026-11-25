@@ -51,10 +51,13 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
   private final boolean leaseBindingsSupported;
   private final boolean leaseExpiryCheckpointsSupported;
   private final boolean eventRevisionIndexSupported;
+  private final boolean compactionSupported;
 
   HBaseSystemRecordStore(AsyncConnection connection, SystemTableBinding binding,
       boolean resultsSupported, boolean auxiliarySupported, boolean leaseBindingsSupported,
-      boolean leaseExpiryCheckpointsSupported, boolean eventRevisionIndexSupported) {
+      boolean leaseExpiryCheckpointsSupported, boolean eventRevisionIndexSupported,
+      boolean compactionSupported) {
+    this.compactionSupported = compactionSupported;
     this.connection = connection;
     this.binding = binding;
     this.resultsSupported = resultsSupported;
@@ -92,7 +95,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
                   binding.supportsLeaseExpiryCheckpoints(descriptor);
               return new HBaseSystemRecordStore(connection, binding, supportsResults,
                   supportsAuxiliary, supportsLeaseBindings, supportsLeaseExpiryCheckpoints,
-                  binding.supportsEventRevisionIndex(descriptor));
+                  binding.supportsEventRevisionIndex(descriptor), binding.supportsCompaction(descriptor));
             })).exceptionallyCompose(failure -> CompletableFuture.failedFuture(
                 HBaseFailures.classify(failure)));
   }
@@ -551,6 +554,9 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
 
   private void requireTypeSupported(SystemRecordType type) {
     Objects.requireNonNull(type, "type");
+    if (type == SystemRecordType.COMPACTION && !compactionSupported) {
+      throw new IllegalStateException("system table does not declare J52 Compact capability");
+    }
     // RESULT marks the M3 system-record capability, including its private workset pages.
     if ((type == SystemRecordType.RESULT || type == SystemRecordType.TABLE_GROUP_IDENTITY
         || type == SystemRecordType.WORKSET)

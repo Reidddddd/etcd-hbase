@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -343,9 +345,9 @@ class J51RegistryTest(unittest.TestCase):
         self.path = self.repo / "testkit/cases/m5/J51.json"
         self.task = json.loads(self.path.read_text(encoding="utf-8"))
 
-    def test_j50_and_j51_registry_validate_together(self) -> None:
+    def test_registered_m5_storage_and_auth_tasks_validate_together(self) -> None:
         registered = m5_report._validate_registry()
-        self.assertEqual({"J50", "J51"}, set(registered))
+        self.assertEqual({"J50", "J51", "J52"}, set(registered))
         surefire, failsafe = m5_report._maven_selectors(registered["J51"])
         self.assertIn("CommitPublisherTest", surefire.split(","))
         self.assertEqual("", failsafe)
@@ -371,6 +373,80 @@ class J51RegistryTest(unittest.TestCase):
                 task["tests"][0][key] = []
                 with self.assertRaisesRegex(m5_report.ReportError, "invalid module, class, kind"):
                     m5_report._validate_task(task, self.path, self.repo)
+
+
+class M5J52ReportTest(unittest.TestCase):
+    def test_source_snapshot_preserves_the_first_porcelain_status_column(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            commands = [
+                ["init", "--quiet"],
+                ["config", "user.name", "Test Author"],
+                ["config", "user.email", "author@example.invalid"],
+            ]
+            for arguments in commands:
+                subprocess.run(["git", "-C", str(repo), *arguments], check=True, capture_output=True)
+            workflow = repo / ".github/workflows/m5.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("before\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "--quiet", "-m", "fixture"],
+                           check=True, capture_output=True)
+            workflow.write_text("after\n", encoding="utf-8")
+            snapshot = m5_report._source_snapshot(repo)
+            self.assertFalse(snapshot["working_tree_clean"])
+            self.assertEqual([{"path": ".github/workflows/m5.yml",
+                               "sha256": hashlib.sha256(workflow.read_bytes()).hexdigest()}],
+                             snapshot["changed_files"])
+
+    def test_native_oracle_requires_each_boundary_and_rejects_skip_or_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "oracle.jsonl"
+            command = [{"name": "native-oracle", "exit_code": 0, "stdout": log.name}]
+            required = ["TestM5CompactPinnedNativeBoundaries"] + [
+                f"TestM5CompactPinnedNativeBoundaries/watch/{revision}" for revision in (3, 4, 5, 0, -1)
+            ]
+            events = [{"Action": "pass", "Test": name} for name in required]
+            log.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+            m5_report._verify_j52_oracle(command, root)
+            for invalid in (events[:-1], events + [{"Action": "skip"}], events + [{"Action": "fail"}]):
+                with self.subTest(events=invalid):
+                    log.write_text("\n".join(json.dumps(event) for event in invalid), encoding="utf-8")
+                    with self.assertRaises(m5_report.ReportError):
+                        m5_report._verify_j52_oracle(command, root)
+            with self.assertRaises(m5_report.ReportError):
+                m5_report._verify_j52_oracle([], root)
+
+    def test_storage_registry_cannot_omit_cancellation_or_either_layout(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        task = json.loads(path.read_text(encoding="utf-8"))
+        m5_report._validate_task(task, path, repo)
+        task["layouts"] = ["HISTORY"]
+        with self.assertRaises(m5_report.ReportError):
+            m5_report._validate_task(task, path, repo)
+        task = json.loads(path.read_text(encoding="utf-8"))
+        suite = next(test for test in task["tests"] if test["class"].endswith("J52HistoryCollectionIT"))
+        suite["methods"].remove("cancellationRetainsPhysicalProducerUntilLateDeleteDrains")
+        with self.assertRaises(m5_report.ReportError):
+            m5_report._validate_task(task, path, repo)
+
+    def test_storage_profile_cannot_skip_or_omit_the_real_integration_suite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            pom = repo / "hbase/pom.xml"
+            pom.parent.mkdir(parents=True)
+            original = (Path(__file__).parents[2] / "hbase/pom.xml").read_text(encoding="utf-8")
+            pom.write_text(original, encoding="utf-8")
+            m5_report._validate_maven_profile(repo, "hbase", "m5-j52-public")
+            for invalid in (
+                    original.replace("<skipITs>false</skipITs>", "<skipITs>true</skipITs>"),
+                    original.replace("**/J52HistoryCollectionIT.java", "**/MissingIT.java")):
+                with self.subTest(profile=invalid):
+                    pom.write_text(invalid, encoding="utf-8")
+                    with self.assertRaises(m5_report.ReportError):
+                        m5_report._validate_maven_profile(repo, "hbase", "m5-j52-public")
 
 
 if __name__ == "__main__":

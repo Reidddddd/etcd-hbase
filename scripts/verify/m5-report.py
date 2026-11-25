@@ -320,7 +320,8 @@ def _validate_task(task: dict[str, object], path: Path, repo: Path) -> None:
         raise ReportError(f"task fields are missing or unknown in {path.name}")
     task_id = _legal_task(task.get("task"))
     if (task.get("schema") != TASK_SCHEMA or task.get("status") != "executable"
-            or task.get("scope") != "public" or task.get("maven_reactor") != "server"):
+            or task.get("scope") != "public"
+            or task.get("maven_reactor") != ("hbase" if task_id == "J52" else "server")):
         raise ReportError(f"task metadata is invalid in {path.name}")
     profile = task.get("execution_profile")
     if not isinstance(profile, str) or profile != f"m5-{task_id.lower()}-public":
@@ -329,6 +330,8 @@ def _validate_task(task: dict[str, object], path: Path, repo: Path) -> None:
         _validate_j50(task, path, repo)
     elif task_id == "J51":
         _validate_j51(task, repo)
+    elif task_id == "J52":
+        _validate_j52(task, repo)
     else:
         raise ReportError(f"registered task lacks an implemented verifier contract: {task_id}")
 
@@ -371,6 +374,120 @@ def _validate_j51(task: dict[str, object], repo: Path) -> None:
     if task.get("maven_profiles") != []:
         raise ReportError("J51 mock gate must not require a real-cluster Maven profile")
     _validate_suites(task, repo, "J51", J51_REQUIRED_TESTS, {"core", "hbase", "server"})
+
+
+J52_REQUIRED_TESTS = {
+    ("core", "surefire", "io.etcdhbase.core.commit.CommitStateTest"): {
+        "authorizationBarrierAdvancesMonotonicallyWithoutReplacingSelectedPublication",
+        "ownerEpochFencesOldOwnersAndExpiredLeaseCanBeClaimed",
+    },
+    ("core", "surefire", "io.etcdhbase.core.commit.SnapshotPinManagerTest"): {
+        "durableFloorsProtectExistingViewsAndRejectNewOlderViews",
+        "registrationRacesFloorAdvanceOnTheSameShardCas",
+        "completionCasLosingToDurableRevocationCannotReportSuccess",
+    },
+    ("core", "surefire", "io.etcdhbase.core.commit.EventIndexMaterializerTest"): {
+        "persistsSelectedIndexAndReplaysIdentically",
+    },
+    ("core", "surefire", "io.etcdhbase.core.commit.EventIndexBackfillMaterializerTest"): {
+        "initialPreflightStillRejectsOwnerCompactAndCapturedUpperChanges",
+    },
+    ("hbase", "surefire", "io.etcdhbase.hbase.storage.HBaseMaterializationStoreTest"): {
+        "requiresSystemAndDataTablesToBelongToTheSameProvisionedGroup",
+    },
+    ("hbase", "surefire", "io.etcdhbase.hbase.storage.HBaseCommitControlStoreTest"): {
+        "authorizationBarrierTransitionIsIndependentOfEventRegistryFormat",
+    },
+    ("hbase", "surefire", "io.etcdhbase.hbase.codec.SystemRecordKeyCodecTest"): {
+        "binaryIdentityRoundTripsForEveryRecordDomain",
+    },
+    ('core', 'surefire', 'io.etcdhbase.core.commit.CompactionServiceTest'): {
+        'authorizationBarrierRaceRevalidatesAndUsesExactFullState',
+        'matchesNativeZeroRepeatedFutureAndNegativeBoundariesWithoutKvCommit',
+        'ownerTakeoverAndInvocationConflictCannotSelectAPreparedOperation',
+        'permissionFailureIsNotHiddenByReadbackAndCancellationStopsNewSelection',
+        'persistsPreviousSelectionBeforeReplacingItsControlIdentity',
+        'recoversUnknownCreateControlAndOperationAcknowledgements',
+        'refreshesResponseBarrierAfterConcurrentControlChange',
+        'strictRecordCodecRejectsMalformedAndUnknownStages',
+        'refusesLegacyControlBeforeCreatingAnOperationWithoutAnAuthorizationBarrier',
+        'unknownCasBeforeWriteDoesNotBecomeSuccessFromAHigherUnrelatedCompact',
+    },
+    ('core', 'surefire', 'io.etcdhbase.core.commit.GcCoordinatorTest'): {
+        'requiresConfirmedLogicalOperationAndBothIndependentPinFloors',
+        'staleOwnerCannotObtainDeletionPermissionEvenAfterLogicalSelection',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.codec.CommitControlMessagesTest'): {
+        'authorizationBarrierPresenceIsIndependentOfControlFormatAndEventRegistry',
+        'auxiliaryControlFormatRoundTripsWithoutChangingLegacyBytes',
+        'compactIdentitySurvivesOwnerPublicationAndAuthorizationUpdates',
+        'decoderRejectsControlMessagesAboveTheByteLimit',
+        'initialAndPendingPublicationStatesRoundTrip',
+        'manifestRootAcceptsItsMaximumAndRejectsTheNextByte',
+        'missingRequiredFieldsAndCorruptNestedValuesAreRejected',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.SystemTableBindingTest'): {
+        'acceptsTheExactDurableSingleVersionSystemTable',
+        'compactRecordsRequireExplicitDescriptorCapability',
+        'rejectsDifferentRoutingParametersWithTheSameProfileId',
+        'rejectsExpiringOrMultiVersionFamilies',
+        'rejectsTableFamilyProfileCategoryAndDurabilityMismatches',
+        'resultCapabilityIsExplicitAndDoesNotChangeLegacyValidation',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.HBaseSystemRecordStoreScanTest'): {
+        'cancelledScanRetainsPhysicalOwnershipUntilHBaseSignalsCompletion',
+        'rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable',
+        'rejectsCompactRecordsBeforeTouchingAnUndeclaredTable',
+        'rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent',
+        'rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent',
+    },
+    ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.J52HistoryCollectionIT'): {
+        'cancellationRetainsPhysicalProducerUntilLateDeleteDrains',
+        'preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts',
+        'rejectsPermissionFromAnotherPinRegistryBeforeDeletingData',
+        'rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization',
+        'resolvesLostDeleteAcknowledgementAndReplansWhenANewerNativeWriteWins',
+    },
+}
+
+
+def _validate_j52(task: dict[str, object], repo: Path) -> None:
+    if task.get("backend_adapters") != ["minicluster-simple"] or task.get("layouts") != ["HISTORY", "NATIVE"]:
+        raise ReportError("J52 storage gate must cover both real MiniCluster layouts")
+    expected_scenarios = {
+        "logical-selection-and-unknown-outcome", "independent-pin-floors",
+        "exact-kv-version-delete-and-baseline-retention", "late-materializer-new-write-and-cancellation",
+        "native-v3.5.23-compact-range-watch-oracle",
+    }
+    scenarios = task.get("scenarios", [])
+    if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)
+            or len(scenarios) != len(set(scenarios)) or set(scenarios) != expected_scenarios):
+        raise ReportError("J52 storage scenarios are incomplete")
+    if task.get("maven_profiles") != [{"module": "hbase", "id": "m5-j52-public"}]:
+        raise ReportError("J52 must execute its real storage integration profile")
+    _validate_maven_profile(repo, "hbase", "m5-j52-public")
+    _validate_suites(task, repo, "J52", J52_REQUIRED_TESTS, {"core", "hbase"})
+
+
+def _verify_j52_oracle(commands: list[dict[str, object]], artifact_root: Path) -> None:
+    oracle = [entry for entry in commands if entry.get("name") == "native-oracle"]
+    if len(oracle) != 1 or oracle[0].get("exit_code") != 0:
+        raise ReportError("J52 requires a successful native oracle command")
+    path = artifact_root / str(oracle[0].get("stdout"))
+    if path.is_symlink() or not path.is_file():
+        raise ReportError("J52 native oracle report is missing")
+    try:
+        events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (ValueError, UnicodeError) as error:
+        raise ReportError("J52 native oracle report is invalid") from error
+    if any(not isinstance(event, dict) for event in events):
+        raise ReportError("J52 native oracle events must be objects")
+    expected = {"TestM5CompactPinnedNativeBoundaries"} | {
+        f"TestM5CompactPinnedNativeBoundaries/watch/{revision}" for revision in (3, 4, 5, 0, -1)
+    }
+    passed = {event.get("Test") for event in events if event.get("Action") == "pass"}
+    if not expected.issubset(passed) or any(event.get("Action") in {"skip", "fail"} for event in events):
+        raise ReportError("J52 native oracle tests are missing, failed or skipped")
 
 
 def _validate_suites(task: dict[str, object], repo: Path, task_id: str,
@@ -443,6 +560,7 @@ def _validate_maven_profile(repo: Path, module: str, profile_id: str) -> None:
         ("m5-j50-public", "hbase"): {"**/HBaseAuthControlIT.java"},
         ("m5-j50-public", "server"): {"**/M5AuthProcessIT.java", "**/M5AuthenticateGatewayProcessIT.java"},
         ("m5-j51-public", "server"): {"**/M5AuthenticateGatewayProcessIT.java"},
+        ("m5-j52-public", "hbase"): {"**/J52HistoryCollectionIT.java"},
     }.get((profile_id, module), set())
     if not required.issubset(includes):
         raise ReportError(f"execution profile does not include required IT: {module}/{profile_id}")
@@ -476,7 +594,7 @@ def _git(repo: Path, *arguments: str) -> str:
                                check=False, capture_output=True, text=True)
     if completed.returncode != 0:
         raise ReportError("could not capture source control metadata")
-    return completed.stdout.strip()
+    return completed.stdout.rstrip("\n")
 
 
 def _source_snapshot(repo: Path) -> dict[str, object]:
@@ -526,6 +644,13 @@ def init_run(repo: Path, task_id: str, scope: str, artifact_root: Path) -> None:
         raise ReportError("M5 run scope must be public")
     if artifact_root.is_symlink() or not artifact_root.is_dir() or any(artifact_root.iterdir()):
         raise ReportError("M5 run requires a new empty artifact directory")
+    if task_id == "J52":
+        for entry in task["tests"]:
+            report = (repo / entry["module"] / "target" / f"{entry['kind']}-reports"
+                      / f"TEST-{entry['class']}.xml")
+            if report.is_symlink():
+                raise ReportError("J52 selected report must not be a symbolic link")
+            report.unlink(missing_ok=True)
     registry_path = repo / "testkit/cases/m5" / f"{task_id}.json"
     profiles = task["maven_profiles"]
     run = {
@@ -553,12 +678,19 @@ def init_run(repo: Path, task_id: str, scope: str, artifact_root: Path) -> None:
             "target-environment clock, ACL and Lease acceptance",
             "real cross-process cache invalidation and target-environment acceptance",
         ]
+    if task_id == "J52":
+        run["unverified"] = [
+            "Compact RPC owner routing, real management authorization and background assembly",
+            "physical=true durable completion, timeout continuation and restart recovery",
+            "event/index/manifest/decision/result closure and result-window protection",
+            "target-environment acceptance and HFile space reclamation",
+        ]
     _write_json(artifact_root / "run.json", run)
 
 
 def record_command(run_file: Path, name: str, exit_code: int,
                    started_at: str, finished_at: str, stdout: str, stderr: str) -> None:
-    if name not in COMMANDS:
+    if name not in COMMANDS | {"native-oracle"}:
         raise ReportError(f"unknown M5 verification command: {name}")
     run = _read_json(run_file)
     if run.get("schema") != RUN_SCHEMA or run.get("status") != "running":
@@ -617,6 +749,8 @@ def verify_reports(repo: Path, task_id: str, artifact_root: Path) -> None:
     maven_commands = [entry for entry in commands if entry.get("name") == "maven-verify"]
     if len(maven_commands) != 1 or maven_commands[0].get("exit_code") != 0:
         raise ReportError("M5 test reports cannot be accepted without a successful Maven command")
+    if task_id == "J52":
+        _verify_j52_oracle(commands, artifact_root)
     reports_root = artifact_root / "reports"
     if reports_root.exists():
         raise ReportError("M5 reports directory already exists; refusing to reuse old report files")
@@ -664,7 +798,8 @@ def finalize_run(run_file: Path, exit_code: int) -> None:
         raise ReportError("M5 run command ledger is invalid")
     present = {entry.get("name") for entry in commands}
     failed = [entry.get("name") for entry in commands if entry.get("exit_code") != 0]
-    missing = sorted(COMMANDS - present)
+    required_commands = COMMANDS | ({"native-oracle"} if run.get("task") == "J52" else set())
+    missing = sorted(required_commands - present)
     counts = run.get("test_counts")
     report_counts_valid = (
         isinstance(counts, dict)

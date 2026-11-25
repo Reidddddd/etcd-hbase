@@ -35,10 +35,13 @@ public final class HBaseCommitControlStore implements CommitControlStore {
   private final boolean leaseBindingsSupported;
   private final boolean leaseExpiryCheckpointsSupported;
   private final boolean eventRevisionIndexSupported;
+  private final boolean compactionSupported;
 
   private HBaseCommitControlStore(AsyncConnection connection, SystemTableBinding binding,
       boolean auxiliarySupported, boolean leaseBindingsSupported,
-      boolean leaseExpiryCheckpointsSupported, boolean eventRevisionIndexSupported) {
+      boolean leaseExpiryCheckpointsSupported, boolean eventRevisionIndexSupported,
+      boolean compactionSupported) {
+    this.compactionSupported = compactionSupported;
     this.connection = connection;
     this.binding = binding;
     this.auxiliarySupported = auxiliarySupported;
@@ -65,7 +68,7 @@ public final class HBaseCommitControlStore implements CommitControlStore {
               return new HBaseCommitControlStore(connection, binding,
                   binding.supportsAuxiliary(descriptor), binding.supportsLeaseBindings(descriptor),
                   binding.supportsLeaseExpiryCheckpoints(descriptor),
-                  binding.supportsEventRevisionIndex(descriptor));
+                  binding.supportsEventRevisionIndex(descriptor), binding.supportsCompaction(descriptor));
             }))).exceptionallyCompose(failure -> failed(failure));
   }
 
@@ -99,6 +102,7 @@ public final class HBaseCommitControlStore implements CommitControlStore {
         || initialState.supportsLeaseBindings() && !leaseBindingsSupported
         || initialState.supportsLeaseExpiryCheckpoints() && !leaseExpiryCheckpointsSupported
         || initialState.supportsEventRevisionIndex() && !eventRevisionIndexSupported
+        || initialState.compactOperationId().isPresent()
         || initialState.publication().isPresent()) {
       return CompletableFuture.failedFuture(new IllegalArgumentException(
           "control initialization requires a fenced empty initial state"));
@@ -122,7 +126,8 @@ public final class HBaseCommitControlStore implements CommitControlStore {
         || !observed.state().profileFingerprint().equals(replacement.profileFingerprint())
         || replacement.stateVersion() != Math.addExact(observed.state().stateVersion(), 1)
         || !isValidAuthorizationBarrierTransition(observed.state(), replacement)
-        || replacement.supportsEventRevisionIndex() && !eventRevisionIndexSupported) {
+        || replacement.supportsEventRevisionIndex() && !eventRevisionIndexSupported
+        || replacement.compactOperationId().isPresent() && !compactionSupported) {
       return CompletableFuture.failedFuture(new IllegalArgumentException(
           "control replacement must advance the exact observed state"));
     }
@@ -225,6 +230,9 @@ public final class HBaseCommitControlStore implements CommitControlStore {
     CommitState state = CommitControlMessages.decode(value);
     if (state.supportsEventRevisionIndex() && !eventRevisionIndexSupported) {
       throw new IllegalStateException("event index control format requires its table capability");
+    }
+    if (state.compactOperationId().isPresent() && !compactionSupported) {
+      throw new IllegalStateException("Compact control identity requires its table capability");
     }
     if (!state.profileFingerprint().equals(binding.profileFingerprint())) {
       throw new IllegalArgumentException("control state profile differs from its system table binding");

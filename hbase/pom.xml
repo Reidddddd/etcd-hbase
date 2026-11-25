@@ -510,5 +510,25 @@
         </plugins>
       </build>
     </profile>
+    <profile>
+      <id>m5-j52-public</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <skipITs>false</skipITs>
+              <failIfNoTests>true</failIfNoTests>
+              <includes combine.self="override">
+                <include>**/J52HistoryCollectionIT.java</include>
+              </includes>
+              <forkCount>1</forkCount>
+              <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
   </profiles>
 </project>

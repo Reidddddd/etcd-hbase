@@ -30,6 +30,8 @@ public final class CommitControlMessages {
         .setFinalizedSequence(state.finalizedSequence())
         .setFinalizedRevision(state.finalizedRevision())
         .setCompactRevision(state.compactRevision());
+    state.compactOperationId().ifPresent(value ->
+        builder.setCompactOperationId(ByteString.copyFrom(value.bytes())));
     state.ownerInstance().ifPresent(builder::setOwnerInstance);
     state.publication().ifPresent(slot -> builder.setPublication(encode(slot)));
     state.eventRegistryNamespace().ifPresent(value -> builder.setEventRegistryNamespace(ByteString.copyFrom(value.bytes())));
@@ -85,7 +87,10 @@ public final class CommitControlMessages {
           message.getCompactRevision(), registryNamespace, pendingNamespace,
           message.getEventRegistryAttempts(), message.hasAuthorizationBarrierGeneration(),
           message.hasAuthorizationBarrierGeneration()
-              ? message.getAuthorizationBarrierGeneration() : 0);
+              ? message.getAuthorizationBarrierGeneration() : 0,
+          message.hasCompactOperationId()
+              ? Optional.of(InvocationId.fromBytes(message.getCompactOperationId().toByteArray()))
+              : Optional.empty());
     } catch (InvalidProtocolBufferException | IllegalArgumentException failure) {
       throw new IllegalArgumentException("invalid persisted commit control state", failure);
     }
