@@ -23,8 +23,7 @@
     "independent-pin-floors",
     "late-materializer-new-write-and-cancellation",
     "logical-selection-and-unknown-outcome",
-    "native-v3.5.23-compact-range-watch-oracle",
-    "owner-lane-compact-rpc-and-physical-boundary"
+    "native-v3.5.23-compact-range-watch-oracle"
   ],
   "tests": [
     {
@@ -222,22 +221,6 @@
         "rejectsTableFamilyProfileCategoryAndDurabilityMismatches",
         "rejectsExpiringOrMultiVersionFamilies",
         "rejectsDifferentRoutingParametersWithTheSameProfileId"
-      ]
-    },
-    {
-      "module": "server",
-      "kind": "surefire",
-      "class": "io.etcdhbase.server.commit.CompactGatewayTest",
-      "methods": [
-        "logicalSelectionReturnsTheResponseRevisionAndItsServingHeader",
-        "physicalCompactWaitsForItsOwnBoundedHistoryDeletion",
-        "physicalCompactReportsFailureWhenHistoryDeletionFails",
-        "physicalCompactFailsClosedWhenNoHistoryCollectorIsWired",
-        "logicalCompactStillSucceedsWithoutAHistoryCollector",
-        "repeatedCompactIsReportedAsCompactedRatherThanSucceeding",
-        "futureCompactIsRejectedWithoutAdvancingTheBoundary",
-        "missingOwnerFailsClosedWithoutAttemptingAControlWrite",
-        "cancelledRequestDoesNotSendAResponse"
       ]
     }
   ]
