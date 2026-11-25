@@ -603,11 +603,15 @@ class HBaseBackendIdentityProviderTest {
             TIMEOUT);
     authenticate(provider).get(5, TimeUnit.SECONDS);
     assertThrows(IllegalStateException.class, provider::close);
-    verify(context, never()).close();
     provider.close();
     provider.close();
     verify(connection, times(2)).close();
     verify(context).close();
+    // The retry runs on a completion worker, so "never" is not a stable assertion. The contract is
+    // ordering: the backend context is released only after its connection was actually closed.
+    var order = inOrder(connection, context);
+    order.verify(connection, times(2)).close();
+    order.verify(context).close();
   }
 
   @Test

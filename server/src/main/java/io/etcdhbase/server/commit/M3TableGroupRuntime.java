@@ -899,8 +899,24 @@ public final class M3TableGroupRuntime implements AutoCloseable {
                   return ResponseHeaderFactory.create(stores.clusterId(), activation.memberIdBits(),
                       snapshot.state().publishedRevision(), 0);
                 })));
+    var compactionGateway = new CompactGateway(plan.source().tableGroupId(), identity, authorization,
+        stores.clusterId(), activation.memberIdBits(),
+        new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(),
+            java.time.Clock.systemUTC()),
+        new io.etcdhbase.core.commit.GcCoordinator(stores.control(),
+            new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(),
+                java.time.Clock.systemUTC()),
+            stores.pins(), java.time.Clock.systemUTC()),
+        (bytes, requestScope, work) -> pending.queue.submit(bytes, requestScope, work),
+        io.etcdhbase.grpc.RequestScopeInterceptor::currentScope,
+        owner::currentToken,
+        requestScope -> stores.control().read(requestScope).thenApply(found ->
+            found.orElseThrow(() -> new java.util.concurrent.CompletionException(
+                new BackendFailure(BackendFailure.Category.UNAVAILABLE))).state()),
+        // Physical completion needs durable enumeration and checkpoints, which J52.3 owns.
+        java.util.Optional.empty());
     return new ServiceComponents(new KvService(gateway, txnGateway, txnGateway::deleteRange,
-        txnGateway::range), leaseService, watchService, authService);
+        txnGateway::range).withCompact(compactionGateway), leaseService, watchService, authService);
   }
 
   static MutationRelay localOwnerRelay(String tableGroupId, CommitControlStore control,
