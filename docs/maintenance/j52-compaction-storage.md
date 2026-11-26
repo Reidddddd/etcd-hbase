@@ -44,6 +44,12 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 每次调度最多处理一个 `recordDomain + bucket` 页，随后轮转到下一分片；游标沿各 bucket 的物理行序独立推进。检查点绑定实际 Compact operation/generation、owner epoch、盐桶拓扑和本轮 revision/sequence 边界；同一许可下接管保留进度，拓扑变化或行值身份不一致则拒绝恢复。整页成功后才用精确值 CAS 推进。旧 worker 持有的字节不能覆盖接管后的检查点，未知结果可以有界重做。
 
+首次领取、owner 接管或 Compact 操作切换先持久进入 `FENCING`，此时只持有元数据租约，不能开始退休。fence 游标与原扫描游标分别保存；同 owner 中断可继续 fence 游标，新 owner 必须重新覆盖整个目标分片。全部有界物理页确认并 CAS 转为 `SCANNING` 后，才激活新的回收者。
+
+每个 live 系统记录保留严格编码的 `g` Cell，内容是 owner epoch 和 Compact generation，使用保留 timestamp `Long.MAX_VALUE - 2`。安装只允许单调提升；退休在同一目标行的 `CheckAndMutate` 中同时比较完整旧值、墓碑缺失及确切 `g`，不能在失败后换上更高 fence 重发。接管前已校验的目标行必然已存在；永久 guard/墓碑保留物理行，使完整 fence 遍历能够覆盖这些迟到请求的目标。fencing 期间仍可能结束的旧请求，与新 holder 激活后被同行条件拒绝的旧请求分别验证。已退休行由永久 `r`/`t` guard 阻断旧写，不重复安装 `g`；新行在实际退休前也安装当前 fence。
+
+未知 fence ACK 不推进游标；重读确认同一 fence 后可有界重做。损坏、缺页、scope 关闭或较高 fence 均不能被解释为已完成。point/scan 同时严格校验 live 的 `r`/可选 `g`，以及 retired 的 `r`/`t`/可选 `g` 布局；已带 `g` 的墓碑还须匹配 Compact generation。新内部字段不是 KV revision，旧严格 reader 会拒绝该布局；启用前需停止旧 GC writer，不支持混跑不检查同行 fence 的旧维护实现，J55 的受控升级仍未交付。
+
 完整 sweep 结束，或真实许可的操作、代次变化后，持久增加 sweep 编号并重新检查该 bucket。同一 Compact 的安全边界扩大时，当前 sweep 保留原保守边界，从新取得的真实许可派生更窄许可继续分页；下一 sweep 再采用新边界，避免前台 sequence 增长反复重置游标。派生许可保留全部权威、根保护及 scope，拒绝放宽边界。这样，前一轮因 pin 或引用而保留的前缀不会永久跳过；`completedPages` 保持累计，避免重置游标造成检查点 ABA。记录退休仍由后端独立复核实际授权。
 
 每页有记录数、扫描字节、引用证明及总时长上限，并保留整轮粗粒度 I/O、scanner、清理和内存额度。取消后额度继续占用到实际 producer 排空，调度器还等待清理结果；排队任务在停止后不再启动回收。当前不是逐条 HBase RPC 的完整费用核算，也未交付 GC 导致的前台尾延迟和长期空间收敛验收。
@@ -59,6 +65,8 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 因此，本次不设置物理完成水位，不将逻辑 CAS 或 KV 页删除解释为完整 physical 完成，也不宣称 J52 验收通过。批准设计中的 physical 投影仍要求全部应回收记录完成精确删除和强读确认；HFile 空间释放另由 HBase compaction 完成。
 
 ## 6. 格式与验证入口
+
+GC 检查点值使用格式 2，分别编码 fence/扫描游标及明确的 phase；格式 1 会被严格拒绝，不自动回退或丢弃旧进度。新旧维护格式的受控升级仍待 J55。
 
 system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compaction-format=1`。没有该能力的 store 拒绝读写 Compact 记录或安装控制身份。已有控制格式增加 optional `compact_operation_id`；旧版严格解码器会拒绝该字段，不能把启用后的 writer 回退称为兼容。J55 仍需接入受控升级与启动能力校验。
 

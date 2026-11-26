@@ -296,6 +296,8 @@
       "kind": "failsafe",
       "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT",
       "methods": [
+        "lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard",
+        "lateRetirementIsFencedBeforeSuccessorStartsCollection",
         "retirementReplacesTheValueAndBlocksEveryRecreationPath",
         "retirementIsIdempotentForTheSamePlanAndRejectsAChangedValue",
         "repeatedCreateCannotOverwriteAnExistingImmutableRecord",
@@ -331,9 +333,11 @@
       "module": "core",
       "class": "io.etcdhbase.core.commit.GcCheckpointStoreTest",
       "methods": [
+        "durableScanAndFenceCursorsMustBelongToTheNamedBucket",
+        "initialLeaseAndTakeoverRequireTheWholeDurableFencePass",
         "wideningBoundsDuringOneCompactDoesNotResetAnUnfinishedSweep",
         "roundTripsEveryDomainAndMaximumGroupAndCursor",
-        "rejectsNonBooleanPresenceHiddenCursorMalformedUtf8AndTrailingBytes",
+        "rejectsUnknownPhaseMalformedCursorsUtf8AndTrailingBytes",
         "rejectsTopologyChangesOnResumeAndTakeover",
         "sameEpochResumesAndTakeoverPreservesProgressWhileStaleCasLoses",
         "exhaustedSweepAndNewOperationRevisitPrefixesWhileWiderBoundsWait",
@@ -345,6 +349,8 @@
       "module": "server",
       "class": "io.etcdhbase.server.commit.GcCheckpointCycleTest",
       "methods": [
+        "failedFencePageCannotAdvanceOrStartRetirement",
+        "metadataLeaseRunsOnlyTheFencePhaseBeforeCollection",
         "resumedSweepUsesOnlyANarrowerDerivativeOfTheFreshAuthority",
         "aBusyBucketYieldsTheNextPageToTheNextShard",
         "nonOwnerNeverAdmitsOrTouchesStorage",
@@ -387,6 +393,16 @@
         "readinessRequiresEventPinsAHealthyWorkerAndAnOpenTailer",
         "ownerLossBeforeEventHistoryWorkerInstallationRejectsLateWorker",
         "ownerLossBeforeInstallationRejectsBothWorkers"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.SystemRecordGcFenceTest",
+      "methods": [
+        "newerOwnerDominatesEveryOlderCompactGeneration",
+        "livePayloadKeepsItsValueAndRejectsCorruptOrDuplicateFenceCells",
+        "retiredLayoutBindsTheFenceToTheRecordedCompactGeneration"
       ]
     }
   ]

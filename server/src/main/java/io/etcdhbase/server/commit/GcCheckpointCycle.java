@@ -100,18 +100,21 @@ final class GcCheckpointCycle {
     return checkpoints.claim(proposed, scope).thenCompose(claim -> {
       requireOwner(token, scope);
       if (claim instanceof GcCheckpointStore.Superseded) return CompletableFuture.completedFuture(nextShard());
-      var acquired = (GcCheckpointStore.Acquired) claim;
+      var acquired = (GcCheckpointStore.Held) claim;
       var sweep = acquired.checkpoint().plan();
       var pagePermit = sweep.equals(GcCheckpoint.Plan.from(permit)) ? permit
           : permit.restrictTo(sweep.safeRevision(), sweep.safeSequence());
-      return closure.collect(domain, bucket, acquired.checkpoint().position().afterIdentity(), pageRecords,
-          pagePermit, scope).thenCompose(page -> {
+      boolean fencing = acquired.checkpoint().phase() == GcCheckpoint.Phase.FENCING;
+      var page = fencing
+          ? closure.fence(domain, bucket, acquired.checkpoint().fencePosition().afterIdentity(), pageRecords, pagePermit, scope)
+          : closure.collect(domain, bucket, acquired.checkpoint().position().afterIdentity(), pageRecords, pagePermit, scope);
+      return page.thenCompose(completed -> {
             requireOwner(token, scope);
-            return checkpoints.advance(acquired, page, scope).thenApply(updated -> {
+            return checkpoints.advance(acquired, completed, scope).thenApply(updated -> {
               if (!updated) return Outcome.IDLE;
-              metrics.recordGcPage(page.examined(), page.retired());
+              metrics.recordGcPage(completed.examined(), completed.retired());
               var next = nextShard();
-              return page.exhausted() ? next : Outcome.PROGRESSED;
+              return !fencing && completed.exhausted() ? next : Outcome.PROGRESSED;
             });
           });
     });

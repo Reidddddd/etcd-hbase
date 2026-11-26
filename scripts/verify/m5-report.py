@@ -485,6 +485,8 @@ J52_REQUIRED_TESTS = {
         'byteLimitedPageDoesNotEndCollectionBeforeTheContinuation',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
+        'lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard',
+        'lateRetirementIsFencedBeforeSuccessorStartsCollection',
         'retirementReplacesTheValueAndBlocksEveryRecreationPath',
         'retirementIsIdempotentForTheSamePlanAndRejectsAChangedValue',
         'repeatedCreateCannotOverwriteAnExistingImmutableRecord',
@@ -507,15 +509,19 @@ J52_REQUIRED_TESTS = {
     },
 
     ('core', 'surefire', 'io.etcdhbase.core.commit.GcCheckpointStoreTest'): {
+        'durableScanAndFenceCursorsMustBelongToTheNamedBucket',
+        'initialLeaseAndTakeoverRequireTheWholeDurableFencePass',
         'wideningBoundsDuringOneCompactDoesNotResetAnUnfinishedSweep',
         'roundTripsEveryDomainAndMaximumGroupAndCursor',
-        'rejectsNonBooleanPresenceHiddenCursorMalformedUtf8AndTrailingBytes',
+        'rejectsUnknownPhaseMalformedCursorsUtf8AndTrailingBytes',
         'rejectsTopologyChangesOnResumeAndTakeover',
         'sameEpochResumesAndTakeoverPreservesProgressWhileStaleCasLoses',
         'exhaustedSweepAndNewOperationRevisitPrefixesWhileWiderBoundsWait',
         'rejectsRowValueShardMismatchInClaimAndRead',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.GcCheckpointCycleTest'): {
+        'failedFencePageCannotAdvanceOrStartRetirement',
+        'metadataLeaseRunsOnlyTheFencePhaseBeforeCollection',
         'resumedSweepUsesOnlyANarrowerDerivativeOfTheFreshAuthority',
         'aBusyBucketYieldsTheNextPageToTheNextShard',
         'nonOwnerNeverAdmitsOrTouchesStorage',
@@ -537,6 +543,11 @@ J52_REQUIRED_TESTS = {
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.M3TableGroupRuntimeWorkerLifecycleTest'): {
         'ownerLossStopsInstalledGcAndRejectsReplacement',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.SystemRecordGcFenceTest'): {
+        'newerOwnerDominatesEveryOlderCompactGeneration',
+        'livePayloadKeepsItsValueAndRejectsCorruptOrDuplicateFenceCells',
+        'retiredLayoutBindsTheFenceToTheRecordedCompactGeneration',
     },
 
 }

@@ -14,6 +14,10 @@ import java.util.Optional;
  * dependencies have all cleared. The storage adapter owns proof and retirement execution.
  */
 public interface SystemRecordClosure {
+  /** Installs the current owner/Compact fence across one bounded physical shard page. */
+  CompletableFuture<Page> fence(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
+      int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope);
+
   /** Collects only the named bucket; incoming-reference proofs still cover every bucket. */
   CompletableFuture<Page> collect(Domain domain, int bucket,
       Optional<ByteKey> afterIdentity, int maximumRecords, SystemRecordRetirement.Permit permit,

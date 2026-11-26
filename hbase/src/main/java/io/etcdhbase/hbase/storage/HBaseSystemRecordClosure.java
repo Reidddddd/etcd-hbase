@@ -43,8 +43,33 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
     this.bucketCount = bucketCount;
   }
 
+  @Override
+  public CompletableFuture<Page> fence(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
+      int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope) {
+    validatePage(domain, bucket, afterIdentity, maximumRecords, permit, scope);
+    return authority.validate(permit, scope).thenCompose(ignored -> records.scanBucket(domain.recordType(), bucket,
+        afterIdentity, maximumRecords, MAX_SCAN_BYTES, scope)).thenCompose(page -> {
+          CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
+          for (var entry : page.entries()) {
+            chain = chain.thenCompose(ignored -> retirement.fenceForGc(domain.recordType(), entry.identity(), permit, scope));
+          }
+          return chain.thenApply(ignored -> new Page(domain, page.entries().size(), 0,
+              page.lastIdentity(), page.exhausted()));
+        });
+  }
+
   /** Collects a bounded domain page, retaining records while any reference or protection holds. */
   public CompletableFuture<Page> collect(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
+      int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope) {
+    validatePage(domain, bucket, afterIdentity, maximumRecords, permit, scope);
+    var progress = new Progress(maximumRecords, afterIdentity);
+    return authority.validate(permit, scope).thenCompose(ignored ->
+        collectBucket(domain, bucket, afterIdentity, progress, permit, scope))
+        .thenApply(exhausted -> new Page(domain, progress.examined, progress.retired,
+            progress.lastIdentity, exhausted));
+  }
+
+  private void validatePage(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
       int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope) {
     Objects.requireNonNull(domain, "domain");
     Objects.requireNonNull(afterIdentity, "afterIdentity");
@@ -52,14 +77,9 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
     Objects.requireNonNull(scope, "scope");
     if (maximumRecords < 1 || maximumRecords > 1024 || bucket < 0 || bucket >= bucketCount
         || afterIdentity.filter(identity -> records.bucket(domain.recordType(), identity) != bucket).isPresent()) {
-      return CompletableFuture.failedFuture(new IllegalArgumentException("invalid closure page budget"));
+      throw new IllegalArgumentException("invalid closure page or shard");
     }
     permit.requireUsable(profile, scope);
-    var progress = new Progress(maximumRecords, afterIdentity);
-    return authority.validate(permit, scope).thenCompose(ignored ->
-        collectBucket(domain, bucket, afterIdentity, progress, permit, scope))
-        .thenApply(exhausted -> new Page(domain, progress.examined, progress.retired,
-            progress.lastIdentity, exhausted));
   }
 
   private CompletableFuture<Boolean> collectBucket(Domain domain, int bucket, Optional<ByteKey> after,

@@ -55,22 +55,34 @@ class GcCheckpointCycleIT {
       var budgets = budgets(environment.group());
       var metrics = new RequestMetrics();
       var checkpoints = new GcCheckpointStore(records);
-      var first = cycle(environment, checkpoints, budgets, metrics);
+      var delegate = new HBaseSystemRecordClosure(records);
+      var released = new java.util.concurrent.atomic.AtomicBoolean();
+      var releasing = new SystemRecordClosure() {
+        @Override public java.util.concurrent.CompletableFuture<Page> fence(Domain domain, int bucket,
+            Optional<ByteKey> after, int maximumRecords, io.etcdhbase.core.commit.SystemRecordRetirement.Permit permit,
+            RequestScope scope) {
+          return delegate.fence(domain, bucket, after, maximumRecords, permit, scope);
+        }
+        @Override public java.util.concurrent.CompletableFuture<Page> collect(Domain domain, int bucket,
+            Optional<ByteKey> after, int maximumRecords, io.etcdhbase.core.commit.SystemRecordRetirement.Permit permit,
+            RequestScope scope) {
+          return delegate.collect(domain, bucket, after, maximumRecords, permit, scope).thenCompose(page -> {
+            if (domain == Domain.EVENT && bucket == 0 && after.isEmpty() && released.compareAndSet(false, true)) {
+              pin.close();
+              return pin.releaseCompletion().toCompletableFuture().thenApply(ignored -> page);
+            }
+            return java.util.concurrent.CompletableFuture.completedFuture(page);
+          });
+        }
+      };
+      var first = cycle(environment, checkpoints, budgets, metrics, releasing);
       var boundary = new CountDownLatch(1);
       var completed = new AtomicReference<GcCheckpointCycle.Outcome>();
-      var calls = new java.util.concurrent.atomic.AtomicInteger();
-      int releaseAt = SystemRecordClosure.Domain.EVENT.ordinal() * 2 + 1;
       var worker = new GcCheckpointWorker(Runnable::run, timer, Duration.ofSeconds(20), scope ->
-          first.run(scope).thenCompose(outcome -> {
+          first.run(scope).thenApply(outcome -> {
             completed.set(outcome);
             if (outcome == GcCheckpointCycle.Outcome.IDLE) boundary.countDown();
-            // Release after the first page of bucket 0. The fresh permit widens on the next
-            // dispatch, but bucket 0 must finish its retained prefix under the original bound.
-            if (calls.incrementAndGet() == releaseAt) {
-              pin.close();
-              return pin.releaseCompletion().toCompletableFuture().thenApply(ignored -> outcome);
-            }
-            return java.util.concurrent.CompletableFuture.completedFuture(outcome);
+            return outcome;
           }), metrics);
       try {
         worker.start();
@@ -82,19 +94,20 @@ class GcCheckpointCycleIT {
       assertEquals(GcCheckpointCycle.Outcome.IDLE, completed.get());
       assertEquals(0, metrics.gc().failures());
       for (var event : events) {
-        assertEquals(records.bucket(SystemRecordType.EVENT, event.systemIdentity()) == 0,
-            records.read(SystemRecordType.EVENT, event.systemIdentity(), fixtureScope).join().isPresent());
+        assertTrue(records.read(SystemRecordType.EVENT, event.systemIdentity(), fixtureScope).join().isPresent());
       }
-      assertEquals(2, metrics.gc().retired(), "bucket 1 first starts after pin release");
+      assertTrue(released.get());
+      assertEquals(0, metrics.gc().retired(), "the original fenced sweep keeps its pin-constrained bounds");
       for (int bucket = 0; bucket < 2; bucket++) {
         var checkpoint = checkpoints.read(environment.group(), SystemRecordClosure.Domain.EVENT, bucket, fixtureScope)
             .join().orElseThrow();
         assertTrue(checkpoint.exhausted());
-        assertEquals(bucket == 0 ? 4 : 20, checkpoint.plan().safeSequence());
-        assertEquals(bucket == 0 ? 4 : 16, checkpoint.plan().safeRevision());
+        assertEquals(4, checkpoint.plan().safeSequence());
+        assertEquals(4, checkpoint.plan().safeRevision());
         assertEquals(bucket, records.bucket(SystemRecordType.EVENT,
             checkpoint.position().afterIdentity().orElseThrow()));
-        assertEquals(2, checkpoint.completedPages());
+        assertEquals(GcCheckpoint.Phase.SCANNING, checkpoint.phase());
+        assertEquals(4, checkpoint.completedPages(), "two fence pages precede the two collection pages");
       }
       pin.close();
       pin.releaseCompletion().toCompletableFuture().get(10, TimeUnit.SECONDS);
@@ -118,11 +131,11 @@ class GcCheckpointCycleIT {
       assertEquals(0, budgets.snapshot().requests());
       var current = checkpoints.read(environment.group(), SystemRecordClosure.Domain.EVENT, 0, fixtureScope).join().orElseThrow();
       var proposal = new GcCheckpoint(current.tableGroupId(), current.domain(), current.maintenanceEpoch(),
-          0, 2, current.plan(), GcCheckpoint.Position.start(), 0, 0, false);
-      var held = assertInstanceOf(GcCheckpointStore.Acquired.class, checkpoints.claim(proposal, fixtureScope).join());
+          0, 2, current.plan(), GcCheckpoint.Position.start(), GcCheckpoint.Position.start(), GcCheckpoint.Phase.FENCING, 0, 0, false);
+      var held = assertInstanceOf(GcCheckpointStore.Held.class, checkpoints.claim(proposal, fixtureScope).join());
       var newer = new GcCheckpoint(proposal.tableGroupId(), proposal.domain(), proposal.maintenanceEpoch() + 1,
-          0, 2, proposal.plan(), GcCheckpoint.Position.start(), 0, 0, false);
-      assertInstanceOf(GcCheckpointStore.Acquired.class, checkpoints.claim(newer, fixtureScope).join());
+          0, 2, proposal.plan(), GcCheckpoint.Position.start(), GcCheckpoint.Position.start(), GcCheckpoint.Phase.FENCING, 0, 0, false);
+      assertInstanceOf(GcCheckpointStore.Held.class, checkpoints.claim(newer, fixtureScope).join());
       assertFalse(checkpoints.advance(held, new SystemRecordClosure.Page(current.domain(), 0, 0,
           held.checkpoint().position().afterIdentity(), true), fixtureScope).join());
     }
@@ -130,10 +143,15 @@ class GcCheckpointCycleIT {
 
   private static GcCheckpointCycle cycle(SystemRecordGcTestFixture.Environment environment,
       GcCheckpointStore checkpoints, BudgetManager budgets, RequestMetrics metrics) {
+    return cycle(environment, checkpoints, budgets, metrics, new HBaseSystemRecordClosure(environment.records()));
+  }
+
+  private static GcCheckpointCycle cycle(SystemRecordGcTestFixture.Environment environment,
+      GcCheckpointStore checkpoints, BudgetManager budgets, RequestMetrics metrics, SystemRecordClosure closure) {
     var authority = environment.authority();
     return new GcCheckpointCycle(environment.group(), () -> Optional.of(authority.owner()), authority.control(),
         authority.coordinator(), authority.retention(), SystemRecordGcTestFixture.DIGEST,
-        new HBaseSystemRecordClosure(environment.records()), checkpoints, budgets,
+        closure, checkpoints, budgets,
         GcCheckpointCycle.MEMORY, 2, 1, metrics);
   }
 

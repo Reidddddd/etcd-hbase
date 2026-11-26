@@ -7,20 +7,44 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.CommitOwnerService;
+import io.etcdhbase.core.commit.EventHistoryPinManager;
+import io.etcdhbase.core.commit.GcCheckpoint;
+import io.etcdhbase.core.commit.GcCheckpointStore;
 import io.etcdhbase.core.commit.InvocationId;
+import io.etcdhbase.core.commit.ManifestRoot;
 import io.etcdhbase.core.commit.RetirementTombstone;
+import io.etcdhbase.core.commit.SystemRecordClosure;
 import io.etcdhbase.core.commit.SystemRecordRetirement;
 import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.commit.SystemRecordType;
+import io.etcdhbase.core.commit.TransactionId;
+import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.request.RequestScope;
+import io.etcdhbase.hbase.api.HBaseConnectionFactory;
+import io.etcdhbase.hbase.codec.ManifestMessages;
+import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
+import io.etcdhbase.spi.salt.HashSaltStrategy;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import io.etcdhbase.spi.salt.HashSaltStrategy;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.AsyncConnection;
+import org.apache.hadoop.hbase.client.AsyncTable;
+import org.apache.hadoop.hbase.client.AsyncTableBuilder;
+import org.apache.hadoop.hbase.client.CheckAndMutate;
+import org.apache.hadoop.hbase.client.CheckAndMutateResult;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Durability;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RowMutations;
 import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.junit.jupiter.api.Test;
 
@@ -36,6 +60,83 @@ class HBaseSystemRecordRetirementIT {
       "EXPIRY_CANDIDATE", "AUXILIARY", "LEASE_RESULT", "LEASE_BINDING",
       "LEASE_EXPIRY_CHECKPOINT");
   private static final ByteKey AUTHORIZATION_DIGEST = ByteKey.copyOf(new byte[32]);
+
+  @Test
+  void lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var rootScope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var table = createRetirementCapableSystemTable(environment);
+      var store = HBaseSystemRecordStore.open(environment.factory(), environment.identity(), table, rootScope).join();
+      var authority = SystemRecordGcTestFixture.prepare(store, rootScope);
+      var targets = manifestsInOneBucket(store, rootScope);
+      int bucket = store.bucket(SystemRecordType.MANIFEST, targets.getFirst());
+      var checkpoints = new GcCheckpointStore(store);
+      var faults = new Faults(environment.connection());
+      var delayed = HBaseSystemRecordStore.open(faults, environment.identity(), table, rootScope).join();
+      rejectUnknownFenceAcknowledgement(authority, table, checkpoints, delayed, faults, bucket);
+      var first = persistFirstFencePage(authority, table, checkpoints, store, bucket);
+      try (var resumed = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+        var permit = authority.authorize(resumed);
+        var proposal = GcCheckpoint.start(table.tableGroupId(),
+            SystemRecordClosure.Domain.MANIFEST, authority.owner().epoch(),
+            bucket, table.saltProfile().bucketCount(), permit);
+        var held = (GcCheckpointStore.Held) checkpoints.claim(proposal, resumed).join();
+        assertEquals(first, held.checkpoint().fencePosition().afterIdentity().orElseThrow());
+        assertEquals(GcCheckpoint.Phase.FENCING, held.checkpoint().phase());
+        fenceShard(store, table, checkpoints, permit, bucket, resumed);
+        for (var target : targets) assertTrue(store.read(SystemRecordType.MANIFEST, target, resumed).join().isPresent());
+        assertEquals(3, new HBaseSystemRecordClosure(store).collect(
+            SystemRecordClosure.Domain.MANIFEST, bucket, Optional.empty(), 16, permit, resumed).join().retired());
+      }
+    }
+  }
+
+  @Test
+  void lateRetirementIsFencedBeforeSuccessorStartsCollection() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3));
+        var successorScope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var table = createRetirementCapableSystemTable(environment);
+      var store = HBaseSystemRecordStore.open(environment.factory(), environment.identity(), table, scope).join();
+      var authority = SystemRecordGcTestFixture.prepare(store, scope);
+      var permit = authority.authorize(scope);
+      var root = ManifestRoot.create(
+          TransactionId.create(), 1, 0, 1, 0, 0, Optional.empty());
+      var identity = root.systemIdentity();
+      var encoded = ByteKey.copyOf(ManifestMessages.encode(root));
+      assertEquals(SystemRecordStore.CreateResult.CREATED,
+          store.createIfAbsent(SystemRecordType.MANIFEST, identity, encoded, scope).join());
+      var domain = SystemRecordClosure.Domain.MANIFEST;
+      int bucket = store.bucket(SystemRecordType.MANIFEST, identity);
+      var checkpoints = new GcCheckpointStore(store);
+      var held = fenceShard(store, table, checkpoints, permit, bucket, scope);
+      var faults = new Faults(environment.connection());
+      var delayed = HBaseSystemRecordStore.open(faults, environment.identity(), table, scope).join();
+      faults.gateNext.set(true);
+      var collection = new HBaseSystemRecordClosure(delayed).collect(domain, bucket, Optional.empty(), 16, permit, scope);
+      try {
+        faults.mutationReached.get(20, TimeUnit.SECONDS);
+        var nextPermit = takeOverAndFence(authority, table, checkpoints, store, bucket, successorScope);
+        assertEquals(Optional.of(encoded), store.read(SystemRecordType.MANIFEST, identity, successorScope).join());
+        assertThrows(CompletionException.class, () -> authority.eventPins().register(
+            new EventHistoryPinManager.Requirement(2, 1,
+                SystemRecordGcTestFixture.DIGEST, Optional.empty(), Optional.empty()), successorScope).join());
+        assertThrows(CompletionException.class,
+            () -> store.fenceForGc(SystemRecordType.MANIFEST, identity, permit, scope).join(),
+            "an older fence pass cannot overwrite the successor's row fence");
+        faults.resume.complete(null);
+        var page = collection.get(20, TimeUnit.SECONDS);
+        assertFalse(checkpoints.advance(held, page, scope).join(), "stale checkpoint CAS is fenced");
+        assertEquals(0, page.retired(), "the completed same-row fence rejects the old retirement");
+        assertEquals(Optional.of(encoded), store.read(SystemRecordType.MANIFEST, identity, successorScope).join());
+        var collected = new HBaseSystemRecordClosure(store).collect(domain, bucket, Optional.empty(), 16,
+            nextPermit, successorScope).join();
+        assertEquals(1, collected.retired(), "the successor can still collect through its actual authority");
+      } finally {
+        faults.resume.complete(null);
+      }
+    }
+  }
 
   @Test
   void retirementReplacesTheValueAndBlocksEveryRecreationPath() throws Exception {
@@ -232,7 +333,7 @@ class HBaseSystemRecordRetirementIT {
       var value = ByteKey.copyOf(new byte[] {45});
       store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
       var binding = io.etcdhbase.core.commit.InvocationBinding.begin(InvocationId.create(),
-          AUTHORIZATION_DIGEST, AUTHORIZATION_DIGEST, io.etcdhbase.core.commit.TransactionId.create(), 1, 0, 1);
+          AUTHORIZATION_DIGEST, AUTHORIZATION_DIGEST, TransactionId.create(), 1, 0, 1);
       var invocation = ByteKey.copyOf(binding.invocationId().bytes());
       var encoded = ByteKey.copyOf(io.etcdhbase.hbase.codec.InvocationMessages.encode(binding));
       store.createIfAbsent(SystemRecordType.INVOCATION, invocation, encoded, scope).join();
@@ -309,5 +410,165 @@ class HBaseSystemRecordRetirementIT {
         .build();
     environment.create(table, SystemRecordGcTestFixture.descriptor(binding, descriptor), salt.splitKeys().toArray(byte[][]::new));
     return binding;
+  }
+  private static void rejectUnknownFenceAcknowledgement(SystemRecordGcTestFixture.Authority authority,
+      SystemTableBinding table, GcCheckpointStore checkpoints,
+      HBaseSystemRecordStore delayed, Faults faults, int bucket) throws Exception {
+    var scope = RequestScope.withTimeout(Duration.ofMinutes(1));
+    try {
+      var permit = authority.authorize(scope);
+      var domain = SystemRecordClosure.Domain.MANIFEST;
+      var proposal = GcCheckpoint.start(table.tableGroupId(), domain,
+          authority.owner().epoch(), bucket, table.saltProfile().bucketCount(), permit);
+      checkpoints.claim(proposal, scope).join();
+      faults.loseFenceAcknowledgement.set(true);
+      var failure = assertThrows(CompletionException.class, () -> new HBaseSystemRecordClosure(delayed)
+          .fence(domain, bucket, Optional.empty(), 1, permit, scope).join());
+      assertEquals(BackendFailure.Category.UNKNOWN,
+          ((BackendFailure) CompletionFailures.unwrapCompletion(failure)).category());
+      assertFalse(faults.loseFenceAcknowledgement.get());
+      assertTrue(faults.fenceWriteApplied.get(), "the actual row mutation committed before its ACK was lost");
+      var pending = checkpoints.read(table.tableGroupId(), domain, bucket, scope).join().orElseThrow();
+      assertEquals(GcCheckpoint.Phase.FENCING, pending.phase());
+      assertTrue(pending.fencePosition().afterIdentity().isEmpty());
+      assertEquals(0, pending.completedPages());
+    } finally {
+      scope.close();
+      scope.cleanupOutcomeCompletion().toCompletableFuture().get(20, TimeUnit.SECONDS);
+      // The injected lost ACK is an observed failed producer outcome, not an unobserved drain.
+      scope.physicalProducersCompletion().handle((ignored, failure) -> null).toCompletableFuture()
+          .get(20, TimeUnit.SECONDS);
+    }
+  }
+
+  private static ByteKey persistFirstFencePage(SystemRecordGcTestFixture.Authority authority,
+      SystemTableBinding table, GcCheckpointStore checkpoints,
+      HBaseSystemRecordStore store, int bucket) throws Exception {
+    var scope = RequestScope.withTimeout(Duration.ofMinutes(1));
+    try {
+      var permit = authority.authorize(scope);
+      var domain = SystemRecordClosure.Domain.MANIFEST;
+      var proposal = GcCheckpoint.start(table.tableGroupId(), domain,
+          authority.owner().epoch(), bucket, table.saltProfile().bucketCount(), permit);
+      var held = (GcCheckpointStore.Held) checkpoints.claim(proposal, scope).join();
+      var page = new HBaseSystemRecordClosure(store).fence(domain, bucket, held.checkpoint().fencePosition().afterIdentity(),
+          1, permit, scope).join();
+      assertFalse(page.exhausted());
+      assertTrue(checkpoints.advance(held, page, scope).join());
+      return page.lastIdentity().orElseThrow();
+    } finally {
+      scope.cancel();
+      scope.cleanupOutcomeCompletion().toCompletableFuture().get(20, TimeUnit.SECONDS);
+      scope.physicalProducersCompletion().toCompletableFuture().get(20, TimeUnit.SECONDS);
+    }
+  }
+
+  private static java.util.List<ByteKey> manifestsInOneBucket(HBaseSystemRecordStore store, RequestScope scope) {
+    var identities = new java.util.ArrayList<ByteKey>();
+    for (int attempt = 0; identities.size() < 3 && attempt < 4096; attempt++) {
+      var root = ManifestRoot.create(TransactionId.create(),
+          1, 0, 1, 0, 0, Optional.empty());
+      var identity = root.systemIdentity();
+      if (!identities.isEmpty() && store.bucket(SystemRecordType.MANIFEST, identities.getFirst())
+          != store.bucket(SystemRecordType.MANIFEST, identity)) continue;
+      assertEquals(SystemRecordStore.CreateResult.CREATED, store.createIfAbsent(SystemRecordType.MANIFEST,
+          identity, ByteKey.copyOf(ManifestMessages.encode(root)), scope).join());
+      identities.add(identity);
+    }
+    assertEquals(3, identities.size());
+    return identities;
+  }
+
+  private static SystemRecordRetirement.Permit takeOverAndFence(SystemRecordGcTestFixture.Authority authority,
+      SystemTableBinding table, GcCheckpointStore checkpoints, HBaseSystemRecordStore store,
+      int bucket, RequestScope scope) throws BackendFailure {
+    var observed = authority.control().read(scope).join().orElseThrow();
+    long takeover = observed.state().ownerLeaseDeadlineEpochMillis() + 1;
+    assertTrue(authority.control().compareAndSet(observed,
+        observed.state().claimOwner("successor", takeover, takeover + 180_000), scope).join());
+    var nextState = authority.control().read(scope).join().orElseThrow().state();
+    var successor = new CommitOwnerService.OwnerToken("successor", nextState.ownerEpoch());
+    var nextAuthority = new SystemRecordGcTestFixture.Authority(authority.control(), authority.coordinator(),
+        authority.retention(), successor, authority.pins(), authority.eventPins());
+    var permit = nextAuthority.authorize(scope);
+    var held = fenceShard(store, table, checkpoints, permit, bucket, scope);
+    assertEquals(GcCheckpoint.Phase.SCANNING, held.checkpoint().phase());
+    assertEquals(successor.epoch(), held.checkpoint().maintenanceEpoch());
+    return permit;
+  }
+
+  private static GcCheckpointStore.Held fenceShard(HBaseSystemRecordStore store,
+      SystemTableBinding table, GcCheckpointStore checkpoints,
+      SystemRecordRetirement.Permit permit, int bucket, RequestScope scope) {
+    var domain = SystemRecordClosure.Domain.MANIFEST;
+    var proposal = GcCheckpoint.start(table.tableGroupId(), domain,
+        permit.authority().owner().epoch(), bucket, table.saltProfile().bucketCount(), permit);
+    var held = (GcCheckpointStore.Held) checkpoints.claim(proposal, scope).join();
+    for (int pages = 0; held.checkpoint().phase() == GcCheckpoint.Phase.FENCING; pages++) {
+      assertTrue(pages < 32);
+      var page = new HBaseSystemRecordClosure(store).fence(domain, bucket,
+          held.checkpoint().fencePosition().afterIdentity(), 16, permit, scope).join();
+      assertTrue(checkpoints.advance(held, page, scope).join());
+      held = (GcCheckpointStore.Held) checkpoints.claim(proposal, scope).join();
+    }
+    return held;
+  }
+
+  /** Keeps actual HBase CAS/Delete underneath controlled acknowledgement and dispatch races. */
+  private static final class Faults implements HBaseConnectionFactory {
+    final AtomicBoolean gateNext = new AtomicBoolean();
+    final AtomicBoolean loseFenceAcknowledgement = new AtomicBoolean();
+    final AtomicBoolean fenceWriteApplied = new AtomicBoolean();
+    final CompletableFuture<Void> mutationReached = new CompletableFuture<>();
+    final CompletableFuture<Void> resume = new CompletableFuture<>();
+    final AsyncConnection proxy;
+    Faults(AsyncConnection connection) {
+      proxy = (AsyncConnection) Proxy.newProxyInstance(AsyncConnection.class.getClassLoader(),
+          new Class<?>[] {AsyncConnection.class}, (self, method, args) -> {
+            Object result = invoke(connection, method, args);
+            return method.getName().equals("getTableBuilder") ? builder(result) : result;
+          });
+    }
+    private Object builder(Object target) {
+      return Proxy.newProxyInstance(AsyncTableBuilder.class.getClassLoader(), new Class<?>[] {AsyncTableBuilder.class},
+          (self, method, args) -> {
+            Object result = invoke(target, method, args);
+            if (result == target) return self;
+            return method.getName().equals("build") ? table(result) : result;
+          });
+    }
+    private Object table(Object target) {
+      return Proxy.newProxyInstance(AsyncTable.class.getClassLoader(), new Class<?>[] {AsyncTable.class},
+          (self, method, args) -> {
+            if (!method.getName().equals("checkAndMutate")) return invoke(target, method, args);
+            if (args[0] instanceof CheckAndMutate mutation
+                && mutation.getAction() instanceof RowMutations
+                && gateNext.compareAndSet(true, false)) {
+              mutationReached.complete(null);
+              return resume.thenCompose(ignored -> future(invoke(target, method, args)));
+            }
+            var actual = future(invoke(target, method, args));
+            if (args[0] instanceof CheckAndMutate mutation
+                && mutation.getAction() instanceof Put
+                && loseFenceAcknowledgement.compareAndSet(true, false)) {
+              return actual.thenCompose(value -> {
+                fenceWriteApplied.set(((CheckAndMutateResult) value).isSuccess());
+                return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN));
+              });
+            }
+            return actual;
+          });
+    }
+    private static Object invoke(Object target, java.lang.reflect.Method method, Object[] args) {
+      try { return method.invoke(target, args); }
+      catch (InvocationTargetException failure) { throw new CompletionException(failure.getCause()); }
+      catch (ReflectiveOperationException failure) { throw new CompletionException(failure); }
+    }
+    @SuppressWarnings("unchecked")
+    private static CompletableFuture<Object> future(Object value) { return (CompletableFuture<Object>) value; }
+    @Override public CompletableFuture<AsyncConnection> connectionFor(AuthorizedBackendIdentity identity) {
+      return CompletableFuture.completedFuture(proxy);
+    }
+    @Override public void close() { }
   }
 }
