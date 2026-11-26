@@ -293,8 +293,17 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         verifyExistingLeaseLimits(plan, activation, budgets, stores, authorization,
             business.lease().orElseThrow(), startup);
       }
+      // Open the physical-Compute storage once, under the startup scope, so an unavailable backend
+      // fails startup instead of silently degrading physical=true into a logical success.
+      var physicalHistory = java.util.Optional.<CompactGateway.HistoryCollection>of(
+          new PhysicalHistoryCollection(
+              await(io.etcdhbase.hbase.storage.HBaseHistoryKeyEnumerator.open(connections, identity,
+                  plan.system(), plan.primary(), plan.current(), startup), startup),
+              await(io.etcdhbase.hbase.storage.HBaseHistoryCollector.open(connections, identity,
+                  plan.system(), plan.primary(), plan.current(), activation.pinConfiguration(),
+                  startup), startup)));
       ServiceComponents services = assembleService(plan, activation, limits, identity, authorization, budgets,
-          pending, stores, invocations, owner, business, ownerForwarding, authSessions, connections);
+          pending, stores, invocations, owner, business, ownerForwarding, authSessions, connections, physicalHistory);
       await(pending.initialReadiness(), startup);
       startup.closeAsync(CLEANUP);
       await(CompletableFuture.allOf(startup.cleanupCompletion().toCompletableFuture(),
@@ -783,7 +792,8 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       AuthorizedBackendIdentity identity, ByteKey authorization, BudgetManager budgets, Pending pending,
       TableGroupStores stores, InvocationService invocations, M3OwnerLease owner,
       BusinessComponents business, OwnerForwardingRuntime ownerForwarding,
-      AuthSessionService authSessions, HBaseConnectionFactory connections) {
+      AuthSessionService authSessions, HBaseConnectionFactory connections,
+      java.util.Optional<CompactGateway.HistoryCollection> physicalHistory) {
     java.util.function.Predicate<String> trustedPeer = peer -> ownerForwarding == null
         ? owner.currentToken().map(token -> token.instance().equals(peer)).orElse(false)
         : ownerForwarding.isTrustedPeerIdentity(peer);
@@ -920,13 +930,14 @@ public final class M3TableGroupRuntime implements AutoCloseable {
                 })));
     return new ServiceComponents(new KvService(gateway, txnGateway, txnGateway::deleteRange,
         txnGateway::range).withCompact(assembleCompactGateway(plan, activation, identity, authorization,
-            authSessions, connections, stores, pending, owner)), leaseService, watchService, authService);
+            authSessions, connections, stores, pending, owner, physicalHistory)), leaseService, watchService, authService);
   }
 
   private static CompactGateway assembleCompactGateway(M3TableGroupPlan plan,
       M3RuntimeConfiguration activation, AuthorizedBackendIdentity identity, ByteKey authorization,
       AuthSessionService authSessions, HBaseConnectionFactory connections, TableGroupStores stores,
-      Pending pending, M3OwnerLease owner) {
+      Pending pending, M3OwnerLease owner,
+      java.util.Optional<CompactGateway.HistoryCollection> physicalHistory) {
     var compactTables = new java.util.ArrayList<org.apache.hadoop.hbase.TableName>();
     compactTables.add(plan.system().table());
     compactTables.add(plan.primary().table());
@@ -944,8 +955,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         requestScope -> stores.control().read(requestScope).thenApply(found ->
             found.orElseThrow(() -> new java.util.concurrent.CompletionException(
                 new BackendFailure(BackendFailure.Category.UNAVAILABLE))).state()),
-        // Physical completion needs durable enumeration and checkpoints, which J52.3 owns.
-        java.util.Optional.empty());
+        physicalHistory);
   }
 
   static MutationRelay localOwnerRelay(String tableGroupId, CommitControlStore control,

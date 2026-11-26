@@ -78,6 +78,44 @@ class J52HistoryCollectionIT {
   @AfterAll static void stop() throws Exception { if (environment != null) environment.close(); }
 
   @Test
+  void enumeratesEveryKeyInBoundedPagesThatPhysicalCompactCanDrain() throws Exception {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var group = group(StorageTableBinding.Layout.HISTORY, scope);
+      var keys = List.of(ByteKey.copyOf(new byte[] {1}), ByteKey.copyOf(new byte[] {2}),
+          ByteKey.copyOf(new byte[] {3}));
+      for (var key : keys) {
+        for (int version = 0; version < 4; version++) group.append(false, scope, key);
+      }
+      group.compact(4, scope);
+      var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
+          Clock.systemUTC()).authorizeHistory(OWNER, scope));
+
+      var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
+          environment.identity(), group.system, group.primary, group.current, scope));
+
+      var first = await(enumerator.nextKeys(permit, Optional.empty(), 2, scope));
+      assertEquals(2, first.keys().size(), "the page budget bounds enumeration");
+      assertFalse(first.exhausted());
+      var rest = await(enumerator.nextKeys(permit, first.lastKey(), 2, scope));
+      assertEquals(1, rest.keys().size(), "the resume point is exclusive");
+      assertTrue(rest.exhausted());
+      var all = new java.util.ArrayList<ByteKey>(first.keys());
+      all.addAll(rest.keys());
+      assertEquals(new java.util.TreeSet<>(keys), new java.util.TreeSet<>(all),
+          "every business key is enumerated exactly once");
+
+      // A physical Compact then deletes through the same permit, confirming actual work.
+      var collector = await(HBaseHistoryCollector.open(environment.factory(), environment.identity(),
+          group.system, group.primary, group.current, PIN_CONFIGURATION, scope));
+      int deleted = 0;
+      for (var key : all) {
+        deleted += await(collector.collectKey(permit, key, 0, 64, scope)).deletedVersions();
+      }
+      assertTrue(deleted > 0, "physical completion requires real deletions");
+    }
+  }
+
+  @Test
   void preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts() throws Exception {
     for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
       try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3));
@@ -327,13 +365,20 @@ class J52HistoryCollectionIT {
       compactions = new CompactionService(control, records, Clock.systemUTC());
     }
     PreparedCandidate append(boolean tombstone, RequestScope scope) throws Exception {
+      return append(tombstone, scope, key);
+    }
+
+    PreparedCandidate append(boolean tombstone, RequestScope scope, ByteKey selectedKey)
+        throws Exception {
       var observed = await(control.read(scope)).orElseThrow();
       var state = observed.state();
       long revision = state.publishedRevision() + 1;
       byte[] value = {(byte) revision};
       var metadata = new StorageMetadata(2, revision, revision - 1, 0,
           tombstone ? StorageMetadata.State.TOMBSTONE : StorageMetadata.State.LIVE, tombstone ? 0 : 1);
-      var record = tombstone ? StoredRecord.metadataOnly(key, metadata) : StoredRecord.live(key, metadata, value);
+      var record = tombstone
+          ? StoredRecord.metadataOnly(selectedKey, metadata)
+          : StoredRecord.live(selectedKey, metadata, value);
       var candidate = new PreparedCandidate(TransactionId.create(), OWNER.epoch(),
           state.publishedSequence(), state.publishedRevision(), record);
       CommitDecision decision = decision(candidate);
