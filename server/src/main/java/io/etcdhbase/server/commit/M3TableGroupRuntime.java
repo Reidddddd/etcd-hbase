@@ -878,6 +878,12 @@ public final class M3TableGroupRuntime implements AutoCloseable {
           owner::currentToken, stores, pending.eventPins, budgets, authorization,
           pending, business.metrics());
       var history = new EventHistoryCycle(backfill, tailer, business.metrics());
+      // Event/history collection authority. It raises the durable event floors and returns the
+      // boundary that system-record retirement may use; it never deletes on its own.
+      var eventRetention = new io.etcdhbase.core.commit.EventHistoryRetention(pending.eventPins,
+          stores.views(),
+          new io.etcdhbase.core.commit.EventIndexBackfillReader(stores.records(), stores.manifests()));
+      pending.installEventRetention(eventRetention);
       pending.installEventHistoryWorker(new EventHistoryWorker(
           pending.leaseTimers, owner::currentToken, history::run, business.metrics()));
       var selectedEvents = new SelectedSequenceReader(pending.eventPins, stores.control(),
@@ -1046,6 +1052,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     private ThreadPoolExecutor worker;
     private RangeReadCache cache;
     private volatile EventHistoryPinManager eventPins;
+    private volatile io.etcdhbase.core.commit.EventHistoryRetention eventRetention;
     private volatile BudgetManager.Account eventTailerMemory;
     private volatile SharedEventTailer eventTailer;
     private CompletableFuture<SharedEventTailer> eventTailerReady = new CompletableFuture<>();
@@ -1131,6 +1138,15 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       }
       expiryWorker = worker;
       worker.start();
+    }
+
+    synchronized void installEventRetention(
+        io.etcdhbase.core.commit.EventHistoryRetention retention) {
+      Objects.requireNonNull(retention, "retention");
+      if (closing.get() || ownerLost) {
+        throw new IllegalStateException("event retention cannot be installed now");
+      }
+      eventRetention = retention;
     }
 
     synchronized void installEventHistoryWorker(EventHistoryWorker worker) {
