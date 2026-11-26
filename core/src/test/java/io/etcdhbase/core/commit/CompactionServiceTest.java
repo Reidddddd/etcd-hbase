@@ -157,6 +157,21 @@ class CompactionServiceTest {
   }
 
   @Test
+  void deniedAuthorizationCannotCreateACompactionRecord() {
+    var fixture = new Fixture(8, 7);
+    var proof = CommitAuthorizationProof.capture(AUTHORIZATION, 0, (identity, generation, scope) ->
+        CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.PERMISSION)));
+    try (var scope = RequestScope.withoutDeadline()) {
+      assertEquals(BackendFailure.Category.PERMISSION, assertInstanceOf(BackendFailure.class,
+          failure(() -> fixture.service.compact(5, fixture.binding(), OWNER, proof, scope).join()))
+          .category());
+      assertTrue(fixture.records.values.isEmpty(), "rejected callers must not persist Compact work");
+      assertEquals(0, fixture.control.state.compactRevision());
+      assertEquals(0, fixture.control.selections);
+    }
+  }
+
+  @Test
   void permissionFailureIsNotHiddenByReadbackAndCancellationStopsNewSelection() {
     var fixture = new Fixture(8, 7);
     try (var scope = RequestScope.withoutDeadline()) {

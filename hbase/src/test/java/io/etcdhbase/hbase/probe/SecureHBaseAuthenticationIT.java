@@ -162,6 +162,45 @@ class SecureHBaseAuthenticationIT {
   }
 
   @Test
+  void adminPermissionChecksUseTheAuthenticatedUserAndObserveRevocation() throws Exception {
+    var management = HBaseAccessVerifiers.tablePermissions(
+        List.of(new TableAccess(table, Set.of(Action.ADMIN))));
+    var adminPermission = Permission.newBuilder(table).withActions(Action.ADMIN).build();
+    var grant = new UserPermission("alice", adminPermission);
+    try (var provider = provider(HBaseAuthenticators.kerberosPassword())) {
+      var identity = authenticate(provider, "alice@" + realm, TemporaryKerberosSecurity.PASSWORD.toCharArray());
+      var borrow = provider.borrow(identity);
+      try {
+        var connection = await(provider.connectionFor(borrow.identity()).toCompletableFuture());
+        var denied = assertThrows(ExecutionException.class,
+            () -> await(management.verify(connection, SCOPE).toCompletableFuture()));
+        assertEquals(Reason.INSUFFICIENT_PERMISSION,
+            assertInstanceOf(BackendIdentityException.class, denied.getCause()).reason());
+
+        grantAndAwait("alice", Set.of(Action.READ, Action.WRITE, Action.EXEC, Action.ADMIN));
+        await(management.verify(connection, SCOPE).toCompletableFuture());
+        await(adminConnection.getAdmin().revoke(grant));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (await(adminConnection.getAdmin().hasUserPermissions("alice", List.of(adminPermission)))
+            .equals(List.of(true)) && System.nanoTime() < deadline) {
+          Thread.sleep(50);
+        }
+        assertEquals(List.of(false), await(adminConnection.getAdmin()
+            .hasUserPermissions("alice", List.of(adminPermission))));
+        var revoked = assertThrows(ExecutionException.class,
+            () -> await(management.verify(connection, SCOPE).toCompletableFuture()));
+        assertEquals(Reason.INSUFFICIENT_PERMISSION,
+            assertInstanceOf(BackendIdentityException.class, revoked.getCause()).reason());
+      } finally {
+        await(borrow.release().toCompletableFuture());
+      }
+    } finally {
+      await(adminConnection.getAdmin().revoke(grant));
+      grantAndAwait("alice", Set.of(Action.READ, Action.WRITE, Action.EXEC));
+    }
+  }
+
+  @Test
   void revokedPermissionDeniesLiveBackendReadsAndFreshAuthentication() throws Exception {
     String user = "revocation-user";
     String principal = user + "@" + realm;

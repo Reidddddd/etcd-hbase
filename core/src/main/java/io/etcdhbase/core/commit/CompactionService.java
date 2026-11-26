@@ -37,15 +37,24 @@ public final class CompactionService {
             observed.state().publishedRevision(), owner.epoch(), observed.state().publishedSequence(),
             observed.state().stateVersion(), ManifestDigest.sha256(observed.comparisonToken()),
             CompactionOperation.Stage.PREPARED);
-        return records.createIfAbsent(SystemRecordType.COMPACTION, identity(proposed.id()), proposed.encode(), scope)
-            .handle((created, failure) -> {
-              requireKnownOrUnknownWrite(failure);
-              return created;
-            }).thenCompose(ignored -> read(proposed.id(), scope))
-            .thenCompose(stored -> resume(stored.orElseThrow(() -> unknown(null)), revision,
-                binding, owner, authorization, scope));
+        return authorization.reauthorize(observed.state().authorizationBarrierGeneration(), scope)
+            .thenCompose(checked -> createOperationRecord(proposed, scope)
+                .handle((created, failure) -> {
+                  requireKnownOrUnknownWrite(failure);
+                  return created;
+                }).thenCompose(ignored -> read(proposed.id(), scope))
+                .thenCompose(stored -> resume(stored.orElseThrow(() -> unknown(null)), revision,
+                    binding, owner, authorization, scope)));
       });
     });
+  }
+
+  private CompletableFuture<SystemRecordStore.CreateResult> createOperationRecord(
+      CompactionOperation proposed, RequestScope scope) {
+    if (scope.isClosed() || scope.isDeadlineExceeded()) return failed(scope.isDeadlineExceeded()
+        ? BackendFailure.Category.TIMEOUT : BackendFailure.Category.CANCELLED);
+    return records.createIfAbsent(
+        SystemRecordType.COMPACTION, identity(proposed.id()), proposed.encode(), scope);
   }
 
   /** Reconciles the previous selection before another Compact may replace its control identity. */

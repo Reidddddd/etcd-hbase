@@ -2,7 +2,6 @@ package io.etcdhbase.server.commit;
 
 import etcdserverpb.Rpc;
 import io.etcdhbase.core.bytes.ByteKey;
-import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitState;
 import io.etcdhbase.core.commit.CompactionOperation;
@@ -18,13 +17,14 @@ import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.grpc.protocol.ErrorProjection;
 import io.etcdhbase.grpc.protocol.ResponseHeaderFactory;
-import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
+import io.etcdhbase.grpc.RequestScopeInterceptor;
 import io.grpc.stub.StreamObserver;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,61 +51,53 @@ public final class CompactGateway
         java.util.function.Function<RequestScope, CompletableFuture<Void>> work);
   }
 
-  /** Resolves the current RPC scope; a seam so ordering can be tested without gRPC context. */
-  @FunctionalInterface
-  public interface RequestScopes {
-    RequestScope current();
-  }
-
-  public CompactGateway(String tableGroup, AuthorizedBackendIdentity identity, ByteKey authorization,
-      long clusterId, long memberId, CompactionService compactions, GcCoordinator gc,
-      LaneSubmitter lane, RequestScopes scopes,
+  CompactGateway(CompactRequestAuthorization authorizations, long clusterId, long memberId,
+      CompactionService compactions, GcCoordinator gc,
+      LaneSubmitter lane,
       Supplier<java.util.Optional<CommitOwnerService.OwnerToken>> owner,
       java.util.function.Function<RequestScope, CompletableFuture<CommitState>> controlState,
       java.util.Optional<HistoryCollection> collection) {
-    this.tableGroup = Objects.requireNonNull(tableGroup, "tableGroup");
-    this.identity = Objects.requireNonNull(identity, "identity");
-    this.authorization = Objects.requireNonNull(authorization, "authorization");
+    this.authorizations = Objects.requireNonNull(authorizations, "authorizations");
     this.compactions = Objects.requireNonNull(compactions, "compactions");
     this.gc = Objects.requireNonNull(gc, "gc");
     this.lane = Objects.requireNonNull(lane, "lane");
-    this.scopes = Objects.requireNonNull(scopes, "scopes");
     this.owner = Objects.requireNonNull(owner, "owner");
     this.controlState = Objects.requireNonNull(controlState, "controlState");
     this.collection = Objects.requireNonNull(collection, "collection");
-    if (tableGroup.isBlank() || !identity.scope().tableGroupId().equals(tableGroup)
-        || !identity.allowedTableGroupIds().contains(tableGroup)
-        || authorization.length() != 32 || clusterId == 0 || memberId == 0) {
+    if (clusterId == 0 || memberId == 0) {
       throw new IllegalArgumentException("invalid Compact gateway identity");
     }
     this.clusterId = clusterId;
     this.memberId = memberId;
   }
 
-  private final String tableGroup;
-  private final AuthorizedBackendIdentity identity;
-  private final ByteKey authorization;
+  private final CompactRequestAuthorization authorizations;
   private final long clusterId;
   private final long memberId;
   private final CompactionService compactions;
   private final GcCoordinator gc;
   private final LaneSubmitter lane;
-  private final RequestScopes scopes;
   private final Supplier<java.util.Optional<CommitOwnerService.OwnerToken>> owner;
   private final java.util.function.Function<RequestScope, CompletableFuture<CommitState>> controlState;
   private final java.util.Optional<HistoryCollection> collection;
 
   @Override
   public void accept(Rpc.CompactionRequest request, StreamObserver<Rpc.CompactionResponse> observer) {
+    accept(request, RequestScopeInterceptor.currentAuthToken(), RequestScopeInterceptor.currentScope(), observer);
+  }
+
+  void accept(Rpc.CompactionRequest request, Optional<String> token, RequestScope scope,
+      StreamObserver<Rpc.CompactionResponse> observer) {
     Objects.requireNonNull(request, "request");
     Objects.requireNonNull(observer, "observer");
-    RequestScope scope = scopes.current();
+    Objects.requireNonNull(token, "token");
+    Objects.requireNonNull(scope, "scope");
     var terminal = new AtomicBoolean();
     var drained = new CompletableFuture<Void>();
     if (!scope.startIfOpen(() -> scope.trackPhysicalProducer(drained))) return;
     try {
       lane.submit(request.getSerializedSize(), scope,
-              laneScope -> execute(request, laneScope, observer, terminal))
+              laneScope -> execute(request, token, laneScope, observer, terminal))
           .whenComplete((settled, failure) -> drained.complete(null));
     } catch (RuntimeException failure) {
       drained.complete(null);
@@ -118,33 +110,29 @@ public final class CompactGateway
   }
 
   /** Runs on the serialized owner lane; never blocks that lane on another queue. */
-  private CompletableFuture<Void> execute(Rpc.CompactionRequest request, RequestScope scope,
+  private CompletableFuture<Void> execute(Rpc.CompactionRequest request, Optional<String> token,
+      RequestScope scope,
       StreamObserver<Rpc.CompactionResponse> observer, AtomicBoolean terminal) {
+    return authorizations.resolve(token, scope)
+        .thenCompose(identity -> select(request, identity, scope))
+        .handle((selected, failure) -> {
+          deliver(observer, terminal, selected, failure, scope);
+          return null;
+        });
+  }
+
+  private CompletableFuture<CompactionOperation> select(Rpc.CompactionRequest request,
+      AuthenticatedRequestIdentityResolver.ResolvedRequestIdentity identity, RequestScope scope) {
     java.util.Optional<CommitOwnerService.OwnerToken> currentOwner = owner.get();
     if (currentOwner.isEmpty()) {
-      signalError(observer, terminal, new BackendFailure(BackendFailure.Category.UNAVAILABLE));
-      return CompletableFuture.completedFuture(null);
+      return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
     }
     return controlState.apply(scope).thenCompose(state -> {
-      CompactionCommand command = command(request, state);
-      CommitAuthorizationProof proof = CommitAuthorizationProof.capture(
-          ServiceAuthorizationContextReference.create(identity, authorization),
-          state.authorizationBarrierGeneration(),
-          (expected, generation, proofScope) ->
-              generation != state.authorizationBarrierGeneration()
-                  ? CompletableFuture.failedFuture(
-                      new BackendFailure(BackendFailure.Category.PERMISSION))
-                  : expected.equals(
-                      ServiceAuthorizationContextReference.create(identity, authorization))
-                      ? CompletableFuture.completedFuture(null)
-                      : CompletableFuture.failedFuture(
-                          new BackendFailure(BackendFailure.Category.PERMISSION)));
+      CompactionCommand command = command(request, state, identity.authorizationDigest());
+      var proof = authorizations.captureProof(identity, state.authorizationBarrierGeneration());
       return compactions.compact(command.revision(), command.binding(), currentOwner.orElseThrow(),
               proof, scope)
           .thenCompose(selected -> collect(command, selected, scope));
-    }).handle((selected, failure) -> {
-      deliver(observer, terminal, selected, failure, scope);
-      return null;
     });
   }
 
@@ -198,7 +186,8 @@ public final class CompactGateway
     observer.onCompleted();
   }
 
-  private CompactionCommand command(Rpc.CompactionRequest request, CommitState state) {
+  private CompactionCommand command(
+      Rpc.CompactionRequest request, CommitState state, ByteKey authorization) {
     InvocationId invocation = InvocationId.create();
     InvocationBinding binding = InvocationBinding.begin(invocation,
         requestDigest(request.getRevision(), request.getPhysical()), authorization,

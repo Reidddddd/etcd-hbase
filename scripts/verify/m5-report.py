@@ -402,6 +402,7 @@ J52_REQUIRED_TESTS = {
         "binaryIdentityRoundTripsForEveryRecordDomain",
     },
     ('core', 'surefire', 'io.etcdhbase.core.commit.CompactionServiceTest'): {
+        'deniedAuthorizationCannotCreateACompactionRecord',
         'authorizationBarrierRaceRevalidatesAndUsesExactFullState',
         'matchesNativeZeroRepeatedFutureAndNegativeBoundariesWithoutKvCommit',
         'ownerTakeoverAndInvocationConflictCannotSelectAPreparedOperation',

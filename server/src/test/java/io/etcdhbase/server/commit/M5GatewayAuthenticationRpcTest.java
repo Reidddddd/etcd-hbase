@@ -445,7 +445,7 @@ class M5GatewayAuthenticationRpcTest {
     assertEquals("etcdserver: invalid auth token", failure.getStatus().getDescription());
   }
 
-  private static final class RpcNode implements AutoCloseable {
+  static final class RpcNode implements AutoCloseable {
     private final io.grpc.Server server;
     private final ScheduledThreadPoolExecutor deadlines;
     private final RequestScopeInterceptor requests;

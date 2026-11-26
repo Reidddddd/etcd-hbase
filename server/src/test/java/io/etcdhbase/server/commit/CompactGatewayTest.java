@@ -52,7 +52,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(5, false), observer);
+      fixture.gateway().accept(compact(5, false), java.util.Optional.empty(), scope, observer);
     }
 
     assertEquals(1, observer.responses.get(), describe(observer.failure.get()));
@@ -75,7 +75,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(5, true), observer);
+      fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
       assertEquals(0, observer.responses.get(), "physical must not answer before its pages finish");
       collect.complete(3);
     }
@@ -93,7 +93,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(5, true), observer);
+      fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
     }
 
     assertEquals(0, observer.responses.get());
@@ -108,7 +108,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(5, true), observer);
+      fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
     }
 
     assertEquals(0, observer.responses.get(),
@@ -124,7 +124,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(5, false), observer);
+      fixture.gateway().accept(compact(5, false), java.util.Optional.empty(), scope, observer);
     }
 
     assertEquals(1, observer.responses.get());
@@ -136,7 +136,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(5, false), observer);
+      fixture.gateway().accept(compact(5, false), java.util.Optional.empty(), scope, observer);
     }
 
     assertEquals(0, observer.responses.get());
@@ -151,7 +151,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(99, false), observer);
+      fixture.gateway().accept(compact(99, false), java.util.Optional.empty(), scope, observer);
     }
 
     assertEquals(0, observer.responses.get());
@@ -167,7 +167,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(5, false), observer);
+      fixture.gateway().accept(compact(5, false), java.util.Optional.empty(), scope, observer);
     }
 
     assertEquals(0, observer.responses.get());
@@ -184,7 +184,7 @@ class CompactGatewayTest {
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
-      fixture.gateway().accept(compact(5, true), observer);
+      fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
       scope.cancel();
       collect.complete(1);
     }
@@ -215,7 +215,6 @@ class CompactGatewayTest {
     };
     private volatile boolean collectorWired = true;
     private volatile boolean ownerPresent = true;
-    private final AtomicReference<RequestScope> current = new AtomicReference<>();
 
     private Fixture(CompactionOperation.Stage stage, long responseRevision) {
       var operation = mock(CompactionOperation.class);
@@ -231,14 +230,15 @@ class CompactGatewayTest {
     }
 
     private RequestScope scope() {
-      RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(5));
-      current.set(scope);
-      return scope;
+      return RequestScope.withTimeout(Duration.ofSeconds(5));
     }
 
     private CompactGateway gateway() {
-      return new CompactGateway(GROUP, IDENTITY, AUTHORIZATION, CLUSTER, MEMBER, compactions, gc,
-          (bytes, scope, work) -> work.apply(scope), current::get, () -> {
+      var authorization = new CompactRequestAuthorization(GROUP, IDENTITY, AUTHORIZATION, null,
+          mock(io.etcdhbase.hbase.api.HBaseConnectionFactory.class),
+          java.util.List.of(org.apache.hadoop.hbase.TableName.valueOf("compact-test")));
+      return new CompactGateway(authorization, CLUSTER, MEMBER, compactions, gc,
+          (bytes, scope, work) -> work.apply(scope), () -> {
             return ownerPresent ? java.util.Optional.of(OWNER) : java.util.Optional.empty();
           },
           scope -> CompletableFuture.completedFuture(

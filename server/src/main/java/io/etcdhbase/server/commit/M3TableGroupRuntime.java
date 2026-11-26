@@ -291,7 +291,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
             business.lease().orElseThrow(), startup);
       }
       ServiceComponents services = assembleService(plan, activation, limits, identity, authorization, budgets,
-          pending, stores, invocations, owner, business, ownerForwarding, authSessions);
+          pending, stores, invocations, owner, business, ownerForwarding, authSessions, connections);
       await(pending.initialReadiness(), startup);
       startup.closeAsync(CLEANUP);
       await(CompletableFuture.allOf(startup.cleanupCompletion().toCompletableFuture(),
@@ -780,7 +780,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       AuthorizedBackendIdentity identity, ByteKey authorization, BudgetManager budgets, Pending pending,
       TableGroupStores stores, InvocationService invocations, M3OwnerLease owner,
       BusinessComponents business, OwnerForwardingRuntime ownerForwarding,
-      AuthSessionService authSessions) {
+      AuthSessionService authSessions, HBaseConnectionFactory connections) {
     java.util.function.Predicate<String> trustedPeer = peer -> ownerForwarding == null
         ? owner.currentToken().map(token -> token.instance().equals(peer)).orElse(false)
         : ownerForwarding.isTrustedPeerIdentity(peer);
@@ -899,24 +899,34 @@ public final class M3TableGroupRuntime implements AutoCloseable {
                   return ResponseHeaderFactory.create(stores.clusterId(), activation.memberIdBits(),
                       snapshot.state().publishedRevision(), 0);
                 })));
-    var compactionGateway = new CompactGateway(plan.source().tableGroupId(), identity, authorization,
+    return new ServiceComponents(new KvService(gateway, txnGateway, txnGateway::deleteRange,
+        txnGateway::range).withCompact(assembleCompactGateway(plan, activation, identity, authorization,
+            authSessions, connections, stores, pending, owner)), leaseService, watchService, authService);
+  }
+
+  private static CompactGateway assembleCompactGateway(M3TableGroupPlan plan,
+      M3RuntimeConfiguration activation, AuthorizedBackendIdentity identity, ByteKey authorization,
+      AuthSessionService authSessions, HBaseConnectionFactory connections, TableGroupStores stores,
+      Pending pending, M3OwnerLease owner) {
+    var compactTables = new java.util.ArrayList<org.apache.hadoop.hbase.TableName>();
+    compactTables.add(plan.system().table());
+    compactTables.add(plan.primary().table());
+    plan.current().ifPresent(current -> compactTables.add(current.table()));
+    var compactAuthorization = new CompactRequestAuthorization(plan.source().tableGroupId(), identity,
+        authorization, authSessions, connections, compactTables);
+    var compactions = new io.etcdhbase.core.commit.CompactionService(
+        stores.control(), stores.records(), Clock.systemUTC());
+    return new CompactGateway(compactAuthorization,
         stores.clusterId(), activation.memberIdBits(),
-        new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(),
-            java.time.Clock.systemUTC()),
-        new io.etcdhbase.core.commit.GcCoordinator(stores.control(),
-            new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(),
-                java.time.Clock.systemUTC()),
-            stores.pins(), java.time.Clock.systemUTC()),
+        compactions, new io.etcdhbase.core.commit.GcCoordinator(
+            stores.control(), compactions, stores.pins(), Clock.systemUTC()),
         (bytes, requestScope, work) -> pending.queue.submit(bytes, requestScope, work),
-        io.etcdhbase.grpc.RequestScopeInterceptor::currentScope,
         owner::currentToken,
         requestScope -> stores.control().read(requestScope).thenApply(found ->
             found.orElseThrow(() -> new java.util.concurrent.CompletionException(
                 new BackendFailure(BackendFailure.Category.UNAVAILABLE))).state()),
         // Physical completion needs durable enumeration and checkpoints, which J52.3 owns.
         java.util.Optional.empty());
-    return new ServiceComponents(new KvService(gateway, txnGateway, txnGateway::deleteRange,
-        txnGateway::range).withCompact(compactionGateway), leaseService, watchService, authService);
   }
 
   static MutationRelay localOwnerRelay(String tableGroupId, CommitControlStore control,

@@ -6,6 +6,10 @@
 
 `physical=false` 返回本次逻辑选择结果。当前运行时尚未装配历史枚举与持久检查点，`physical=true` 在逻辑选择成功后返回 `UNAVAILABLE`；该错误不撤销已持久化的逻辑压缩边界，也不表示物理回收完成。请求取消或超时后不返回成功响应。
 
+启用会话认证时，网关从当前 RPC 的 token 解析用户身份。创建 COMPACTION 记录前和逻辑边界 CAS 前，均复核同一会话及授权代次，并使用该用户的真实 HBase 连接检查表组内 system、history/native 和 current 表的 `ADMIN` 权限。缺失、无效或已撤销的会话，以及管理权限不足的请求，在准入时不创建操作记录，也不改变控制行；权限检查不受支持或不可用时同样拒绝执行。会话认证关闭时，配置的后端身份仍须通过相同的 `ADMIN` 检查，不因使用服务身份而豁免。
+
+已获授权并创建 PREPARED 记录后，会话或管理权限若在选择前失效，CAS 前复核阻止推进逻辑边界，已创建的准备记录保留原身份。取消只结束请求结果；用户身份借用仍持有到实际连接或权限 RPC 排空，不取消共享连接 future。HBase 外部 ACL 与控制行 CAS 不属于同一事务；这里的实际权限复核不能宣称提供外部权限系统的原子撤销保证。
+
 新的操作先以 `COMPACTION` 类别持久保存请求身份、授权范围、目标 revision 和完整控制状态摘要，再用控制行 CAS 选择逻辑边界。控制行的 `compact_operation_id` 使丢失 ACK 的操作可以按原身份恢复；替换该身份前，必须先持久确认前一操作的逻辑结论。逻辑压缩不增加 KV revision 或 sequence。控制状态未启用授权发布屏障时拒绝选择；控制行含 Compact 身份但 descriptor 未声明能力时拒绝读取。
 
 初始 `Compact(0)` 与已压缩到零不同。固定 etcd v3.5.23 的原生对照覆盖初始零、负数、重复、未来 revision，以及 Compact 后 Range/Watch 的 C−1、C、C+1 边界。重复与未来 revision 在网关中投影为 `OUT_OF_RANGE`。Go 测试目前只提供原生行为依据，不代表 Java Compact RPC 已互通。
@@ -24,7 +28,7 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 以下内容属于已批准的 J52，当前仍需实现：
 
-- 跨副本 owner RPC 转发、实际用户连接的管理权限复核、前后台身份与调度生命周期。
+- 跨副本 owner RPC 转发、前后台身份与调度生命周期，以及真实目标环境的管理权限验收。
 - 结合 `EventHistoryRetention`、tailer/backfill 和确切根引用的事件、索引、manifest、候选、决定及结果回收闭包。
 - invocation 结果窗口的运行时关闭、在途结果查询的持久保护，以及不可重放的最小证明。
 - 持久 GC 检查点、重启接管，以及 `physical=false` 的工作登记和 `physical=true` 的完成等待、超时后后台继续。
@@ -42,3 +46,5 @@ scripts/verify/m5.sh --scope public --task J52 --artifact-root .artifacts/m5/j52
 ```
 
 入口运行确定性逻辑/pin 单测、HISTORY/NATIVE MiniCluster 和固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。它登记在 M5 CI 中，运行报告明确保留第 3 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
+
+网关的请求授权、真实 gRPC token 传递、CAS 前失效及取消排空回归属于 server 单测，由 J09 的完整构建执行；不将 server 套件登记到只构建 hbase 的 J52 存储门禁。真实 Kerberos/HBase 的 `ADMIN` 授予与撤销反例属于 J04 的安全后端集成测试；替身网关测试和实际后端 ACL 测试各自保留验证范围。
