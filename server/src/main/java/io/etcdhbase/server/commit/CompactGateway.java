@@ -47,8 +47,8 @@ public final class CompactGateway
   /** The serialized owner lane; {@link SerialMutationQueue} is the production implementation. */
   @FunctionalInterface
   public interface LaneSubmitter {
-    CompletableFuture<Void> submit(long requestBytes, RequestScope scope,
-        java.util.function.Function<RequestScope, CompletableFuture<Void>> work);
+    CompletableFuture<CompactionOperation> submit(long requestBytes, RequestScope scope,
+        java.util.function.Function<RequestScope, CompletableFuture<CompactionOperation>> work);
   }
 
   CompactGateway(CompactRequestAuthorization authorizations, long clusterId, long memberId,
@@ -96,9 +96,17 @@ public final class CompactGateway
     var drained = new CompletableFuture<Void>();
     if (!scope.startIfOpen(() -> scope.trackPhysicalProducer(drained))) return;
     try {
-      lane.submit(request.getSerializedSize(), scope,
-              laneScope -> execute(request, token, laneScope, observer, terminal))
-          .whenComplete((settled, failure) -> drained.complete(null));
+      // Proto3 omits default fields, so a valid Compact(0) still needs one admission unit.
+      lane.submit(Math.max(1, request.getSerializedSize()), scope,
+              laneScope -> execute(request, token, laneScope))
+          .whenComplete((selected, failure) -> {
+            try {
+              // The queue receipt includes service-scope cleanup, while delivery belongs to the RPC.
+              deliver(observer, terminal, selected, failure, scope);
+            } finally {
+              drained.complete(null);
+            }
+          });
     } catch (RuntimeException failure) {
       drained.complete(null);
       signalError(observer, terminal, failure);
@@ -109,16 +117,11 @@ public final class CompactGateway
     }
   }
 
-  /** Runs on the serialized owner lane; never blocks that lane on another queue. */
-  private CompletableFuture<Void> execute(Rpc.CompactionRequest request, Optional<String> token,
-      RequestScope scope,
-      StreamObserver<Rpc.CompactionResponse> observer, AtomicBoolean terminal) {
-    return authorizations.resolve(token, scope)
-        .thenCompose(identity -> select(request, identity, scope))
-        .handle((selected, failure) -> {
-          deliver(observer, terminal, selected, failure, scope);
-          return null;
-        });
+  /** The lane retains ownership of accepted work until its service scope has drained. */
+  private CompletableFuture<CompactionOperation> execute(
+      Rpc.CompactionRequest request, Optional<String> token, RequestScope serviceScope) {
+    return authorizations.resolve(token, serviceScope)
+        .thenCompose(identity -> select(request, identity, serviceScope));
   }
 
   private CompletableFuture<CompactionOperation> select(Rpc.CompactionRequest request,

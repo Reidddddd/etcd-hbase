@@ -14,6 +14,8 @@
 
 初始 `Compact(0)` 与已压缩到零不同。固定 etcd v3.5.23 的原生对照覆盖初始零、负数、重复、未来 revision，以及 Compact 后 Range/Watch 的 C−1、C、C+1 边界。重复与未来 revision 在网关中投影为 `OUT_OF_RANGE`。Go 测试目前只提供原生行为依据，不代表 Java Compact RPC 已互通。
 
+`Compact(0, physical=false)` 的 protobuf 编码可以为空，网关仍以一个最小计量单位提交 owner lane。队列因关闭或容量限制拒绝请求时，网关会投影该错误。已派发工作使用队列拥有的服务 scope 完成；成功响应等待该 scope 清理结束，清理失败不会被投影为成功。是否可以返回成功仍由原 RPC scope 决定，客户端取消或清理失败不等于回滚已选择的逻辑边界。
+
 ## 2. KV 历史回收约束
 
 回收许可绑定 profile、pin 注册表、逻辑操作及本轮 scope。所有分片的 revision/sequence 注册 floor 确认后，活动 pin 继续分别限制两个边界。回收器重新核对 owner 和控制身份；HBase 适配器再次核对本表组实际 pin 注册表。许可只允许处理冗余 KV 物化版本。

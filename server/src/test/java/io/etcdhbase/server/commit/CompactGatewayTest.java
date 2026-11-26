@@ -1,6 +1,7 @@
 package io.etcdhbase.server.commit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -30,6 +31,8 @@ import io.grpc.stub.StreamObserver;
 import java.time.Duration;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -45,6 +48,109 @@ class CompactGatewayTest {
   private static final ByteKey AUTHORIZATION = ByteKey.copyOf(new byte[32]);
   private static final CommitOwnerService.OwnerToken OWNER =
       new CommitOwnerService.OwnerToken("owner-instance", 4);
+
+  @Test
+  void emptyEncodedZeroRequestCanEnterTheRealOwnerLane() throws Exception {
+    var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
+    var queue = queue(fixture);
+    try (var scope = fixture.scope()) {
+      var observer = new RecordingObserver();
+      assertEquals(0, compact(0, false).getSerializedSize());
+      fixture.gateway().accept(compact(0, false), java.util.Optional.empty(), scope, observer);
+      observer.terminal.get(5, TimeUnit.SECONDS);
+      assertEquals(1, observer.responses.get());
+      assertNull(observer.failure.get());
+    } finally {
+      closeQueue(queue);
+    }
+  }
+
+  @Test
+  void realLaneRejectionReturnsAnErrorInsteadOfHanging() throws Exception {
+    var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
+    var queue = queue(fixture);
+    try (var scope = fixture.scope()) {
+      queue.close();
+      var observer = new RecordingObserver();
+      fixture.gateway().accept(compact(5, false), java.util.Optional.empty(), scope, observer);
+      observer.terminal.get(5, TimeUnit.SECONDS);
+      assertEquals(0, observer.responses.get());
+      assertEquals(Status.Code.UNAVAILABLE,
+          assertInstanceOf(StatusRuntimeException.class, observer.failure.get()).getStatus().getCode());
+    } finally {
+      closeQueue(queue);
+    }
+  }
+
+  @Test
+  void dispatchedServiceScopeCannotSendSuccessAfterTheRpcScopeIsCancelled() throws Exception {
+    var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
+    var collection = new CompletableFuture<Integer>();
+    var started = new CountDownLatch(1);
+    fixture.collection = (permit, serviceScope) -> {
+      started.countDown();
+      return collection;
+    };
+    var queue = queue(fixture);
+    try (var scope = fixture.scope()) {
+      var observer = new RecordingObserver();
+      fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
+      assertTrue(started.await(5, TimeUnit.SECONDS));
+      scope.cancel();
+      collection.complete(1);
+      queue.close();
+      queue.drained().get(5, TimeUnit.SECONDS);
+      observer.terminal.get(5, TimeUnit.SECONDS);
+      assertEquals(0, observer.responses.get());
+      assertEquals(Status.Code.CANCELLED,
+          assertInstanceOf(StatusRuntimeException.class, observer.failure.get()).getStatus().getCode());
+    } finally {
+      collection.complete(1);
+      closeQueue(queue);
+    }
+  }
+
+  @Test
+  void realLaneSuccessWaitsForServiceCleanup() throws Exception {
+    assertResponseWaitsForCleanup(false);
+  }
+
+  @Test
+  void realLaneCleanupFailureCannotFollowAnAlreadySentSuccess() throws Exception {
+    assertResponseWaitsForCleanup(true);
+  }
+
+  private static void assertResponseWaitsForCleanup(boolean failCleanup) throws Exception {
+    var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
+    var cleanup = new CompletableFuture<Void>();
+    var cleanupStarted = new CountDownLatch(1);
+    fixture.collection = (permit, serviceScope) -> {
+      serviceScope.registerScopedCleanup(cleanupStarted::countDown, cleanup);
+      return CompletableFuture.completedFuture(1);
+    };
+    var queue = queue(fixture);
+    try (var scope = fixture.scope()) {
+      var observer = new RecordingObserver();
+      fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
+      assertTrue(cleanupStarted.await(5, TimeUnit.SECONDS));
+      assertEquals(0, observer.responses.get(), "queue-owned cleanup must settle before success");
+      assertFalse(observer.terminal.isDone());
+      if (failCleanup) cleanup.completeExceptionally(new IllegalStateException("fixture cleanup failed"));
+      else cleanup.complete(null);
+      observer.terminal.get(5, TimeUnit.SECONDS);
+      if (failCleanup) {
+        assertEquals(0, observer.responses.get());
+        assertEquals(Status.Code.INTERNAL,
+            assertInstanceOf(StatusRuntimeException.class, observer.failure.get()).getStatus().getCode());
+      } else {
+        assertEquals(1, observer.responses.get());
+        assertNull(observer.failure.get());
+      }
+    } finally {
+      cleanup.complete(null);
+      closeQueue(queue);
+    }
+  }
 
   @Test
   void logicalSelectionReturnsTheResponseRevisionAndItsServingHeader() throws Exception {
@@ -201,6 +307,18 @@ class CompactGatewayTest {
     return text.toString();
   }
 
+  private static void closeQueue(SerialMutationQueue queue) throws Exception {
+    queue.close();
+    queue.drained().get(5, TimeUnit.SECONDS);
+    assertTrue(queue.awaitTermination(Duration.ofSeconds(5)));
+  }
+
+  private static SerialMutationQueue queue(Fixture fixture) {
+    var queue = new SerialMutationQueue(0, 1024, Duration.ofSeconds(5));
+    fixture.lane = queue::submit;
+    return queue;
+  }
+
   private static Rpc.CompactionRequest compact(long revision, boolean physical) {
     return Rpc.CompactionRequest.newBuilder().setRevision(revision).setPhysical(physical).build();
   }
@@ -215,6 +333,7 @@ class CompactGatewayTest {
     };
     private volatile boolean collectorWired = true;
     private volatile boolean ownerPresent = true;
+    private CompactGateway.LaneSubmitter lane = (bytes, scope, work) -> work.apply(scope);
 
     private Fixture(CompactionOperation.Stage stage, long responseRevision) {
       var operation = mock(CompactionOperation.class);
@@ -238,7 +357,7 @@ class CompactGatewayTest {
           mock(io.etcdhbase.hbase.api.HBaseConnectionFactory.class),
           java.util.List.of(org.apache.hadoop.hbase.TableName.valueOf("compact-test")));
       return new CompactGateway(authorization, CLUSTER, MEMBER, compactions, gc,
-          (bytes, scope, work) -> work.apply(scope), () -> {
+          lane, () -> {
             return ownerPresent ? java.util.Optional.of(OWNER) : java.util.Optional.empty();
           },
           scope -> CompletableFuture.completedFuture(
@@ -255,12 +374,13 @@ class CompactGatewayTest {
     private final AtomicReference<Rpc.CompactionResponse> last = new AtomicReference<>();
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private final AtomicBoolean completed = new AtomicBoolean();
+    private final CompletableFuture<Void> terminal = new CompletableFuture<>();
 
     @Override public void onNext(Rpc.CompactionResponse response) {
       responses.incrementAndGet();
       last.set(response);
     }
-    @Override public void onError(Throwable cause) { failure.set(cause); }
-    @Override public void onCompleted() { completed.set(true); }
+    @Override public void onError(Throwable cause) { failure.set(cause); terminal.complete(null); }
+    @Override public void onCompleted() { completed.set(true); terminal.complete(null); }
   }
 }
