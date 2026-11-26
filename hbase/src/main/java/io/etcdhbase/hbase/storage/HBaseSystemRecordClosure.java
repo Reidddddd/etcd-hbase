@@ -133,9 +133,12 @@ public final class HBaseSystemRecordClosure implements SystemRecordClosure {
   }
 
   /**
-   * Deliberately always reachable for now. §6.2 requires the declared result window to end and the
-   * request digest plus a non-replayable proof to be retained before an invocation may go; that
-   * window is not implemented yet, so no invocation is collected.
+   * Invocations are never collected here, and that is the design rather than a gap: §6.2 requires
+   * the request digest and a non-replayable proof to be retained after the window closes, and the
+   * invocation binding is exactly that proof. Collecting it would let the same request execute
+   * again as a new write. Only its RESULT is retired, so a closed window answers "cannot query"
+   * instead of replaying. Bounded growth of these proofs belongs to the table-generation rebuild
+   * that §7 assigns to J53/J57.
    */
   private CompletableFuture<Boolean> withinSafeBoundary(SystemRecordEntry entry,
       SystemRecordRetirement.Permit permit) {
