@@ -1,0 +1,238 @@
+package io.etcdhbase.hbase.storage;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.EventPage;
+import io.etcdhbase.core.commit.InvocationBinding;
+import io.etcdhbase.core.commit.InvocationId;
+import io.etcdhbase.core.commit.ManifestCandidateReference;
+import io.etcdhbase.core.commit.ManifestPage;
+import io.etcdhbase.core.commit.ManifestRoot;
+import io.etcdhbase.core.commit.PreparedCandidate;
+import io.etcdhbase.core.commit.PreparedEvent;
+import io.etcdhbase.core.commit.PreparedEventReference;
+import io.etcdhbase.core.commit.ResultDirectory;
+import io.etcdhbase.core.commit.ResultIdentity;
+import io.etcdhbase.core.commit.ResultPage;
+import io.etcdhbase.core.commit.ResultPageReference;
+import io.etcdhbase.core.commit.SystemRecordClosure;
+import io.etcdhbase.core.commit.SystemRecordEntry;
+import io.etcdhbase.core.commit.SystemRecordPage;
+import io.etcdhbase.core.commit.SystemRecordRetirement;
+import io.etcdhbase.core.commit.SystemRecordStore;
+import io.etcdhbase.core.commit.SystemRecordType;
+import io.etcdhbase.core.commit.TransactionId;
+import io.etcdhbase.core.request.RequestScope;
+import io.etcdhbase.hbase.codec.ManifestMessages;
+import io.etcdhbase.hbase.codec.ResultMessages;
+import io.etcdhbase.hbase.codec.InvocationMessages;
+import io.etcdhbase.core.storage.StorageMetadata;
+import io.etcdhbase.core.storage.StoredRecord;
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import org.junit.jupiter.api.Test;
+
+class HBaseSystemRecordClosureTest {
+  private static final ByteKey DIGEST = ByteKey.copyOf(new byte[32]);
+
+  @Test
+  void retainsCandidateReferencedByManifestPage() {
+    var transaction = TransactionId.create();
+    var candidate = new PreparedCandidate(transaction, 1, 0, 1, storedValue());
+    var target = candidate.systemIdentity();
+    var reference = ManifestCandidateReference.from(candidate, 0);
+    var page = ManifestPage.create(transaction, 0, List.of(reference));
+    assertReferenced(SystemRecordClosure.Domain.CANDIDATE,
+        new SystemRecordEntry(target, ByteKey.copyOf(ManifestMessages.encode(candidate))),
+        new SystemRecordEntry(page.systemIdentity(), ByteKey.copyOf(ManifestMessages.encode(page))));
+  }
+
+  @Test
+  void retainsEventReferencedByEventPage() {
+    var transaction = TransactionId.create();
+    var event = new PreparedEvent(transaction, 1, 0, 1, 0, PreparedEvent.Kind.PUT,
+        storedValue(), Optional.empty());
+    var target = event.systemIdentity();
+    var page = EventPage.create(transaction, 0, List.of(PreparedEventReference.from(event)));
+    assertReferenced(SystemRecordClosure.Domain.EVENT,
+        new SystemRecordEntry(target, ByteKey.copyOf(ManifestMessages.encode(event))),
+        new SystemRecordEntry(page.systemIdentity(), ByteKey.copyOf(ManifestMessages.encode(page))));
+  }
+
+  @Test
+  void retainsResultReferencedByManifestRoot() {
+    var transaction = TransactionId.create();
+    var identity = new ResultIdentity(InvocationId.create(), transaction, DIGEST, DIGEST, 1, 0, 1);
+    var result = ResultDirectory.create(identity,
+        List.of(ResultPageReference.from(new ResultPage(identity, 0, new byte[] {1}))));
+    var root = ManifestRoot.createWithResult(transaction, 1, 0, 1, 0, 0, Optional.empty(),
+        0, 0, Optional.empty(), result.reference());
+    assertReferenced(SystemRecordClosure.Domain.RESULT,
+        new SystemRecordEntry(result.systemIdentity(), ByteKey.copyOf(ResultMessages.encode(result))),
+        new SystemRecordEntry(root.systemIdentity(), ByteKey.copyOf(ManifestMessages.encode(root))));
+  }
+
+  @Test
+  void followsReferencePagesIncludingAnEmptyTombstonePage() {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var records = mock(SystemRecordStore.class);
+      var retirement = mock(SystemRecordRetirement.class);
+      var candidate = new PreparedCandidate(TransactionId.create(), 1, 0, 1, storedValue());
+      var target = new SystemRecordEntry(candidate.systemIdentity(), ByteKey.copyOf(ManifestMessages.encode(candidate)));
+      var reference = ManifestPage.create(candidate.transactionId(), 0,
+          List.of(ManifestCandidateReference.from(candidate, 0)));
+      stubEmptyScans(records, scope);
+      when(records.scanBucket(eq(SystemRecordType.CANDIDATE), eq(0), any(), anyInt(), anyLong(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(page(target)));
+      var cursor = key(8);
+      when(records.scanBucket(eq(SystemRecordType.MANIFEST), eq(0), eq(Optional.empty()), anyInt(), anyLong(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(),
+              Optional.of(cursor), false, 10, 1, 1)));
+      when(records.scanBucket(eq(SystemRecordType.MANIFEST), eq(0), eq(Optional.of(cursor)), anyInt(), anyLong(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(reference.systemIdentity(),
+              ByteKey.copyOf(ManifestMessages.encode(reference))))));
+      var page = new HBaseSystemRecordClosure(records, retirement, DIGEST, 1)
+          .collect(SystemRecordClosure.Domain.CANDIDATE, Optional.empty(), 16, permit(scope), scope).join();
+      assertEquals(0, page.retired());
+    }
+  }
+
+  @Test
+  void resumesFromPhysicalCursorWithoutRestartingEarlierBuckets() {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var records = mock(SystemRecordStore.class);
+      var retirement = mock(SystemRecordRetirement.class);
+      var cursor = key(8);
+      var next = key(9);
+      when(records.bucket(SystemRecordType.INVOCATION, cursor)).thenReturn(1);
+      when(records.scanBucket(SystemRecordType.INVOCATION, 1, Optional.of(cursor), 1, 8L << 20, scope))
+          .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(), Optional.of(next), false, 10, 1, 1)));
+      var page = new HBaseSystemRecordClosure(records, retirement, DIGEST, 2)
+          .collect(SystemRecordClosure.Domain.INVOCATION, Optional.of(cursor), 1, permit(scope), scope).join();
+      assertEquals(0, page.examined());
+      assertEquals(Optional.of(next), page.lastIdentity());
+      assertFalse(page.exhausted());
+    }
+  }
+
+  @Test
+  void aFullLastBucketCanStillBeExhausted() {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var records = mock(SystemRecordStore.class);
+      when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 1, 8L << 20, scope))
+          .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(key(1), key(2)))));
+      var page = new HBaseSystemRecordClosure(records, mock(SystemRecordRetirement.class), DIGEST, 1)
+          .collect(SystemRecordClosure.Domain.INVOCATION, Optional.empty(), 1, permit(scope), scope).join();
+      assertEquals(1, page.examined());
+      assertTrue(page.exhausted());
+    }
+  }
+
+  @Test
+  void preparingInvocationProtectsRecordsBeforeItsManifestIsWritten() {
+    assertCandidateRetirement(InvocationBinding.State.PREPARING, 0);
+  }
+
+  @Test
+  void closedInvocationDoesNotRetainItsTransactionForever() {
+    assertCandidateRetirement(InvocationBinding.State.WINDOW_CLOSED, 1);
+  }
+
+  @Test
+  void unselectedInvocationDoesNotProtectAbandonedTransactionRecords() {
+    assertCandidateRetirement(InvocationBinding.State.NOT_SELECTED, 1);
+  }
+
+  @Test
+  void lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative() {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var records = mock(SystemRecordStore.class);
+      var entry = new SystemRecordEntry(key(1), key(2));
+      when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 1, 8L << 20, scope))
+          .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(entry),
+              Optional.of(entry.identity()), false, 2, 2, 1)));
+      var result = new HBaseSystemRecordClosure(records, mock(SystemRecordRetirement.class), DIGEST, 1)
+          .collect(SystemRecordClosure.Domain.INVOCATION, Optional.empty(), 1, permit(scope), scope).join();
+      assertEquals(1, result.examined());
+      assertFalse(result.exhausted());
+    }
+  }
+
+  private static void assertCandidateRetirement(InvocationBinding.State state, int expectedRetired) {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var records = mock(SystemRecordStore.class);
+      var retirement = mock(SystemRecordRetirement.class);
+      var candidate = new PreparedCandidate(TransactionId.create(), 1, 0, 1, storedValue());
+      var target = new SystemRecordEntry(candidate.systemIdentity(), ByteKey.copyOf(ManifestMessages.encode(candidate)));
+      var invocation = InvocationBinding.restore(InvocationId.create(), DIGEST, DIGEST,
+          candidate.transactionId(), 1, 0, 1, state, Optional.empty(), Optional.empty());
+      stubEmptyScans(records, scope);
+      when(records.scanBucket(eq(SystemRecordType.CANDIDATE), eq(0), any(), anyInt(), anyLong(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(page(target)));
+      when(records.scanBucket(eq(SystemRecordType.INVOCATION), eq(0), any(), anyInt(), anyLong(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(
+              ByteKey.copyOf(invocation.invocationId().bytes()), ByteKey.copyOf(InvocationMessages.encode(invocation))))));
+      when(retirement.retire(any(), any(), any(), any(), any(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(new SystemRecordRetirement.Outcome(true, false, 0)));
+      var result = new HBaseSystemRecordClosure(records, retirement, DIGEST, 1)
+          .collect(SystemRecordClosure.Domain.CANDIDATE, Optional.empty(), 16, permit(scope), scope).join();
+      assertEquals(expectedRetired, result.retired());
+    }
+  }
+
+  private static StoredRecord storedValue() {
+    return StoredRecord.live(key(2), new StorageMetadata(2, 2, 1, 0, StorageMetadata.State.LIVE, 1), new byte[] {1});
+  }
+
+  private static SystemRecordRetirement.Permit permit(RequestScope scope) {
+    return SystemRecordRetirement.Permit.issue(DIGEST, DIGEST, InvocationId.create(), 1, 10, 10, scope);
+  }
+
+  private static void stubEmptyScans(SystemRecordStore records, RequestScope scope) {
+    when(records.scanBucket(any(), anyInt(), any(), anyInt(), anyLong(), eq(scope)))
+        .thenReturn(CompletableFuture.completedFuture(empty()));
+  }
+
+  private static void assertReferenced(SystemRecordClosure.Domain domain, SystemRecordEntry target,
+      SystemRecordEntry reference) {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var records = mock(SystemRecordStore.class);
+      var retirement = mock(SystemRecordRetirement.class);
+      var targetPage = page(target);
+      stubEmptyScans(records, scope);
+      when(records.scanBucket(eq(domain.recordType()), eq(0), any(), anyInt(), anyLong(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(targetPage));
+      when(records.scanBucket(eq(SystemRecordType.MANIFEST), eq(0), any(), anyInt(), anyLong(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(page(reference)));
+      when(retirement.retire(any(), any(), any(), any(), any(), eq(scope)))
+          .thenReturn(CompletableFuture.completedFuture(new SystemRecordRetirement.Outcome(true, false, 0)));
+      var permit = SystemRecordRetirement.Permit.issue(DIGEST, DIGEST, InvocationId.create(),
+          1, 10, 10, scope);
+      var result = new HBaseSystemRecordClosure(records, retirement, DIGEST, 1)
+          .collect(domain, Optional.empty(), 16, permit, scope).join();
+      assertEquals(1, result.examined());
+      assertEquals(0, result.retired(), "a durable manifest reference must prevent retirement");
+    }
+  }
+
+  private static SystemRecordPage page(SystemRecordEntry entry) {
+    return new SystemRecordPage(List.of(entry), Optional.of(entry.identity()), true, entry.value().length());
+  }
+
+  private static SystemRecordPage empty() {
+    return new SystemRecordPage(List.of(), Optional.empty(), true, 0);
+  }
+
+  private static ByteKey key(int value) { return ByteKey.copyOf(new byte[] {(byte) value}); }
+}

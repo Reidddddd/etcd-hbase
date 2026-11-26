@@ -15,9 +15,10 @@ import java.util.concurrent.CompletableFuture;
  * physical delete so neither can be mistaken for the other.
  */
 public interface SystemRecordClosure {
-  /** Ordered domains: a later domain is never collected before every domain it depends on. */
+  /** Record domains; each page independently checks the surviving reference graph. */
   enum Domain {
     INVOCATION(SystemRecordType.INVOCATION),
+    EVENT_INDEX(SystemRecordType.EVENT_REVISION_INDEX),
     RESULT(SystemRecordType.RESULT),
     CANDIDATE(SystemRecordType.CANDIDATE),
     MANIFEST(SystemRecordType.MANIFEST),

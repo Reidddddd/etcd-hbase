@@ -2,9 +2,26 @@ package io.etcdhbase.hbase.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitDecision;
+import io.etcdhbase.core.commit.EventPage;
+import io.etcdhbase.core.commit.ManifestPage;
+import io.etcdhbase.core.commit.ManifestCandidateReference;
+import io.etcdhbase.core.commit.PreparedCandidate;
+import io.etcdhbase.core.commit.PreparedEvent;
+import io.etcdhbase.core.commit.PreparedEventReference;
+import io.etcdhbase.core.commit.ResultIdentity;
+import io.etcdhbase.core.commit.ResultDirectory;
+import io.etcdhbase.core.commit.ResultPage;
+import io.etcdhbase.core.commit.ResultPageReference;
+import io.etcdhbase.core.storage.StorageMetadata;
+import io.etcdhbase.core.storage.StoredRecord;
+import io.etcdhbase.hbase.codec.ResultMessages;
+import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.concurrent.CompletionException;
 import io.etcdhbase.core.commit.InvocationId;
 import io.etcdhbase.core.commit.ManifestRoot;
 import io.etcdhbase.core.commit.SystemRecordClosure;
@@ -32,7 +49,7 @@ import org.junit.jupiter.api.Test;
  */
 class HBaseSystemRecordClosureIT {
   private static final byte[] FAMILY = {'s'};
-  private static final int SALT_BUCKETS = 4;
+  private static final int SALT_BUCKETS = 1;
   private static final HashSaltStrategy SALT = new HashSaltStrategy(
       new io.etcdhbase.spi.salt.SaltProfile(HashSaltStrategy.STRATEGY_ID, 1, SALT_BUCKETS, 2));
   private static final String RECORD_CATEGORIES = String.join(",",
@@ -54,14 +71,14 @@ class HBaseSystemRecordClosureIT {
 
       var referenced = manifest(1);
       var orphan = manifest(2);
-      var referencedIdentity = ByteKey.copyOf(new byte[] {1, 1});
-      var orphanIdentity = ByteKey.copyOf(new byte[] {2, 2});
+      var referencedIdentity = referenced.systemIdentity();
+      var orphanIdentity = orphan.systemIdentity();
       create(store, SystemRecordType.MANIFEST, referencedIdentity, referenced, scope);
       create(store, SystemRecordType.MANIFEST, orphanIdentity, orphan, scope);
 
       var decision = new CommitDecision(TransactionId.create(), InvocationId.create(), 1, 1, 2,
           referencedIdentity, ByteKey.copyOf(new byte[32]), true);
-      create(store, SystemRecordType.DECISION, ByteKey.copyOf(new byte[] {3, 3}),
+      create(store, SystemRecordType.DECISION, ByteKey.copyOf(ByteBuffer.allocate(Long.BYTES).putLong(decision.sequence()).array()),
           CommitDecisionMessages.encode(decision), scope);
 
       var closure = new HBaseSystemRecordClosure(store, store, store.profileFingerprint(),
@@ -90,19 +107,57 @@ class HBaseSystemRecordClosureIT {
       var permit = SystemRecordRetirement.Permit.issue(store.profileFingerprint(),
           AUTHORIZATION_DIGEST, InvocationId.create(), 1, 16, 16, scope);
 
-      var target = ByteKey.copyOf(new byte[] {5, 5});
-      create(store, SystemRecordType.MANIFEST, target, manifest(3), scope);
+      var root = manifest(3);
+      var target = root.systemIdentity();
+      create(store, SystemRecordType.MANIFEST, target, root, scope);
       // A decision that cannot be decoded might be the reference; it must keep the manifest alive.
       create(store, SystemRecordType.DECISION, ByteKey.copyOf(new byte[] {6, 6}),
           new byte[] {9, 9, 9}, scope);
 
       var closure = new HBaseSystemRecordClosure(store, store, store.profileFingerprint(),
           SALT_BUCKETS);
-      var page = closure.collect(SystemRecordClosure.Domain.MANIFEST, Optional.empty(), 16, permit,
-          scope).join();
-
-      assertEquals(0, page.retired(), "an undecodable reference can only retain data");
+      assertThrows(CompletionException.class, () -> closure.collect(SystemRecordClosure.Domain.MANIFEST,
+          Optional.empty(), 16, permit, scope).join(), "a corrupt proof must not publish a checkpoint");
       assertTrue(store.read(SystemRecordType.MANIFEST, target, scope).join().isPresent());
+    }
+  }
+
+  @Test
+  void manifestPagesAndRootsProtectRealCandidateEventAndResultRecords() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var store = HBaseSystemRecordStore.open(environment.factory(), environment.identity(),
+          createSystemTable(environment), scope).join();
+      var transaction = TransactionId.create();
+      var record = StoredRecord.live(ByteKey.copyOf(new byte[] {7}),
+          new StorageMetadata(2, 2, 1, 0, StorageMetadata.State.LIVE, 1), new byte[] {8});
+      var candidate = new PreparedCandidate(transaction, 1, 0, 1, record);
+      var candidates = ManifestPage.create(transaction, 0, List.of(ManifestCandidateReference.from(candidate,
+          store.bucket(SystemRecordType.CANDIDATE, candidate.systemIdentity()))));
+      var event = new PreparedEvent(transaction, 1, 0, 1, 0, PreparedEvent.Kind.PUT, record, Optional.empty());
+      var events = EventPage.create(transaction, 0, List.of(PreparedEventReference.from(event)));
+      var resultIdentity = new ResultIdentity(InvocationId.create(), transaction, AUTHORIZATION_DIGEST,
+          AUTHORIZATION_DIGEST, 1, 0, 1);
+      var resultPage = new ResultPage(resultIdentity, 0, new byte[] {1});
+      var result = ResultDirectory.create(resultIdentity, List.of(ResultPageReference.from(resultPage)));
+      var root = ManifestRoot.createWithResult(transaction, 1, 0, 1, 1, 1, Optional.of(candidates.reference()),
+          1, events.eventBytes(), Optional.of(events.reference()), result.reference());
+      create(store, SystemRecordType.CANDIDATE, candidate.systemIdentity(), ManifestMessages.encode(candidate), scope);
+      create(store, SystemRecordType.EVENT, event.systemIdentity(), ManifestMessages.encode(event), scope);
+      create(store, SystemRecordType.RESULT, result.systemIdentity(), ResultMessages.encode(result), scope);
+      create(store, SystemRecordType.RESULT, resultPage.systemIdentity(), ResultMessages.encode(resultPage), scope);
+      create(store, SystemRecordType.MANIFEST, candidates.systemIdentity(), ManifestMessages.encode(candidates), scope);
+      create(store, SystemRecordType.MANIFEST, events.systemIdentity(), ManifestMessages.encode(events), scope);
+      create(store, SystemRecordType.MANIFEST, root.systemIdentity(), root, scope);
+      var closure = new HBaseSystemRecordClosure(store, store, store.profileFingerprint(), SALT_BUCKETS);
+      var permit = SystemRecordRetirement.Permit.issue(store.profileFingerprint(), AUTHORIZATION_DIGEST,
+          InvocationId.create(), 1, 16, 16, scope);
+      for (var domain : List.of(SystemRecordClosure.Domain.CANDIDATE, SystemRecordClosure.Domain.EVENT,
+          SystemRecordClosure.Domain.RESULT)) {
+        var page = closure.collect(domain, Optional.empty(), 16, permit, scope).join();
+        assertEquals(0, page.retired(), "durable references protect " + domain);
+        assertTrue(page.examined() > 0);
+      }
     }
   }
 
@@ -142,9 +197,9 @@ class HBaseSystemRecordClosureIT {
         .setValue("etcdhbase.m0.salt-bucket-count", Integer.toString(salt.profile().bucketCount()))
         .setValue("etcdhbase.m0.salt-width-bytes", Integer.toString(salt.profile().saltWidthBytes()))
         .setValue("etcdhbase.m0.record-categories", RECORD_CATEGORIES)
-        .setValue("etcdhbase.m4.auxiliary-format", "1")
+        .setValue("etcdhbase.m4.auxiliary-format", "3")
         .build();
-    environment.create(table, descriptor, salt.splitKeys().toArray(byte[][]::new));
+    environment.create(table, binding.withEventRevisionIndexCapability(descriptor), salt.splitKeys().toArray(byte[][]::new));
     return binding;
   }
 }

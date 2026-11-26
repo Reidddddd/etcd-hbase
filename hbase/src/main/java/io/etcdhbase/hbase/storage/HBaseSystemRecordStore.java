@@ -389,6 +389,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRe
     private long physicalRows;
     private long scanRpcCalls;
     private Optional<ByteKey> lastInspected = Optional.empty();
+    private byte[] previousRow;
     private boolean hasMore;
 
     private PageCollector(SystemRecordType type, int bucket, int maximumEntries,
@@ -402,7 +403,12 @@ public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRe
     @Override
     public boolean onResult(Result result) {
       physicalRows++;
-      SystemRecordKeyCodec.DecodedKey decoded = binding.keyCodec().decode(result.getRow());
+      byte[] row = result.getRow();
+      if (previousRow != null && org.apache.hadoop.hbase.util.Bytes.compareTo(previousRow, row) >= 0) {
+        throw new IllegalArgumentException("system record scan rows are not strictly ordered");
+      }
+      previousRow = row;
+      SystemRecordKeyCodec.DecodedKey decoded = binding.keyCodec().decode(row);
       if (decoded.type() != type || binding.keyCodec().bucket(type, decoded.identity()) != bucket) {
         throw new IllegalArgumentException("system-record scan escaped its type or salt bucket");
       }
