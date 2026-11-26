@@ -1,5 +1,6 @@
 package io.etcdhbase.hbase.storage;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -95,6 +96,108 @@ class HBaseSystemRecordRetirementIT {
           () -> store.retire(SystemRecordType.WORKSET, identity, ByteKey.copyOf(new byte[] {7}),
               permit, SystemRecordRetirement.Reason.COMPACTED_HISTORY, scope).join());
     }
+  }
+
+  @Test
+  void repeatedCreateCannotOverwriteAnExistingImmutableRecord() throws Exception {
+    try (M1TestEnvironment environment = M1TestEnvironment.start(1);
+         RequestScope scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      HBaseSystemRecordStore store = open(environment, scope);
+      ByteKey identity = ByteKey.copyOf(new byte[] {31});
+      ByteKey value = ByteKey.copyOf(new byte[] {1});
+      ByteKey replacement = ByteKey.copyOf(new byte[] {2});
+      store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      var repeated = store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      var conflicting = store.createIfAbsent(SystemRecordType.WORKSET, identity, replacement, scope).join();
+      var observed = store.read(SystemRecordType.WORKSET, identity, scope).join();
+      assertAll(() -> assertEquals(SystemRecordStore.CreateResult.ALREADY_PRESENT, repeated),
+          () -> assertEquals(SystemRecordStore.CreateResult.CONFLICT, conflicting),
+          () -> assertEquals(Optional.of(value), observed));
+    }
+  }
+
+  @Test
+  void absentCasCannotReplaceALiveValue() throws Exception {
+    try (M1TestEnvironment environment = M1TestEnvironment.start(1);
+         RequestScope scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      HBaseSystemRecordStore store = open(environment, scope);
+      ByteKey identity = ByteKey.copyOf(new byte[] {32});
+      ByteKey value = ByteKey.copyOf(new byte[] {1});
+      ByteKey replacement = ByteKey.copyOf(new byte[] {2});
+      store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      assertFalse(store.compareAndSet(SystemRecordType.WORKSET, identity, Optional.empty(),
+          replacement, scope).join());
+      assertEquals(Optional.of(value), store.read(SystemRecordType.WORKSET, identity, scope).join());
+    }
+  }
+
+  @Test
+  void staleRetirementCannotDeleteAReplacementValue() throws Exception {
+    try (M1TestEnvironment environment = M1TestEnvironment.start(1);
+         RequestScope scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      HBaseSystemRecordStore store = open(environment, scope);
+      ByteKey identity = ByteKey.copyOf(new byte[] {33});
+      ByteKey value = ByteKey.copyOf(new byte[] {1});
+      ByteKey replacement = ByteKey.copyOf(new byte[] {2});
+      store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      assertTrue(store.compareAndSet(SystemRecordType.WORKSET, identity, Optional.of(value),
+          replacement, scope).join());
+      var outcome = store.retire(SystemRecordType.WORKSET, identity, value, permit(store, scope),
+          SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join();
+      assertFalse(outcome.retiredNow());
+      assertFalse(outcome.alreadyRetired());
+      assertEquals(replacement.length(), outcome.visiblePayloadBytes());
+      assertEquals(Optional.of(replacement), store.read(SystemRecordType.WORKSET, identity, scope).join());
+      assertTrue(store.readTombstone(SystemRecordType.WORKSET, identity, scope).join().isEmpty());
+    }
+  }
+
+  @Test
+  void bucketScanAdvancesAcrossTombstonesAndReturnsFollowingLiveRecord() throws Exception {
+    try (M1TestEnvironment environment = M1TestEnvironment.start(1);
+         RequestScope scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      HBaseSystemRecordStore store = open(environment, scope);
+      var identities = identitiesInOneBucket(store);
+      ByteKey value = ByteKey.copyOf(new byte[] {9});
+      var permit = permit(store, scope);
+      for (ByteKey identity : identities) {
+        store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      }
+      for (int index = 0; index < 2; index++) {
+        store.retire(SystemRecordType.WORKSET, identities.get(index), value, permit,
+            SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join();
+      }
+      int bucket = store.bucket(SystemRecordType.WORKSET, identities.getFirst());
+      Optional<ByteKey> cursor = Optional.empty();
+      for (int index = 0; index < 3; index++) {
+        var page = store.scanBucket(SystemRecordType.WORKSET, bucket, cursor, 1,
+            1L << 20, scope).join();
+        assertEquals(Optional.of(identities.get(index)), page.lastIdentity());
+        assertEquals(index == 2, page.exhausted());
+        assertTrue(page.physicalRows() >= 1 && page.physicalRows() <= 2);
+        assertTrue(page.encodedBytes() > 0, "retired rows still consume read bytes");
+        if (index < 2) {
+          assertTrue(page.entries().isEmpty(), "retired payloads are never emitted");
+        } else {
+          assertEquals(1, page.entries().size());
+          assertEquals(value, page.entries().getFirst().value());
+        }
+        cursor = page.lastIdentity();
+      }
+    }
+  }
+
+  private static java.util.List<ByteKey> identitiesInOneBucket(HBaseSystemRecordStore store) {
+    var identities = new java.util.ArrayList<ByteKey>();
+    for (int index = 0; index < 4096 && identities.size() < 3; index++) {
+      ByteKey identity = ByteKey.copyOf(java.nio.ByteBuffer.allocate(4).putInt(index).array());
+      if (identities.isEmpty() || store.bucket(SystemRecordType.WORKSET, identity)
+          == store.bucket(SystemRecordType.WORKSET, identities.getFirst())) {
+        identities.add(identity);
+      }
+    }
+    assertEquals(3, identities.size());
+    return java.util.List.copyOf(identities);
   }
 
   @Test
