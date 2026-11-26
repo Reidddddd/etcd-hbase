@@ -82,14 +82,19 @@ public record GcCheckpoint(String tableGroupId, SystemRecordClosure.Domain domai
     }
   }
 
-  /** A changed permission or finished sweep revisits retained prefixes with a distinct sweep CAS. */
+  /** A new operation or finished sweep revisits retained prefixes with a distinct sweep CAS. */
   GcCheckpoint resumeFrom(GcCheckpoint previous) {
     requireSameShard(previous);
     if (maintenanceEpoch < previous.maintenanceEpoch) {
       throw new IllegalArgumentException("GC checkpoint owner epoch regressed");
     }
-    boolean restart = previous.exhausted || !plan.equals(previous.plan);
-    return new GcCheckpoint(tableGroupId, domain, maintenanceEpoch, bucket, bucketCount, plan,
+    boolean sameOperation = plan.operationId.equals(previous.plan.operationId)
+        && plan.generation == previous.plan.generation;
+    boolean restart = previous.exhausted || !sameOperation;
+    // Finalized sequence can grow on every foreground write. Widen only at the next sweep,
+    // otherwise a retained first page would continually reset an unfinished cursor.
+    Plan sweepPlan = restart ? plan : previous.plan;
+    return new GcCheckpoint(tableGroupId, domain, maintenanceEpoch, bucket, bucketCount, sweepPlan,
         restart ? Position.start() : previous.position, previous.completedPages,
         restart ? Math.addExact(previous.sweep, 1) : previous.sweep, false);
   }

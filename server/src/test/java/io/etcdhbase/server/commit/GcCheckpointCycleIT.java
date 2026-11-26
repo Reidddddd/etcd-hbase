@@ -58,11 +58,19 @@ class GcCheckpointCycleIT {
       var first = cycle(environment, checkpoints, budgets, metrics);
       var boundary = new CountDownLatch(1);
       var completed = new AtomicReference<GcCheckpointCycle.Outcome>();
+      var calls = new java.util.concurrent.atomic.AtomicInteger();
+      int releaseAt = SystemRecordClosure.Domain.EVENT.ordinal() * 2 + 1;
       var worker = new GcCheckpointWorker(Runnable::run, timer, Duration.ofSeconds(20), scope ->
-          first.run(scope).thenApply(outcome -> {
+          first.run(scope).thenCompose(outcome -> {
             completed.set(outcome);
             if (outcome == GcCheckpointCycle.Outcome.IDLE) boundary.countDown();
-            return outcome;
+            // Release after the first page of bucket 0. The fresh permit widens on the next
+            // dispatch, but bucket 0 must finish its retained prefix under the original bound.
+            if (calls.incrementAndGet() == releaseAt) {
+              pin.close();
+              return pin.releaseCompletion().toCompletableFuture().thenApply(ignored -> outcome);
+            }
+            return java.util.concurrent.CompletableFuture.completedFuture(outcome);
           }), metrics);
       try {
         worker.start();
@@ -73,13 +81,17 @@ class GcCheckpointCycleIT {
       }
       assertEquals(GcCheckpointCycle.Outcome.IDLE, completed.get());
       assertEquals(0, metrics.gc().failures());
-      for (var event : events) assertTrue(records.read(SystemRecordType.EVENT, event.systemIdentity(), fixtureScope).join().isPresent());
+      for (var event : events) {
+        assertEquals(records.bucket(SystemRecordType.EVENT, event.systemIdentity()) == 0,
+            records.read(SystemRecordType.EVENT, event.systemIdentity(), fixtureScope).join().isPresent());
+      }
+      assertEquals(2, metrics.gc().retired(), "bucket 1 first starts after pin release");
       for (int bucket = 0; bucket < 2; bucket++) {
         var checkpoint = checkpoints.read(environment.group(), SystemRecordClosure.Domain.EVENT, bucket, fixtureScope)
             .join().orElseThrow();
         assertTrue(checkpoint.exhausted());
-        assertEquals(4, checkpoint.plan().safeSequence());
-        assertEquals(4, checkpoint.plan().safeRevision());
+        assertEquals(bucket == 0 ? 4 : 20, checkpoint.plan().safeSequence());
+        assertEquals(bucket == 0 ? 4 : 16, checkpoint.plan().safeRevision());
         assertEquals(bucket, records.bucket(SystemRecordType.EVENT,
             checkpoint.position().afterIdentity().orElseThrow()));
         assertEquals(2, checkpoint.completedPages());

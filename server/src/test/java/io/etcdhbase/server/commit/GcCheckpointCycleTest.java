@@ -28,6 +28,69 @@ class GcCheckpointCycleTest {
   private final RequestMetrics metrics = new RequestMetrics();
 
   @Test
+  void resumedSweepUsesOnlyANarrowerDerivativeOfTheFreshAuthority() throws Exception {
+    selected();
+    var permit = mock(SystemRecordRetirement.Permit.class);
+    var narrowed = mock(SystemRecordRetirement.Permit.class);
+    when(permit.operationId()).thenReturn(InvocationId.create());
+    when(permit.generation()).thenReturn(4L);
+    when(permit.safeSequence()).thenReturn(10L);
+    when(permit.safeRevision()).thenReturn(9L);
+    when(permit.restrictTo(7, 8)).thenReturn(narrowed);
+    when(coordinator.authorizeSystemRecords(any(), same(retention), any(), any(), any()))
+        .thenReturn(CompletableFuture.completedFuture(permit));
+    when(checkpoints.claim(any(), any())).thenAnswer(call -> {
+      GcCheckpoint proposed = call.getArgument(0);
+      var held = new GcCheckpoint(proposed.tableGroupId(), proposed.domain(), proposed.maintenanceEpoch(),
+          proposed.bucket(), proposed.bucketCount(), new GcCheckpoint.Plan(permit.operationId(), 4, 8, 7),
+          new GcCheckpoint.Position(Optional.of(ByteKey.copyOf(new byte[] {6}))), 2, 0, false);
+      return CompletableFuture.completedFuture(new GcCheckpointStore.Acquired(held, held.encode()));
+    });
+    when(closure.collect(any(), anyInt(), any(), anyInt(), same(narrowed), any())).thenReturn(
+        CompletableFuture.completedFuture(new SystemRecordClosure.Page(SystemRecordClosure.Domain.INVOCATION,
+            0, 0, Optional.empty(), true)));
+    when(checkpoints.advance(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(true));
+    var scope = scope();
+    cycle(budgets(256L << 20)).run(scope).join();
+    scope.close();
+    scope.cleanupOutcomeCompletion().toCompletableFuture().join();
+    verify(permit).restrictTo(7, 8);
+    verify(closure).collect(eq(SystemRecordClosure.Domain.INVOCATION), eq(0),
+        eq(Optional.of(ByteKey.copyOf(new byte[] {6}))), eq(1), same(narrowed), same(scope));
+  }
+
+  @Test
+  void aBusyBucketYieldsTheNextPageToTheNextShard() throws Exception {
+    selected();
+    var permit = mock(SystemRecordRetirement.Permit.class);
+    when(permit.operationId()).thenReturn(InvocationId.create());
+    when(permit.generation()).thenReturn(4L);
+    when(permit.safeSequence()).thenReturn(10L);
+    when(permit.safeRevision()).thenReturn(9L);
+    when(coordinator.authorizeSystemRecords(any(), same(retention), any(), any(), any()))
+        .thenReturn(CompletableFuture.completedFuture(permit));
+    when(checkpoints.claim(any(), any())).thenAnswer(call -> {
+      GcCheckpoint checkpoint = call.getArgument(0);
+      return CompletableFuture.completedFuture(new GcCheckpointStore.Acquired(checkpoint, checkpoint.encode()));
+    });
+    var visited = new java.util.ArrayList<Integer>();
+    when(closure.collect(any(), anyInt(), any(), anyInt(), any(), any())).thenAnswer(call -> {
+      visited.add(call.getArgument(1));
+      return CompletableFuture.completedFuture(new SystemRecordClosure.Page(call.getArgument(0), 1, 0,
+          Optional.of(ByteKey.copyOf(new byte[] {7})), false));
+    });
+    when(checkpoints.advance(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(true));
+    var cycle = cycle(budgets(256L << 20));
+    for (int attempt = 0; attempt < 2; attempt++) {
+      var scope = scope();
+      cycle.run(scope).join();
+      scope.close();
+      scope.cleanupOutcomeCompletion().toCompletableFuture().join();
+    }
+    assertEquals(java.util.List.of(0, 1), visited, "a hot shard cannot starve the other buckets");
+  }
+
+  @Test
   void nonOwnerNeverAdmitsOrTouchesStorage() throws Exception {
     owner.set(Optional.empty());
     try (var scope = scope()) {

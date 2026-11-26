@@ -238,6 +238,7 @@
       "kind": "surefire",
       "class": "io.etcdhbase.core.commit.SystemRecordRetirementPermitTest",
       "methods": [
+        "derivedPermitOnlyNarrowsBoundsAndKeepsAuthorityProtectionsAndScope",
         "ordinaryCallersCannotMintRetirementPermits",
         "permitBindsProfileRegistryOperationGenerationAndBoundary",
         "permitFailsClosedForAnotherProfileScopeOrAfterItsScopeCloses",
@@ -330,11 +331,12 @@
       "module": "core",
       "class": "io.etcdhbase.core.commit.GcCheckpointStoreTest",
       "methods": [
+        "wideningBoundsDuringOneCompactDoesNotResetAnUnfinishedSweep",
         "roundTripsEveryDomainAndMaximumGroupAndCursor",
         "rejectsNonBooleanPresenceHiddenCursorMalformedUtf8AndTrailingBytes",
         "rejectsTopologyChangesOnResumeAndTakeover",
         "sameEpochResumesAndTakeoverPreservesProgressWhileStaleCasLoses",
-        "exhaustedSweepAndNewPermissionRevisitRetainedPrefixesWithoutAba",
+        "exhaustedSweepAndNewOperationRevisitPrefixesWhileWiderBoundsWait",
         "rejectsRowValueShardMismatchInClaimAndRead"
       ],
       "kind": "surefire"
@@ -343,6 +345,8 @@
       "module": "server",
       "class": "io.etcdhbase.server.commit.GcCheckpointCycleTest",
       "methods": [
+        "resumedSweepUsesOnlyANarrowerDerivativeOfTheFreshAuthority",
+        "aBusyBucketYieldsTheNextPageToTheNextShard",
         "nonOwnerNeverAdmitsOrTouchesStorage",
         "absentCompactWaitsWithoutCallingAuthorityOrCreatingCheckpoints",
         "regularAdmissionFailureYieldsAndRecordsGcBacklogWithoutUsingReserve",

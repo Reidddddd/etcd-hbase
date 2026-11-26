@@ -452,6 +452,7 @@ J52_REQUIRED_TESTS = {
         'resolvesLostDeleteAcknowledgementAndReplansWhenANewerNativeWriteWins',
     },
     ('core', 'surefire', 'io.etcdhbase.core.commit.SystemRecordRetirementPermitTest'): {
+        'derivedPermitOnlyNarrowsBoundsAndKeepsAuthorityProtectionsAndScope',
         'ordinaryCallersCannotMintRetirementPermits',
         'permitBindsProfileRegistryOperationGenerationAndBoundary',
         'permitFailsClosedForAnotherProfileScopeOrAfterItsScopeCloses',
@@ -506,14 +507,17 @@ J52_REQUIRED_TESTS = {
     },
 
     ('core', 'surefire', 'io.etcdhbase.core.commit.GcCheckpointStoreTest'): {
+        'wideningBoundsDuringOneCompactDoesNotResetAnUnfinishedSweep',
         'roundTripsEveryDomainAndMaximumGroupAndCursor',
         'rejectsNonBooleanPresenceHiddenCursorMalformedUtf8AndTrailingBytes',
         'rejectsTopologyChangesOnResumeAndTakeover',
         'sameEpochResumesAndTakeoverPreservesProgressWhileStaleCasLoses',
-        'exhaustedSweepAndNewPermissionRevisitRetainedPrefixesWithoutAba',
+        'exhaustedSweepAndNewOperationRevisitPrefixesWhileWiderBoundsWait',
         'rejectsRowValueShardMismatchInClaimAndRead',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.GcCheckpointCycleTest'): {
+        'resumedSweepUsesOnlyANarrowerDerivativeOfTheFreshAuthority',
+        'aBusyBucketYieldsTheNextPageToTheNextShard',
         'nonOwnerNeverAdmitsOrTouchesStorage',
         'absentCompactWaitsWithoutCallingAuthorityOrCreatingCheckpoints',
         'regularAdmissionFailureYieldsAndRecordsGcBacklogWithoutUsingReserve',

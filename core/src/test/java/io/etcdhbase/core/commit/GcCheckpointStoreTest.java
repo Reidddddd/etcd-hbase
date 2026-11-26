@@ -21,6 +21,20 @@ class GcCheckpointStoreTest {
   private static final GcCheckpoint.Plan PLAN = new GcCheckpoint.Plan(OPERATION, 5, 20, 16);
 
   @Test
+  void wideningBoundsDuringOneCompactDoesNotResetAnUnfinishedSweep() {
+    var store = new GcCheckpointStore(new MemoryRecords());
+    try (var scope = scope()) {
+      var first = claim(store, proposal(2, 1, PLAN), scope);
+      assertTrue(store.advance(first, page(false), scope).join());
+      var wider = new GcCheckpoint.Plan(OPERATION, PLAN.generation(), PLAN.safeSequence() + 1, PLAN.safeRevision());
+      var resumed = claim(store, proposal(2, 1, wider), scope);
+      assertEquals(Optional.of(key(7)), resumed.checkpoint().position().afterIdentity());
+      assertEquals(PLAN, resumed.checkpoint().plan(), "one sweep keeps its conservative authorization bounds");
+      assertEquals(0, resumed.checkpoint().sweep());
+    }
+  }
+
+  @Test
   void roundTripsEveryDomainAndMaximumGroupAndCursor() {
     for (var domain : SystemRecordClosure.Domain.values()) {
       var checkpoint = new GcCheckpoint("g".repeat(255), domain, 3, 65_535, 65_536, PLAN,
@@ -84,7 +98,7 @@ class GcCheckpointStoreTest {
   }
 
   @Test
-  void exhaustedSweepAndNewPermissionRevisitRetainedPrefixesWithoutAba() {
+  void exhaustedSweepAndNewOperationRevisitPrefixesWhileWiderBoundsWait() {
     var store = new GcCheckpointStore(new MemoryRecords());
     try (var scope = scope()) {
       var first = claim(store, proposal(2, 1, PLAN), scope);
@@ -97,10 +111,11 @@ class GcCheckpointStoreTest {
       assertTrue(store.advance(nextSweep, page(false), scope).join());
       var wider = new GcCheckpoint.Plan(OPERATION, 5, 21, 16);
       var changed = claim(store, proposal(2, 1, wider), scope);
-      assertEquals(2, changed.checkpoint().sweep());
-      assertEquals(GcCheckpoint.Position.start(), changed.checkpoint().position());
+      assertEquals(1, changed.checkpoint().sweep());
+      assertEquals(nextSweep.checkpoint().after(page(false)).position(), changed.checkpoint().position());
+      assertEquals(PLAN, changed.checkpoint().plan());
       var newCompact = new GcCheckpoint.Plan(InvocationId.create(), 6, 21, 17);
-      assertEquals(3, claim(store, proposal(2, 1, newCompact), scope).checkpoint().sweep());
+      assertEquals(2, claim(store, proposal(2, 1, newCompact), scope).checkpoint().sweep());
       assertInstanceOf(GcCheckpointStore.Superseded.class, store.claim(proposal(2, 1, PLAN), scope).join());
     }
   }

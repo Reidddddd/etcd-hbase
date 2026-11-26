@@ -42,9 +42,9 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 启用 Lease/事件运行时后，系统记录 GC 在独立的常规准入中运行；它不占用恢复、续约和到期处理的 reserve。没有选定 Compact 或正在发布时等待；授权、证明和存储失败会记录 GC failure 并有界重试，准入不足记录 GC backlog。页计数、已检查记录数和退休记录数与 Lease expiry 指标分开统计。
 
-每次调度最多处理一个 `recordDomain + bucket` 页，游标沿该 bucket 的物理行序推进。检查点绑定实际 Compact operation/generation、owner epoch、盐桶拓扑和本轮 revision/sequence 边界；同一许可下接管保留进度，拓扑变化或行值身份不一致则拒绝恢复。整页成功后才用精确值 CAS 推进。旧 worker 持有的字节不能覆盖接管后的检查点，未知结果可以有界重做。
+每次调度最多处理一个 `recordDomain + bucket` 页，随后轮转到下一分片；游标沿各 bucket 的物理行序独立推进。检查点绑定实际 Compact operation/generation、owner epoch、盐桶拓扑和本轮 revision/sequence 边界；同一许可下接管保留进度，拓扑变化或行值身份不一致则拒绝恢复。整页成功后才用精确值 CAS 推进。旧 worker 持有的字节不能覆盖接管后的检查点，未知结果可以有界重做。
 
-完整 sweep 结束，或真实许可的操作、代次、边界变化后，持久增加 sweep 编号并重新检查该 bucket。这样，前一轮因 pin 或引用而保留的前缀不会永久跳过；`completedPages` 保持累计，避免重置游标造成检查点 ABA。记录退休仍由后端独立复核实际授权。
+完整 sweep 结束，或真实许可的操作、代次变化后，持久增加 sweep 编号并重新检查该 bucket。同一 Compact 的安全边界扩大时，当前 sweep 保留原保守边界，从新取得的真实许可派生更窄许可继续分页；下一 sweep 再采用新边界，避免前台 sequence 增长反复重置游标。派生许可保留全部权威、根保护及 scope，拒绝放宽边界。这样，前一轮因 pin 或引用而保留的前缀不会永久跳过；`completedPages` 保持累计，避免重置游标造成检查点 ABA。记录退休仍由后端独立复核实际授权。
 
 每页有记录数、扫描字节、引用证明及总时长上限，并保留整轮粗粒度 I/O、scanner、清理和内存额度。取消后额度继续占用到实际 producer 排空，调度器还等待清理结果；排队任务在停止后不再启动回收。当前不是逐条 HBase RPC 的完整费用核算，也未交付 GC 导致的前台尾延迟和长期空间收敛验收。
 

@@ -101,13 +101,17 @@ final class GcCheckpointCycle {
       requireOwner(token, scope);
       if (claim instanceof GcCheckpointStore.Superseded) return CompletableFuture.completedFuture(nextShard());
       var acquired = (GcCheckpointStore.Acquired) claim;
+      var sweep = acquired.checkpoint().plan();
+      var pagePermit = sweep.equals(GcCheckpoint.Plan.from(permit)) ? permit
+          : permit.restrictTo(sweep.safeRevision(), sweep.safeSequence());
       return closure.collect(domain, bucket, acquired.checkpoint().position().afterIdentity(), pageRecords,
-          permit, scope).thenCompose(page -> {
+          pagePermit, scope).thenCompose(page -> {
             requireOwner(token, scope);
             return checkpoints.advance(acquired, page, scope).thenApply(updated -> {
               if (!updated) return Outcome.IDLE;
               metrics.recordGcPage(page.examined(), page.retired());
-              return page.exhausted() ? nextShard() : Outcome.PROGRESSED;
+              var next = nextShard();
+              return page.exhausted() ? next : Outcome.PROGRESSED;
             });
           });
     });

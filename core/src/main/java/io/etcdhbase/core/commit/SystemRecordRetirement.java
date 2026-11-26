@@ -76,6 +76,17 @@ public final class SystemRecordRetirement {
     public long safeRevision() { return safeRevision; }
     public long safeSequence() { return safeSequence; }
 
+    /** Derives conservative sweep bounds without changing the issued authority, roots or scope. */
+    public Permit restrictTo(long revision, long sequence) {
+      requireUsable(profile, scope);
+      if (revision < 0 || sequence < 0 || revision > safeRevision || sequence > safeSequence) {
+        throw new IllegalArgumentException("a derived retirement permit cannot widen its bounds");
+      }
+      if (revision == safeRevision && sequence == safeSequence) return this;
+      return new Permit(profile, registryIdentity, operationId, generation, revision, sequence,
+          authority, protections, scope);
+    }
+
     /** Fails closed once the permit's scope closed, expired, or targets another profile. */
     public void requireUsable(ByteKey expectedProfile, RequestScope executionScope) {
       if (!profile.equals(expectedProfile) || scope != executionScope || scope.isClosed()

@@ -20,6 +20,33 @@ class SystemRecordRetirementPermitTest {
   private static final ByteKey REGISTRY = ByteKey.copyOf(new byte[16]);
 
   @Test
+  void derivedPermitOnlyNarrowsBoundsAndKeepsAuthorityProtectionsAndScope() {
+    var scope = RequestScope.withTimeout(Duration.ofSeconds(5));
+    var seed = permit(PROFILE, REGISTRY, InvocationId.create(), 3, 7, 5, scope);
+    var protection = new SnapshotGcBoundary.Protection(0, 0, 1, REGISTRY, 1, 1,
+        java.util.Optional.of(TransactionId.create()), java.util.Optional.of(ByteKey.copyOf(new byte[] {1})),
+        java.util.Optional.of(PROFILE));
+    var original = new SystemRecordRetirement.Permit(PROFILE, REGISTRY, seed.operationId(), 3, 7, 5,
+        seed.authority(), java.util.List.of(protection), scope);
+    var narrowed = original.restrictTo(4, 3);
+    assertEquals(4, narrowed.safeRevision());
+    assertEquals(3, narrowed.safeSequence());
+    assertEquals(original.operationId(), narrowed.operationId());
+    assertEquals(original.generation(), narrowed.generation());
+    assertEquals(original.profile(), narrowed.profile());
+    assertEquals(original.registryIdentity(), narrowed.registryIdentity());
+    assertEquals(original.authority(), narrowed.authority());
+    assertEquals(original.protections(), narrowed.protections());
+    narrowed.requireUsable(PROFILE, scope);
+    assertThrows(IllegalArgumentException.class, () -> original.restrictTo(8, 5));
+    assertThrows(IllegalArgumentException.class, () -> original.restrictTo(7, 6));
+    assertThrows(IllegalArgumentException.class, () -> original.restrictTo(-1, 0));
+    scope.close();
+    assertThrows(IllegalStateException.class, () -> narrowed.requireUsable(PROFILE, scope));
+    assertThrows(IllegalStateException.class, () -> original.restrictTo(4, 3));
+  }
+
+  @Test
   void ordinaryCallersCannotMintRetirementPermits() {
     assertEquals(0, SystemRecordRetirement.Permit.class.getConstructors().length);
     assertTrue(Arrays.stream(SystemRecordRetirement.Permit.class.getMethods()).noneMatch(method ->
