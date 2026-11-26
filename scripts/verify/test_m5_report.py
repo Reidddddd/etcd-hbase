@@ -376,6 +376,17 @@ class J51RegistryTest(unittest.TestCase):
 
 
 class M5J52ReportTest(unittest.TestCase):
+    def test_storage_gate_requires_active_read_pin_collection_and_exact_retirement(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        task = json.loads(path.read_text(encoding="utf-8"))
+        m5_report._validate_task(task, path, repo)
+        suite = next(test for test in task["tests"]
+                     if test["class"] == "io.etcdhbase.hbase.storage.J52HistoryCollectionIT")
+        suite["methods"].remove("activeReadPinPreventsDeletionUntilReleaseInBothLayouts")
+        with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
+            m5_report._validate_task(task, path, repo)
+
     def test_source_snapshot_preserves_the_first_porcelain_status_column(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

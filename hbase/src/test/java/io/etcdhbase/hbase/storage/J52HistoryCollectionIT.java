@@ -32,6 +32,7 @@ import io.etcdhbase.core.storage.StorageMetadata;
 import io.etcdhbase.core.storage.StoredRecord;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.RowFenceMessages;
+import io.etcdhbase.hbase.codec.RevisionTimestamp;
 import io.etcdhbase.hbase.codec.CommitControlMessages;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import io.etcdhbase.spi.salt.HashSaltStrategy;
@@ -76,6 +77,72 @@ class J52HistoryCollectionIT {
 
   @BeforeAll static void start() throws Exception { environment = M1TestEnvironment.start(1); }
   @AfterAll static void stop() throws Exception { if (environment != null) environment.close(); }
+
+  @Test
+  void activeReadPinPreventsDeletionUntilReleaseInBothLayouts() throws Exception {
+    for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
+      collectBeforeAndAfterReadPinRelease(layout);
+    }
+  }
+
+  private static void collectBeforeAndAfterReadPinRelease(StorageTableBinding.Layout layout) throws Exception {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3));
+        var readerScope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var group = group(layout, scope);
+      for (int revision = 2; revision <= 5; revision++) group.append(false, scope);
+      var views = new ReadViewService(group.control,
+          new ManifestCatalog(new HBaseManifestRepository(group.records)), group.pins,
+          group.system.profileFingerprint());
+      var collector = await(HBaseHistoryCollector.open(environment.factory(), environment.identity(),
+          group.system, group.primary, group.current, PIN_CONFIGURATION, scope));
+      var coordinator = new GcCoordinator(group.control, group.compactions, group.pins, Clock.systemUTC());
+      var oldRead = await(views.open(OptionalLong.of(2), AUTHORIZATION, readerScope));
+      try (oldRead) {
+        group.compact(3, scope);
+        var pinned = await(coordinator.authorizeHistory(OWNER, scope));
+        assertEquals(2, pinned.safeRevision());
+        var retained = await(collector.collectKey(pinned, group.key, 0, 64, scope));
+        assertTrue(retained.exhausted());
+        assertEquals(0, retained.deletedVersions(), "the live read must prevent deletion of revision 2");
+        assertArrayEquals(new byte[] {2}, await(environment.store(group.primary, scope)
+            .get(group.key, 2, ReadProjection.FULL)).orElseThrow().value().orElseThrow());
+      }
+      await(oldRead.termination().toCompletableFuture());
+      var released = await(coordinator.authorizeHistory(OWNER, scope));
+      assertEquals(3, released.safeRevision());
+      var collected = await(collector.collectKey(released, group.key, 0, 64, scope));
+      assertTrue(collected.exhausted());
+      assertEquals(1, collected.deletedVersions(), "only revision 2 is older than the live baseline at 3");
+      var reader = environment.store(group.primary, scope);
+      assertTrue(await(reader.get(group.key, 2, ReadProjection.FULL)).isEmpty());
+      assertRetiredVersion(group, 2);
+      for (int revision = 3; revision <= 5; revision++) {
+        assertArrayEquals(new byte[] {(byte) revision}, await(reader.get(group.key, revision, ReadProjection.FULL))
+            .orElseThrow().value().orElseThrow(), "the baseline and every newer version must remain");
+      }
+      assertEquals(3, await(group.control.read(scope)).orElseThrow().state().compactRevision());
+      System.out.printf("j52-active-read layout=%s pinnedDelete=0 releasedDelete=1 "
+          + "revision2Absent=true baseline3AndNewerRetained=true%n", layout);
+    }
+  }
+
+  private static void assertRetiredVersion(Group group, long revision) throws Exception {
+    var binding = group.primary;
+    var table = environment.connection().getTable(binding.table());
+    if (binding.layout() == StorageTableBinding.Layout.NATIVE) {
+      long timestamp = RevisionTimestamp.timestamp(revision);
+      var exact = await(table.get(new Get(binding.codec().encode(group.key, 1))
+          .setTimeRange(timestamp, timestamp + 1).readVersions(64).addFamily(binding.family())));
+      assertTrue(exact.isEmpty(), "all m/v/f cells at the old revision timestamp must be absent");
+      return;
+    }
+    var retired = await(table.get(new Get(binding.codec().encode(group.key, revision))
+        .addFamily(binding.family())));
+    assertNull(retired.getValue(binding.family(), new byte[] {'m'}));
+    assertNull(retired.getValue(binding.family(), new byte[] {'v'}));
+    assertEquals(RowFenceMessages.State.RETIRED,
+        RowFenceMessages.decode(retired.getValue(binding.family(), new byte[] {'g'})).state());
+  }
 
   @Test
   void enumeratesEveryKeyWithBucketLocalExclusiveResumePoints() throws Exception {
