@@ -2,7 +2,8 @@ package io.etcdhbase.hbase.storage;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.InvocationBinding;
-import io.etcdhbase.core.commit.SystemRecordClosure;
+import io.etcdhbase.core.commit.SystemRecordClosure.Domain;
+import io.etcdhbase.core.commit.SystemRecordClosure.Page;
 import io.etcdhbase.core.commit.SystemRecordEntry;
 import io.etcdhbase.core.commit.SystemRecordPage;
 import io.etcdhbase.core.commit.SystemRecordRetirement;
@@ -18,7 +19,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Predicate;
 
 /** Enumerates bounded retirement pages and proves the complete surviving direct reference set. */
-public final class HBaseSystemRecordClosure implements SystemRecordClosure {
+public final class HBaseSystemRecordClosure {
   private static final long MAX_SCAN_BYTES = 8L << 20;
   private final SystemRecordStore records;
   private final HBaseSystemRecordStore retirement;
@@ -42,7 +43,7 @@ public final class HBaseSystemRecordClosure implements SystemRecordClosure {
     this.bucketCount = bucketCount;
   }
 
-  @Override
+  /** Collects a bounded domain page, retaining records while any reference or protection holds. */
   public CompletableFuture<Page> collect(Domain domain, Optional<ByteKey> afterIdentity,
       int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope) {
     Objects.requireNonNull(domain, "domain");

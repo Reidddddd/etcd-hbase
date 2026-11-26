@@ -1,22 +1,21 @@
 package io.etcdhbase.core.commit;
 
 import io.etcdhbase.core.bytes.ByteKey;
-import io.etcdhbase.core.request.RequestScope;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 
 /**
- * Decides whether one record domain is unreachable yet, and only then retires it.
+ * Immutable domain and progress models for bounded system-record closure collection.
  *
  * <p>§6.2 of the M5 design lists the retention rule for every domain. A domain becomes collectable
  * only after Compact, the protection floors, the exact root references and the remaining domains'
- * dependencies have all cleared. This type deliberately keeps that decision separate from the
- * physical delete so neither can be mistaken for the other.
+ * dependencies have all cleared. The storage adapter owns proof and retirement execution.
  */
-public interface SystemRecordClosure {
+public final class SystemRecordClosure {
+  private SystemRecordClosure() {}
+
   /** Record domains; each page independently checks the surviving reference graph. */
-  enum Domain {
+  public enum Domain {
     INVOCATION(SystemRecordType.INVOCATION),
     EVENT_INDEX(SystemRecordType.EVENT_REVISION_INDEX),
     RESULT(SystemRecordType.RESULT),
@@ -33,7 +32,7 @@ public interface SystemRecordClosure {
   }
 
   /** What one bounded closure page did, so a caller can resume without guessing. */
-  record Page(Domain domain, int examined, int retired, Optional<ByteKey> lastIdentity,
+  public record Page(Domain domain, int examined, int retired, Optional<ByteKey> lastIdentity,
       boolean exhausted) {
     public Page {
       Objects.requireNonNull(domain, "domain");
@@ -47,11 +46,4 @@ public interface SystemRecordClosure {
     }
   }
 
-  /**
-   * Collects at most {@code maximumRecords} records of one domain that are provably unreachable.
-   * Records whose references or protection floors still hold are examined but never retired, so a
-   * caller cannot mistake "not yet collectable" for "does not exist".
-   */
-  CompletableFuture<Page> collect(Domain domain, Optional<ByteKey> afterIdentity, int maximumRecords,
-      SystemRecordRetirement.Permit permit, RequestScope scope);
 }
