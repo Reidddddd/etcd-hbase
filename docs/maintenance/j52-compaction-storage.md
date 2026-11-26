@@ -16,6 +16,8 @@
 
 `Compact(0, physical=false)` 的 protobuf 编码可以为空，网关仍以一个最小计量单位提交 owner lane。队列因关闭或容量限制拒绝请求时，网关会投影该错误。已派发工作使用队列拥有的服务 scope 完成；成功响应等待该 scope 清理结束，清理失败不会被投影为成功。是否可以返回成功仍由原 RPC scope 决定，客户端取消或清理失败不等于回滚已选择的逻辑边界。
 
+历史 Watch 回放的寻址、控制行复核和事件读取使用普通请求预算，各自保留有界读取 scope；不占用 Lease 到期处理和共享 tailer 的后台保留容量。普通预算不足仍按资源错误终止对应订阅，不扩大配置容量或丢弃事件。取消后，读取预算及历史保护继续持有至实际 producer 排空。
+
 ## 2. KV 历史回收约束
 
 回收许可绑定 profile、pin 注册表、逻辑操作及本轮 scope。所有分片的 revision/sequence 注册 floor 确认后，活动 pin 继续分别限制两个边界。回收器重新核对 owner 和控制身份；HBase 适配器再次核对本表组实际 pin 注册表。许可只允许处理冗余 KV 物化版本。
@@ -50,3 +52,5 @@ scripts/verify/m5.sh --scope public --task J52 --artifact-root .artifacts/m5/j52
 入口运行确定性逻辑/pin 单测、HISTORY/NATIVE MiniCluster 和固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。它登记在 M5 CI 中，运行报告明确保留第 3 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
 
 网关的请求授权、真实 gRPC token 传递、CAS 前失效及取消排空回归属于 server 单测，由 J09 的完整构建执行；不将 server 套件登记到只构建 hbase 的 J52 存储门禁。真实 Kerberos/HBase 的 `ADMIN` 授予与撤销反例属于 J04 的安全后端集成测试；替身网关测试和实际后端 ACL 测试各自保留验证范围。
+
+Watch 回放与后台容量的隔离由 server 的确定性回归覆盖：后台保留槽全部占用时仍可在普通预算内回放，在途回放也不抢占最后一个后台槽；普通预算耗尽时仍验证资源拒绝及实际容量诊断。真实双布局 Go 回放、fragment 和断流恢复由既有 J46/J47 门禁验证。

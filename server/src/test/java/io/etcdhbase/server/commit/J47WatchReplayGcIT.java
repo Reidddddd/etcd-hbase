@@ -371,7 +371,8 @@ class J47WatchReplayGcIT {
   }
 
   private static BudgetManager replayBudgets() {
-    long memory = 128L << 20;
+    // The 80 MiB service reserve is separate from the regular 64 MiB replay proof read.
+    long memory = 256L << 20;
     var limits = new BudgetManager.Limits(16, 16, 16, 8, 8, 1L << 20, memory);
     var reserved = new BudgetManager.ReservedCapacity(4, 4, 4, 4, 4, 1L << 20, 80L << 20);
     return new BudgetManager(limits, Map.of(TABLE_GROUP, limits), limits, reserved, Map.of(TABLE_GROUP, reserved));

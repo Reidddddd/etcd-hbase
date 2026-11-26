@@ -104,11 +104,11 @@ public final class BudgetManager {
       long cleanup, long queuedBytes, long reservedBytes, long allocatedBytes, long retiredScanners,
       long peakScanners, long peakAllocatedBytes) {}
 
-  /** Bounded diagnostics captured under the admission lock when a reserved request is rejected. */
-  public record ReservedAdmissionFailureSnapshot(long globalReservedRequests,
-      long globalReservedBytes, int globalRequestCapacity, long globalReservedByteCapacity,
-      long groupReservedRequests, long groupReservedBytes, int groupRequestCapacity,
-      long groupReservedByteCapacity, long attemptedBytes) {}
+  /** Bounded diagnostics for the selected admission pool, captured under the admission lock. */
+  public record AdmissionFailureSnapshot(long globalRequests,
+      long globalBytes, int globalRequestCapacity, long globalByteCapacity,
+      long groupRequests, long groupBytes, int groupRequestCapacity,
+      long groupByteCapacity, long attemptedBytes) {}
 
   /** Per-request read work; cellBytes includes returned cells and fetched manifest candidates. */
   public record ReadLimits(long physicalRows, long cellBytes, long scanRpcCalls, long pages, long pointOperations) {
@@ -182,6 +182,14 @@ public final class BudgetManager {
     return admit(groupId, scope, reservation, readLimits, false);
   }
 
+  /** Reports the regular pool's bounded capacity snapshot when request admission fails. */
+  public Account admit(String groupId, RequestScope scope, Reservation reservation,
+      ReadLimits readLimits, Consumer<AdmissionFailureSnapshot> failureObserver)
+      throws BackendFailure {
+    return admit(groupId, scope, reservation, readLimits, false,
+        Objects.requireNonNull(failureObserver, "failureObserver"));
+  }
+
   /**
    * Admits bounded internal work from capacity unavailable to regular request accounts.
    */
@@ -202,7 +210,7 @@ public final class BudgetManager {
    * captured while the admission lock is held and deliberately excludes the group identifier.
    */
   public Account admitReserved(String groupId, RequestScope scope, Reservation reservation,
-      ReadLimits readLimits, Consumer<ReservedAdmissionFailureSnapshot> failureObserver)
+      ReadLimits readLimits, Consumer<AdmissionFailureSnapshot> failureObserver)
       throws BackendFailure {
     return admit(groupId, scope, reservation, readLimits, true,
         Objects.requireNonNull(failureObserver, "failureObserver"));
@@ -215,12 +223,12 @@ public final class BudgetManager {
 
   private Account admit(String groupId, RequestScope scope, Reservation reservation,
       ReadLimits readLimits, boolean reserved,
-      Consumer<ReservedAdmissionFailureSnapshot> failureObserver) throws BackendFailure {
+      Consumer<AdmissionFailureSnapshot> failureObserver) throws BackendFailure {
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(reservation, "reservation");
     Objects.requireNonNull(readLimits, "readLimits");
     Account account = null;
-    ReservedAdmissionFailureSnapshot rejectedSnapshot = null;
+    AdmissionFailureSnapshot rejectedSnapshot = null;
     synchronized (this) {
       Group group = groups.get(groupId);
       if (group == null) throw new IllegalArgumentException("unconfigured group ID");
@@ -235,13 +243,8 @@ public final class BudgetManager {
               && group.usage.canAdmitRegular(group.limits, group.reservedCapacity,
                   group.reservedUsage, reservation.total());
       if (!canAdmit) {
-        if (reserved && failureObserver != null) {
-          rejectedSnapshot = new ReservedAdmissionFailureSnapshot(
-              globalReservedUsage.requests, globalReservedUsage.reservedBytes,
-              globalReservedCapacity.requests(), globalReservedCapacity.memoryBytes(),
-              group.reservedUsage.requests, group.reservedUsage.reservedBytes,
-              group.reservedCapacity.requests(), group.reservedCapacity.memoryBytes(),
-              reservation.total());
+        if (failureObserver != null) {
+          rejectedSnapshot = admissionFailureSnapshot(group, reservation.total(), reserved);
         }
       } else {
         global.admit(reservation.total());
@@ -259,6 +262,26 @@ public final class BudgetManager {
     }
     account.registration = scope.registerScopedCleanup(account);
     return account;
+  }
+
+  private AdmissionFailureSnapshot admissionFailureSnapshot(Group group, long bytes,
+      boolean reserved) {
+    if (reserved) {
+      return new AdmissionFailureSnapshot(
+          globalReservedUsage.requests, globalReservedUsage.reservedBytes,
+          globalReservedCapacity.requests(), globalReservedCapacity.memoryBytes(),
+          group.reservedUsage.requests, group.reservedUsage.reservedBytes,
+          group.reservedCapacity.requests(), group.reservedCapacity.memoryBytes(), bytes);
+    }
+    return new AdmissionFailureSnapshot(
+        global.requests - globalReservedUsage.requests,
+        global.reservedBytes - globalReservedUsage.reservedBytes,
+        globalLimits.requests() - globalReservedCapacity.requests(),
+        globalLimits.memoryBytes() - globalReservedCapacity.memoryBytes(),
+        group.usage.requests - group.reservedUsage.requests,
+        group.usage.reservedBytes - group.reservedUsage.reservedBytes,
+        group.limits.requests() - group.reservedCapacity.requests(),
+        group.limits.memoryBytes() - group.reservedCapacity.memoryBytes(), bytes);
   }
 
   /** Reserves long-lived service memory without consuming a request concurrency slot. */

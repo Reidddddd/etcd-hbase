@@ -294,18 +294,88 @@ class WatchHistoryReplayTest {
   }
 
   @Test
+  void replayOpensAndReadsWhileMaintenanceOwnsItsFullReservedCapacity() throws Exception {
+    var fixture = new ReplayFixture(maintenanceBudgets());
+    try (var maintenance = RequestScope.withoutDeadline();
+         var watchScope = RequestScope.withoutDeadline();
+         var tailer = fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+             LeaseBudgetProfile.EVENT_TAILER_MEMORY);
+         var tailerRead = fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+             LeaseBudgetProfile.EVENT_TAILER_READ_MEMORY);
+         var expiry = fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+             LeaseBudgetProfile.EXPIRY_WORKER_MEMORY);
+         var ownerStep = fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+             LeaseBudgetProfile.ownerMutationReservation(16 * 1024));
+         var watchAccount = fixture.admitWatchAccount(watchScope)) {
+      assertEquals(236_433_409L + RESPONSE_BYTES + 2, fixture.budgets.snapshot().reservedBytes());
+      try (var replay = fixture.openReplay(watchAccount, KeyRange.all(), 3)) {
+        assertEquals(List.of(new Position(4, 3, 0), new Position(4, 3, 1),
+            new Position(6, 4, 0), new Position(6, 4, 1)), drainReplay(replay));
+        assertEquals(5, fixture.budgets.snapshot().requests(),
+            "completed proof reads release their own admission without closing maintenance");
+      }
+    }
+    assertNoBudgetLeaks(fixture.budgets);
+  }
+
+  @Test
+  void inFlightReplayLookupLeavesTheLastMaintenanceRequestAvailable() throws Exception {
+    var fixture = new ReplayFixture(maintenanceBudgets());
+    var located = new CompletableFuture<Long>();
+    when(fixture.selected.sequenceForRevision(anyLong(), any(CommitState.class),
+        any(RequestScope.class), any(ManifestCatalog.ProofReadBudget.class))).thenReturn(located);
+    try (var maintenance = RequestScope.withoutDeadline();
+         var watchScope = RequestScope.withoutDeadline();
+         var tailer = fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+             LeaseBudgetProfile.EVENT_TAILER_MEMORY);
+         var tailerRead = fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+             LeaseBudgetProfile.EVENT_TAILER_READ_MEMORY);
+         var ownerStep = fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+             LeaseBudgetProfile.ownerMutationReservation(16 * 1024));
+         var watchAccount = fixture.admitWatchAccount(watchScope)) {
+      var opening = WatchHistoryReplay.open(TABLE_GROUP, KeyRange.all(), 3, fixture.snapshot,
+          6, AUTHORIZATION, fixture.pins, fixture.selected, fixture.budgets, watchAccount);
+      try {
+        assertFalse(opening.isDone());
+        try (var expiry = fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+            LeaseBudgetProfile.EXPIRY_WORKER_MEMORY)) {
+          assertEquals(6, fixture.budgets.snapshot().requests());
+        }
+      } finally {
+        located.complete(4L);
+        opening.join().closeUntransferredReplay();
+      }
+    }
+    assertNoBudgetLeaks(fixture.budgets);
+  }
+
+  private static BudgetManager maintenanceBudgets() {
+    var reserve = LeaseBudgetProfile.perGroupCapacity(16 * 1024);
+    var limits = new BudgetManager.Limits(16, 16, 16, 8, 8, 1L << 20, 1L << 30);
+    return new BudgetManager(limits, Map.of(TABLE_GROUP, limits), limits,
+        reserve, Map.of(TABLE_GROUP, reserve));
+  }
+
+  @Test
   void reportsLookupAccountAdmissionResourceLimitWithoutChangingWatchFailure() throws Exception {
     var fixture = new ReplayFixture();
-    var reservedScopes = new ArrayList<RequestScope>();
+    var blockedScopes = new ArrayList<RequestScope>();
     var stages = new ArrayList<RequestMetrics.WatchReplayOpenResourceFailureStage>();
     var metrics = new RequestMetrics();
     try (var scope = RequestScope.withoutDeadline()) {
       BudgetManager.Account watchAccount = fixture.admitWatchAccount(scope);
       try {
+        // Diagnostics must exclude maintenance even while both pools are saturated.
         for (int index = 0; index < 4; index++) {
-          RequestScope reservedScope = RequestScope.withoutDeadline();
-          reservedScopes.add(reservedScope);
-          fixture.budgets.admitReserved(TABLE_GROUP, reservedScope,
+          RequestScope maintenance = RequestScope.withoutDeadline();
+          blockedScopes.add(maintenance);
+          fixture.budgets.admitReserved(TABLE_GROUP, maintenance,
+              new BudgetManager.Reservation(0, 1, 1, 0, 0));
+        }
+        for (int index = 0; index < 11; index++) {
+          RequestScope regularScope = RequestScope.withoutDeadline();
+          blockedScopes.add(regularScope);
+          fixture.budgets.admit(TABLE_GROUP, regularScope,
               new BudgetManager.Reservation(0, 1, 1, 0, 0));
         }
 
@@ -320,18 +390,18 @@ class WatchHistoryReplayTest {
         assertEquals(List.of(RequestMetrics.WatchReplayOpenResourceFailureStage.LOOKUP_ACCOUNT_ADMISSION),
             stages);
         var admission = metrics.watchReplayLookupAdmissionFailure().orElseThrow();
-        assertEquals(4, admission.globalReservedRequests());
-        assertEquals(8, admission.globalReservedBytes());
-        assertEquals(4, admission.globalRequestCapacity());
-        assertEquals(80L << 20, admission.globalReservedByteCapacity());
-        assertEquals(4, admission.groupReservedRequests());
-        assertEquals(8, admission.groupReservedBytes());
-        assertEquals(4, admission.groupRequestCapacity());
-        assertEquals(80L << 20, admission.groupReservedByteCapacity());
+        assertEquals(12, admission.globalRequests());
+        assertEquals(RESPONSE_BYTES + 24L, admission.globalBytes());
+        assertEquals(12, admission.globalRequestCapacity());
+        assertEquals(176L << 20, admission.globalByteCapacity());
+        assertEquals(12, admission.groupRequests());
+        assertEquals(RESPONSE_BYTES + 24L, admission.groupBytes());
+        assertEquals(12, admission.groupRequestCapacity());
+        assertEquals(176L << 20, admission.groupByteCapacity());
         assertTrue(admission.attemptedBytes() > 0);
       } finally {
         watchAccount.close();
-        reservedScopes.forEach(RequestScope::close);
+        blockedScopes.forEach(RequestScope::close);
       }
       assertNoBudgetLeaks(fixture.budgets);
     }
@@ -427,13 +497,13 @@ class WatchHistoryReplayTest {
   void reportsControlReadAdmissionResourceLimitSeparatelyFromReadFailure() throws Exception {
     var fixture = new ReplayFixture();
     var stages = new ArrayList<RequestMetrics.WatchReplayOpenResourceFailureStage>();
-    var reservedScopes = new ArrayList<RequestScope>();
+    var regularScopes = new ArrayList<RequestScope>();
     when(fixture.pins.registerProtection(any(EventHistoryPinManager.Requirement.class),
         any(RequestScope.class))).thenAnswer(invocation -> {
-          for (int index = 0; index < 4; index++) {
-            RequestScope reservedScope = RequestScope.withoutDeadline();
-            reservedScopes.add(reservedScope);
-            fixture.budgets.admitReserved(TABLE_GROUP, reservedScope,
+          for (int index = 0; index < 11; index++) {
+            RequestScope regularScope = RequestScope.withoutDeadline();
+            regularScopes.add(regularScope);
+            fixture.budgets.admit(TABLE_GROUP, regularScope,
                 new BudgetManager.Reservation(0, 1, 1, 0, 0));
           }
           return CompletableFuture.completedFuture(fixture.protection);
@@ -454,7 +524,7 @@ class WatchHistoryReplayTest {
             stages);
       } finally {
         watchAccount.close();
-        reservedScopes.forEach(RequestScope::close);
+        regularScopes.forEach(RequestScope::close);
       }
       assertNoBudgetLeaks(fixture.budgets);
     }
@@ -1080,7 +1150,7 @@ class WatchHistoryReplayTest {
     private final EventHistoryPinManager.Protection protection =
         mock(EventHistoryPinManager.Protection.class);
     private final SelectedSequenceReader selected = mock(SelectedSequenceReader.class);
-    private final BudgetManager budgets = budgets();
+    private final BudgetManager budgets;
     private final Map<Long, Long> sequenceByRevision = Map.of(3L, 4L, 4L, 6L);
     private final Map<Long, List<PreparedEvent>> events = Map.of(
         4L, List.of(event(3, 4, 0, 31), event(3, 4, 1, 32)),
@@ -1093,6 +1163,11 @@ class WatchHistoryReplayTest {
     private final ControlSnapshot snapshot = new ControlSnapshot(state, new byte[] {1});
 
     private ReplayFixture() {
+      this(budgets());
+    }
+
+    private ReplayFixture(BudgetManager budgets) {
+      this.budgets = budgets;
       selectedBySequence = Map.of(
           4L, selected(3, 4, events.get(4L)),
           6L, selected(4, 6, events.get(6L)));
@@ -1151,7 +1226,8 @@ class WatchHistoryReplayTest {
     }
 
     private static BudgetManager budgets() {
-      long memory = 128L << 20;
+      // The 80 MiB service reserve is unavailable to each regular 64 MiB replay read.
+      long memory = 256L << 20;
       var limits = new BudgetManager.Limits(16, 16, 16, 8, 8, 1L << 20, memory);
       var reserved = new BudgetManager.ReservedCapacity(4, 4, 4, 4, 4, 1L << 20, 80L << 20);
       return new BudgetManager(limits, Map.of(TABLE_GROUP, limits), limits,

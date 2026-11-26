@@ -183,7 +183,7 @@ final class WatchHistoryReplay implements AutoCloseable {
       BudgetManager budgets,
       BudgetManager.Account watchAccount, RequestScope streamScope,
       Consumer<RequestMetrics.WatchReplayOpenResourceFailureStage> resourceFailureObserver,
-      Consumer<BudgetManager.ReservedAdmissionFailureSnapshot> admissionFailureObserver) {
+      Consumer<BudgetManager.AdmissionFailureSnapshot> admissionFailureObserver) {
     Objects.requireNonNull(barrier, "barrier");
     Objects.requireNonNull(authorization, "authorization");
     Objects.requireNonNull(resourceFailureObserver, "resourceFailureObserver");
@@ -209,7 +209,8 @@ final class WatchHistoryReplay implements AutoCloseable {
     RequestScope lookupScope = RequestScope.withoutDeadline();
     BudgetManager.Account lookupAccount;
     try {
-      lookupAccount = budgets.admitReserved(tableGroup, lookupScope,
+      // Client replay reads use regular capacity; the reserve belongs to service maintenance.
+      lookupAccount = budgets.admit(tableGroup, lookupScope,
           LeaseBudgetProfile.EVENT_TAILER_READ_MEMORY, LeaseBudgetProfile.EVENT_TAILER_READ_LIMITS,
           admissionFailureObserver);
     } catch (BackendFailure failure) {
@@ -310,7 +311,7 @@ final class WatchHistoryReplay implements AutoCloseable {
       ControlSnapshot barrier, long startRevision, long sequence, long barrierSequence,
       Optional<RequestScope.ScopedCleanup> cleanup,
       Consumer<RequestMetrics.WatchReplayOpenResourceFailureStage> resourceFailureObserver,
-      Consumer<BudgetManager.ReservedAdmissionFailureSnapshot> admissionFailureObserver) {
+      Consumer<BudgetManager.AdmissionFailureSnapshot> admissionFailureObserver) {
     return installPin(registered)
         .thenCompose(ignored -> observeResourceFailure(() -> registered.renew(pinScope),
             resourceFailureObserver,
@@ -354,7 +355,7 @@ final class WatchHistoryReplay implements AutoCloseable {
   private CompletableFuture<OpenResult> openIfCompactedOrFail(long startRevision,
       Throwable openingFailure, Optional<RequestScope.ScopedCleanup> cleanup,
       Consumer<RequestMetrics.WatchReplayOpenResourceFailureStage> resourceFailureObserver,
-      Consumer<BudgetManager.ReservedAdmissionFailureSnapshot> admissionFailureObserver) {
+      Consumer<BudgetManager.AdmissionFailureSnapshot> admissionFailureObserver) {
     if (!(openingFailure instanceof SelectedSequenceReader.MissingFinalizedRevisionIndex)
         && !(openingFailure instanceof SnapshotPinManager.RegistrationFloorExceeded)) {
       return CompletableFuture.failedFuture(openingFailure);
@@ -710,14 +711,14 @@ final class WatchHistoryReplay implements AutoCloseable {
       Consumer<RequestMetrics.WatchReplayOpenResourceFailureStage> resourceFailureObserver,
       RequestMetrics.WatchReplayOpenResourceFailureStage admissionFailureStage,
       RequestMetrics.WatchReplayOpenResourceFailureStage operationFailureStage,
-      Consumer<BudgetManager.ReservedAdmissionFailureSnapshot> admissionFailureObserver) {
+      Consumer<BudgetManager.AdmissionFailureSnapshot> admissionFailureObserver) {
     RequestScope scope = RequestScope.withoutDeadline();
     BudgetManager.Account account;
     try {
       account = admissionFailureObserver == null
-          ? budgets.admitReserved(tableGroup, scope, LeaseBudgetProfile.EVENT_TAILER_READ_MEMORY,
+          ? budgets.admit(tableGroup, scope, LeaseBudgetProfile.EVENT_TAILER_READ_MEMORY,
               LeaseBudgetProfile.EVENT_TAILER_READ_LIMITS)
-          : budgets.admitReserved(tableGroup, scope, LeaseBudgetProfile.EVENT_TAILER_READ_MEMORY,
+          : budgets.admit(tableGroup, scope, LeaseBudgetProfile.EVENT_TAILER_READ_MEMORY,
               LeaseBudgetProfile.EVENT_TAILER_READ_LIMITS, admissionFailureObserver);
     } catch (BackendFailure failure) {
       scope.close();

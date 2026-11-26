@@ -1166,7 +1166,8 @@ class WatchGatewayTest {
   }
 
   private static BudgetManager historicalWatchBudgets() {
-    var limits = new BudgetManager.Limits(16, 16, 16, 8, 8, 1L << 20, 128L << 20);
+    // Keep the 80 MiB maintenance reserve separate from each regular 64 MiB replay read.
+    var limits = new BudgetManager.Limits(16, 16, 16, 8, 8, 1L << 20, 256L << 20);
     var reserved = new BudgetManager.ReservedCapacity(4, 4, 4, 4, 4, 1L << 20, 80L << 20);
     return new BudgetManager(limits, Map.of(TABLE_GROUP, limits), limits,
         reserved, Map.of(TABLE_GROUP, reserved));
