@@ -587,7 +587,19 @@
         "hbase_profile_id": {"$ref": "#/$defs/Identifier"},
         "authenticator_id": {"$ref": "#/$defs/Identifier"},
         "cluster_id": {"type": "string", "minLength": 1, "maxLength": 512},
-        "hbase_site_file": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/"}
+        "hbase_site_file": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/"},
+        "credential_versions": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/CredentialVersion"}},
+        "backend_identity_domain": {"$ref": "#/$defs/Identifier"}
+      }
+    },
+    "CredentialVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principal", "generation", "credential_reference"],
+      "properties": {
+        "principal": {"type": "string", "minLength": 1, "maxLength": 256},
+        "generation": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "credential_reference": {"$ref": "#/$defs/CredentialReference"}
       }
     },
     "EndpointBinding": {

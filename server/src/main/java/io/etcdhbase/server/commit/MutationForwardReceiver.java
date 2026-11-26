@@ -1,6 +1,7 @@
 package io.etcdhbase.server.commit;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitState;
 import io.etcdhbase.core.commit.ControlSnapshot;
@@ -24,10 +25,19 @@ public final class MutationForwardReceiver {
   private static final long MAX_LOCAL_TIMEOUT_NANOS = MutationForwardRequest.MAX_TIMEOUT_NANOS;
 
   public record VerifiedAuthorization(
-      AuthorizedBackendIdentity identity, ByteKey authorizationScopeDigest) {
+      AuthorizedBackendIdentity identity, ByteKey authorizationScopeDigest,
+      CommitAuthorizationProof publicationProof, Runnable retireUserIdentity) {
+    /** Service-only authorization has no session identity to retire. */
+    public VerifiedAuthorization(AuthorizedBackendIdentity identity, ByteKey authorizationScopeDigest,
+        CommitAuthorizationProof publicationProof) {
+      this(identity, authorizationScopeDigest, publicationProof, () -> { });
+    }
+
     public VerifiedAuthorization {
       Objects.requireNonNull(identity, "identity");
       Objects.requireNonNull(authorizationScopeDigest, "authorizationScopeDigest");
+      Objects.requireNonNull(publicationProof, "publicationProof");
+      Objects.requireNonNull(retireUserIdentity, "retireUserIdentity");
       if (authorizationScopeDigest.length() != 32) {
         throw new IllegalArgumentException("authorization scope digest must be SHA-256");
       }
@@ -41,7 +51,8 @@ public final class MutationForwardReceiver {
      * must come from the authenticated channel, never from an untrusted request field.
      */
     CompletableFuture<VerifiedAuthorization> verifyAndResolve(
-        String authenticatedPeerIdentity, MutationForwardRequest request, RequestScope scope);
+        String authenticatedPeerIdentity, MutationForwardRequest request,
+        long expectedAuthorizationBarrierGeneration, RequestScope scope);
   }
 
   @FunctionalInterface
@@ -55,7 +66,7 @@ public final class MutationForwardReceiver {
     CompletableFuture<OwnerForwarding.Reply> process(
         MutationForwardRequest request,
         InvocationBinding binding,
-        AuthorizedBackendIdentity identity,
+        VerifiedAuthorization authorization,
         RequestScope scope);
   }
 
@@ -142,7 +153,8 @@ public final class MutationForwardReceiver {
     try {
       var authorizationReference = new AtomicReference<CompletableFuture<VerifiedAuthorization>>();
       if (!scope.startIfOpen(() -> authorizationReference.set(
-          authorizations.verifyAndResolve(peerIdentity, request, scope)))) {
+          authorizations.verifyAndResolve(peerIdentity, request,
+              observed.authorizationBarrierGeneration(), scope)))) {
         return unknown(scopeFailureCategory(scope));
       }
       authorization = authorizationReference.get();
@@ -157,7 +169,9 @@ public final class MutationForwardReceiver {
             return unknown(scopeFailureCategory(scope));
           }
           if (result.failure() != null) return unknown(category(result.failure()));
-          if (!matchesAuthorization(request, result.authorization())) {
+          if (!matchesAuthorization(request, result.authorization())
+              || result.authorization().publicationProof().authorizationBarrierGeneration()
+                  != observed.authorizationBarrierGeneration()) {
             return unknown(BackendFailure.Category.PERMISSION);
           }
           InvocationBinding proposed = InvocationBinding.begin(
@@ -233,10 +247,17 @@ public final class MutationForwardReceiver {
               || current.publishedRevision() != observed.publishedRevision()) {
             return unknown(BackendFailure.Category.UNAVAILABLE);
           }
+          // Only PREPARING work can still be dispatched as a new mutation. A non-preparing
+          // invocation may already have a durable selected outcome that its processor must resolve.
+          if (binding.state() == InvocationBinding.State.PREPARING
+              && authorization.publicationProof().authorizationBarrierGeneration()
+                  != current.authorizationBarrierGeneration()) {
+            return unknown(BackendFailure.Category.PERMISSION);
+          }
           var processingReference = new AtomicReference<CompletableFuture<OwnerForwarding.Reply>>();
           try {
             if (!scope.startIfOpen(() -> processingReference.set(processor.process(
-                request, binding, authorization.identity(), scope)))) {
+                request, binding, authorization, scope)))) {
               return unknown(scopeFailureCategory(scope));
             }
           } catch (RuntimeException failure) {

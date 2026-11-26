@@ -318,10 +318,13 @@ class M3ProcessRecoveryIT {
       var stores = openStores(fixture, scope);
       var recovery = new RecoveryManager(fixture.system().profileFingerprint(), stores.control(),
           new CommitOwnerService(stores.control()), stores.invocations(), stores.outcomes(), stores.finalizer());
+      var selected = stores.control().read(scope).join().orElseThrow().state();
+      assertEquals(stores.invocations().read(prepared.id(), scope).join().orElseThrow().preparedOwnerEpoch(),
+          selected.ownerEpoch());
       long now = System.currentTimeMillis();
       var recovered = recovery.recover("m3-recovery-owner", now, now + 60_000, scope).join();
       assertEquals(RecoveryManager.State.FINALIZED, recovered.state());
-      assertEquals(3, recovered.owner().orElseThrow().epoch());
+      assertEquals(Math.addExact(selected.ownerEpoch(), 1), recovered.owner().orElseThrow().epoch());
       var account = budgets.admit(fixture.system().tableGroupId(), scope, reservation());
       try (var result = stores.invocationResults().resolve(prepared.id(), prepared.digest(),
           M3PutCommitIT.AUTHORIZATION, scope, account).join()) {

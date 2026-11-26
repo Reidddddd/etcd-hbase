@@ -33,10 +33,13 @@ import io.etcdhbase.hbase.storage.HBaseCommitControlStore;
 import io.etcdhbase.hbase.storage.HBaseCommitDecisionRepository;
 import io.etcdhbase.hbase.storage.HBaseManifestRepository;
 import io.etcdhbase.hbase.storage.HBaseSystemRecordStore;
+import io.etcdhbase.spi.identity.AuthenticationScope;
+import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
@@ -65,7 +68,7 @@ class EventBackfillCycleBudgetTest {
     var cycle = new EventBackfillCycle("group", mock(SerialMutationQueue.class), stores, pins,
         mock(InvocationService.class),
         mock(EventBackfillPreparation.class), mock(CommitPublisher.class), budgets,
-        ByteKey.copyOf(new byte[32]), Clock.systemUTC());
+        identity("group"), ByteKey.copyOf(new byte[32]), Clock.systemUTC());
     try (var scope = RequestScope.withTimeout(Duration.ofSeconds(10))) {
       var failure = assertThrows(CompletionException.class,
           () -> cycle.run(new CommitOwnerService.OwnerToken("owner", 1), scope).join());
@@ -172,7 +175,7 @@ class EventBackfillCycleBudgetTest {
           reserved, Map.of("group", reserved));
       cycle = new EventBackfillCycle("group", mock(SerialMutationQueue.class), stores, eventPins,
           mock(InvocationService.class), mock(EventBackfillPreparation.class), mock(CommitPublisher.class),
-          budgets, AUTHORIZATION, Clock.systemUTC());
+          budgets, identity("group"), AUTHORIZATION, Clock.systemUTC());
     }
 
     private static ControlSnapshot snapshot(CommitState state) {
@@ -182,7 +185,12 @@ class EventBackfillCycleBudgetTest {
     private static CommitState state() {
       return CommitState.restore(CommitState.EVENT_REGISTRY_FORMAT_VERSION, FINGERPRINT,
           Optional.of("owner"), OWNER.epoch(), 10_000, 1, 40, 30, 40, 30,
-          Optional.empty(), 1, Optional.of(NAMESPACE), Optional.empty(), 1);
+          Optional.empty(), 1, Optional.of(NAMESPACE), Optional.empty(), 1, true, 0);
     }
+  }
+
+  private static AuthorizedBackendIdentity identity(String tableGroup) {
+    return new AuthorizedBackendIdentity("dev-no-auth", "fixture", "fixture-context",
+        new AuthenticationScope(tableGroup, "primary"), Set.of(tableGroup), 0);
   }
 }

@@ -15,6 +15,7 @@ import io.etcdhbase.core.kv.CompareReadExecutor;
 import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.kv.PutCommand;
 import io.etcdhbase.core.kv.RangeCommand;
+import io.etcdhbase.core.kv.RangeReadCache;
 import io.etcdhbase.core.kv.ResultNode;
 import io.etcdhbase.core.kv.TxnCommand;
 import io.etcdhbase.core.kv.TxnEvaluator;
@@ -1136,6 +1137,230 @@ class ReadViewRecordStoreTest {
           "a failed pin completion must never create a cache entry");
       session.finish().join();
     }
+  }
+
+  @Test
+  void cacheInvalidationRejectsAValidatedReadThatFinishesLate() throws Exception {
+    Fixture fixture = new Fixture(1, List.of(
+        candidate("delta", 1, 2, 2, StorageMetadata.State.LIVE, bytes("selected"))));
+    fixture.control.state = fixture.control.state.finalizePublication(fixture.transactionId);
+    fixture.physical.add(live("alpha", 1, 1, 1, 0, "one"));
+    fixture.pinCompletion = new CompletableFuture<>();
+    var limits = new BudgetManager.Limits(8, 32, 2, 2, 2, 1_000_000, 16_000_000);
+    var budget = new BudgetManager(limits, Map.of("public", limits), limits);
+    var reservation = new BudgetManager.Reservation(8192, 8192, 8192, 65536, 131072);
+    var command = new RangeCommand(KeyRange.point(key("alpha")), RangeCommand.Context.STANDALONE,
+        0, 0, new RangeCommand.Sort(0, 0), new RangeCommand.RevisionFilter(0, 0, 0, 0),
+        false, false, false);
+    try (RequestScope owner = RequestScope.withTimeout(Duration.ofSeconds(10));
+         var cache = new CacheAdmissionTestSupport(budget, owner);
+         RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(10));
+         var account = budget.admit("public", scope, reservation);
+         var scheduler = new ScanScheduler(budget, Duration.ofSeconds(5))) {
+      Object earlier = cache.generation();
+      var evaluator = readRangeEvaluator(fixture, scheduler, account, scope, 16384);
+      var request = new TxnCommand(List.of(), List.of(new TxnCommand.Range(command)), List.of());
+      var pending = cache.finish(evaluator.evaluate(request, Optional.empty()).join());
+      assertFalse(pending.isDone());
+      cache.invalidate(digest(9));
+      fixture.pinCompletion.complete(null);
+      var validated = pending.join();
+      assertFalse(cache.admit(validated, scope, digest(7), earlier));
+      assertTrue(cache.admit(validated, scope, digest(7), cache.generation()));
+    }
+    assertEquals(0, budget.snapshot().allocatedBytes());
+  }
+
+  @Test
+  void invalidationRejectsACachedHitWaitingForPinCompletion() throws Exception {
+    Fixture fixture = new Fixture(1, List.of(
+        candidate("delta", 1, 2, 2, StorageMetadata.State.LIVE, bytes("selected"))));
+    fixture.control.state = fixture.control.state.finalizePublication(fixture.transactionId);
+    fixture.physical.add(live("alpha", 1, 1, 1, 0, "one"));
+    var limits = new BudgetManager.Limits(8, 32, 2, 2, 2, 1_000_000, 16_000_000);
+    var budget = new BudgetManager(limits, Map.of("public", limits), limits);
+    var reservation = new BudgetManager.Reservation(8192, 8192, 8192, 65536, 131072);
+    var range = new RangeCommand(KeyRange.point(key("alpha")), RangeCommand.Context.STANDALONE,
+        0, 0, new RangeCommand.Sort(0, 0), new RangeCommand.RevisionFilter(0, 0, 0, 0),
+        false, false, false);
+    var command = new TxnCommand(List.of(), List.of(new TxnCommand.Range(range)), List.of());
+    try (RequestScope owner = RequestScope.withTimeout(Duration.ofSeconds(10));
+         var cache = new RangeReadCache(7, digest(7), 16384, 8, 8, budget, "public", owner)) {
+      try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(10));
+           var account = budget.admit("public", scope, reservation);
+           var scheduler = new ScanScheduler(budget, Duration.ofSeconds(5))) {
+        var session = TxnReadSession.open(fixture.views, List.of(), digest(9), fixture.physical,
+            new ManifestCatalog(fixture.repository), ignored -> 0, 1, scope).join();
+        var evaluator = new TxnEvaluator(session, new CompareReadExecutor(session, scheduler, account,
+            scope, new CompareReadExecutor.Limits(1, 4096, 64, 4096)), account, scope,
+            new TxnEvaluator.Limits(4096, 16384, 65536), ignored -> 0);
+        cache.read(command, session, evaluator, account, scope).join();
+      }
+      int physicalReads = fixture.physical.getCalls.get();
+      fixture.pinCompletion = new CompletableFuture<>();
+      try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(10));
+           var account = budget.admit("public", scope, reservation);
+           var scheduler = new ScanScheduler(budget, Duration.ofSeconds(5))) {
+        var session = TxnReadSession.open(fixture.views, List.of(), digest(9), fixture.physical,
+            new ManifestCatalog(fixture.repository), ignored -> 0, 1, scope).join();
+        var evaluator = new TxnEvaluator(session, new CompareReadExecutor(session, scheduler, account,
+            scope, new CompareReadExecutor.Limits(1, 4096, 64, 4096)), account, scope,
+            new TxnEvaluator.Limits(4096, 16384, 65536), ignored -> 0);
+        var pending = cache.read(command, session, evaluator, account, scope);
+        assertFalse(pending.isDone());
+        assertEquals(physicalReads, fixture.physical.getCalls.get());
+        cache.invalidateAuthorization(digest(9));
+        fixture.pinCompletion.complete(null);
+        var failure = assertThrows(CompletionException.class, pending::join);
+        assertEquals(BackendFailure.Category.UNAVAILABLE,
+            assertInstanceOf(BackendFailure.class, failure.getCause()).category());
+      }
+    }
+    assertEquals(0, budget.snapshot().allocatedBytes());
+  }
+
+  @Test
+  void invalidationPreventsAnInFlightPhysicalReadFromRefillingTheCache() throws Exception {
+    Fixture fixture = new Fixture(1, List.of(
+        candidate("delta", 1, 2, 2, StorageMetadata.State.LIVE, bytes("selected"))));
+    fixture.control.state = fixture.control.state.finalizePublication(fixture.transactionId);
+    fixture.physical.add(live("alpha", 1, 1, 1, 0, "new"));
+    fixture.physical.blockNextGet(key("alpha"));
+    var limits = new BudgetManager.Limits(8, 32, 2, 2, 2, 1_000_000, 16_000_000);
+    var budget = new BudgetManager(limits, Map.of("public", limits), limits);
+    var reservation = new BudgetManager.Reservation(8192, 8192, 8192, 65536, 131072);
+    var range = new RangeCommand(KeyRange.point(key("alpha")), RangeCommand.Context.STANDALONE,
+        0, 0, new RangeCommand.Sort(0, 0), new RangeCommand.RevisionFilter(0, 0, 0, 0),
+        false, false, false);
+    var command = new TxnCommand(List.of(), List.of(new TxnCommand.Range(range)), List.of());
+    try (RequestScope owner = RequestScope.withTimeout(Duration.ofSeconds(10));
+         var cache = new RangeReadCache(7, digest(7), 16384, 8, 8, budget, "public", owner)) {
+      try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(10));
+           var account = budget.admit("public", scope, reservation);
+           var scheduler = new ScanScheduler(budget, Duration.ofSeconds(5))) {
+        var session = TxnReadSession.open(fixture.views, List.of(), digest(9), fixture.physical,
+            new ManifestCatalog(fixture.repository), ignored -> 0, 1, scope).join();
+        var evaluator = new TxnEvaluator(session, new CompareReadExecutor(session, scheduler, account,
+            scope, new CompareReadExecutor.Limits(1, 4096, 64, 4096)), account, scope,
+            new TxnEvaluator.Limits(4096, 16384, 65536), ignored -> 0);
+        var pending = cache.read(command, session, evaluator, account, scope);
+        assertFalse(pending.isDone());
+        assertEquals(1, fixture.physical.getCalls.get());
+        cache.invalidateAuthorization(digest(9));
+        fixture.physical.blockedKey = null;
+        fixture.physical.pendingGet.complete(Optional.of(live("alpha", 1, 1, 1, 0, "old")));
+        pending.join();
+      }
+      try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(10));
+           var account = budget.admit("public", scope, reservation);
+           var scheduler = new ScanScheduler(budget, Duration.ofSeconds(5))) {
+        var session = TxnReadSession.open(fixture.views, List.of(), digest(9), fixture.physical,
+            new ManifestCatalog(fixture.repository), ignored -> 0, 1, scope).join();
+        var evaluator = new TxnEvaluator(session, new CompareReadExecutor(session, scheduler, account,
+            scope, new CompareReadExecutor.Limits(1, 4096, 64, 4096)), account, scope,
+            new TxnEvaluator.Limits(4096, 16384, 65536), ignored -> 0);
+        var result = cache.read(command, session, evaluator, account, scope).join();
+        var response = assertInstanceOf(ResultNode.Range.class,
+            assertInstanceOf(ResultNode.Txn.class, result.result().root()).responses().getFirst());
+        assertEquals("new", new String(response.records().getFirst().value().orElseThrow()));
+        assertEquals(2, fixture.physical.getCalls.get());
+        assertEquals(0, cache.hitCount());
+      }
+      try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(10));
+           var account = budget.admit("public", scope, reservation);
+           var scheduler = new ScanScheduler(budget, Duration.ofSeconds(5))) {
+        var session = TxnReadSession.open(fixture.views, List.of(), digest(9), fixture.physical,
+            new ManifestCatalog(fixture.repository), ignored -> 0, 1, scope).join();
+        var evaluator = new TxnEvaluator(session, new CompareReadExecutor(session, scheduler, account,
+            scope, new CompareReadExecutor.Limits(1, 4096, 64, 4096)), account, scope,
+            new TxnEvaluator.Limits(4096, 16384, 65536), ignored -> 0);
+        cache.read(command, session, evaluator, account, scope).join();
+        assertEquals(2, fixture.physical.getCalls.get());
+        assertEquals(1, cache.hitCount());
+      }
+    }
+    assertEquals(0, budget.snapshot().allocatedBytes());
+  }
+
+  @Test
+  void invalidationRejectsAnInFlightCacheProof() throws Exception {
+    verifyInFlightCacheProof(false);
+    verifyInFlightCacheProof(true);
+  }
+
+  private static void verifyInFlightCacheProof(boolean invalidate) throws Exception {
+    Fixture fixture = new Fixture(1, List.of(
+        candidate("delta", 1, 2, 2, StorageMetadata.State.LIVE, bytes("selected"))));
+    fixture.control.state = fixture.control.state.finalizePublication(fixture.transactionId);
+    fixture.physical.add(live("alpha", 1, 1, 1, 0, "value"));
+    var transaction = TransactionId.create();
+    var changedRecord = live("beta", 3, 3, 1, 0, "other");
+    var prepared = new PreparedCandidate(transaction, 1, 1, 2, changedRecord);
+    var page = ManifestPage.create(transaction, 0, List.of(ManifestCandidateReference.from(prepared, 0)));
+    var root = ManifestRoot.create(transaction, 1, 1, 2, 1,
+        changedRecord.metadata().valueLength(), Optional.of(page.reference()));
+    var decision = new CommitDecision(transaction, InvocationId.create(), 2, 2, 3,
+        root.systemIdentity(), root.digest(), true);
+    var pendingDecision = new CompletableFuture<Optional<CommitDecision>>();
+    var proofReads = new AtomicInteger();
+    var decisions = new CommitDecisionRepository() {
+      @Override public CompletableFuture<Optional<CommitDecision>> read(long sequence, RequestScope scope) {
+        proofReads.incrementAndGet();
+        return pendingDecision;
+      }
+      @Override public CompletableFuture<SystemRecordStore.CreateResult> createIfAbsent(
+          CommitDecision ignored, RequestScope scope) { throw new UnsupportedOperationException(); }
+    };
+    var repository = new MemoryManifestRepository(root, page, List.of(prepared));
+    var prover = new UnchangedRangeProof(decisions, new ManifestCatalog(repository), 1, 8, 8192, ignored -> 0);
+    var proofReservation = new BudgetManager.Reservation(8192, 8192, 256L << 20, 8192, 8192);
+    var proofLimits = new BudgetManager.ReadLimits(1000, 4L << 30, 1000, 1000, 1000);
+    var options = new RangeReadCache.ProofOptions(prover, proofReservation, proofLimits,
+        8, 512L << 20, 8, Duration.ofSeconds(5).toNanos());
+    var limits = new BudgetManager.Limits(8, 32, 2, 2, 2, 1_000_000, 512L << 20);
+    var budget = new BudgetManager(limits, Map.of("public", limits), limits);
+    var reservation = new BudgetManager.Reservation(8192, 8192, 8192, 65536, 131072);
+    var range = new RangeCommand(KeyRange.point(key("alpha")), RangeCommand.Context.STANDALONE,
+        0, 0, new RangeCommand.Sort(0, 0), new RangeCommand.RevisionFilter(0, 0, 0, 0),
+        false, false, false);
+    var command = new TxnCommand(List.of(), List.of(new TxnCommand.Range(range)), List.of());
+    try (RequestScope owner = RequestScope.withTimeout(Duration.ofSeconds(10));
+         var cache = new RangeReadCache(7, digest(7), 16384, 8, 8, budget, "public", owner,
+             Optional.of(options))) {
+      try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(10));
+           var account = budget.admit("public", scope, reservation);
+           var scheduler = new ScanScheduler(budget, Duration.ofSeconds(5))) {
+        var session = TxnReadSession.open(fixture.views, List.of(), digest(9), fixture.physical,
+            new ManifestCatalog(fixture.repository), ignored -> 0, 1, scope).join();
+        var evaluator = new TxnEvaluator(session, new CompareReadExecutor(session, scheduler, account,
+            scope, new CompareReadExecutor.Limits(1, 4096, 64, 4096)), account, scope,
+            new TxnEvaluator.Limits(4096, 16384, 65536), ignored -> 0);
+        cache.read(command, session, evaluator, account, scope).join();
+      }
+      var previous = fixture.control.state;
+      fixture.control.state = CommitState.restore(previous.profileFingerprint(), previous.ownerInstance(),
+          previous.ownerEpoch(), previous.ownerLeaseDeadlineEpochMillis(), previous.stateVersion() + 1,
+          2, 3, 2, 3, Optional.empty(), 0);
+      try (RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(10));
+           var account = budget.admit("public", scope, reservation);
+           var scheduler = new ScanScheduler(budget, Duration.ofSeconds(5))) {
+        var session = TxnReadSession.open(fixture.views, List.of(), digest(9), fixture.physical,
+            new ManifestCatalog(fixture.repository), ignored -> 0, 1, scope).join();
+        var evaluator = new TxnEvaluator(session, new CompareReadExecutor(session, scheduler, account,
+            scope, new CompareReadExecutor.Limits(1, 4096, 64, 4096)), account, scope,
+            new TxnEvaluator.Limits(4096, 16384, 65536), ignored -> 0);
+        var pending = cache.read(command, session, evaluator, account, scope);
+        assertEquals(1, proofReads.get());
+        assertFalse(pending.isDone());
+        assertEquals(1, fixture.physical.getCalls.get());
+        if (invalidate) cache.invalidateAuthorization(digest(9));
+        pendingDecision.complete(Optional.of(decision));
+        pending.join();
+        assertEquals(invalidate ? 2 : 1, fixture.physical.getCalls.get());
+        assertEquals(invalidate ? 0 : 1, cache.hitCount());
+      }
+    }
+    assertEquals(0, budget.snapshot().allocatedBytes());
   }
 
   private static void verifyFreshBarrierAndIdentity(Fixture fixture, BudgetManager budget,

@@ -9,6 +9,8 @@ import io.etcdhbase.core.commit.AuxiliaryFormatUpgrade;
 import io.etcdhbase.core.commit.AuxiliaryLeasePlanVerifier;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
 import io.etcdhbase.core.commit.CommitOwnerService;
+import io.etcdhbase.core.commit.AuthorizationBarrierUpgrade;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitPlanVerifier;
 import io.etcdhbase.core.commit.CommitPublisher;
 import io.etcdhbase.core.commit.EventHistoryRegistryUpgrade;
@@ -65,6 +67,7 @@ class EventBackfillPublicationIT {
         long now = System.currentTimeMillis();
         var owner = new CommitOwnerService(original.control())
             .claim("backfill-cycle-test-owner", now, now + TIMEOUT.toMillis(), scope).join().orElseThrow();
+        owner = new AuthorizationBarrierUpgrade(original.control()).enable(owner, now, scope).join();
         writeLegacyPut(fixture, original, owner);
         enableCapabilities(fixture, scope);
         var stores = TableGroupStores.open(fixture.factory(), fixture.identity(), fixture.system(),
@@ -76,6 +79,7 @@ class EventBackfillPublicationIT {
         var selected = new EventHistoryRegistryUpgrade(stores.records(), stores.control(), PINS, Clock.systemUTC())
             .upgrade(owner, scope).join();
         owner = selected.owner();
+        owner = new AuthorizationBarrierUpgrade(stores.control()).enable(owner, now, scope).join();
 
         var limits = new BudgetManager.Limits(4, 4, 4, 4, 4, 1_000_000, 1024L << 20);
         var tableGroup = fixture.system().tableGroupId();
@@ -139,7 +143,7 @@ class EventBackfillPublicationIT {
                 LeaseStateMessages::decode, LeaseBindingMessages::decode)),
         stores.invocations(), handoff, stores.finalizer());
     return new EventBackfillCycle(fixture.system().tableGroupId(), ownerLane, stores, pins, invocations,
-        preparation, publisher, budgets, AUTHORIZATION, Clock.systemUTC());
+        preparation, publisher, budgets, fixture.identity(), AUTHORIZATION, Clock.systemUTC());
   }
 
   @Test
@@ -152,6 +156,7 @@ class EventBackfillPublicationIT {
         long now = System.currentTimeMillis();
         var owner = new CommitOwnerService(original.control())
             .claim("backfill-test-owner", now, now + TIMEOUT.toMillis(), scope).join().orElseThrow();
+        owner = new AuthorizationBarrierUpgrade(original.control()).enable(owner, now, scope).join();
         writeLegacyPut(fixture, original, owner);
         enableCapabilities(fixture, scope);
         var stores = TableGroupStores.open(fixture.factory(), fixture.identity(), fixture.system(),
@@ -163,6 +168,7 @@ class EventBackfillPublicationIT {
         var selected = new EventHistoryRegistryUpgrade(stores.records(), stores.control(), PINS, Clock.systemUTC())
             .upgrade(owner, scope).join();
         owner = selected.owner();
+        owner = new AuthorizationBarrierUpgrade(stores.control()).enable(owner, now, scope).join();
         var pins = selected.registry();
 
         var limits = new BudgetManager.Limits(2, 2, 2, 2, 2, 1_000_000, 1024L << 20);
@@ -191,7 +197,8 @@ class EventBackfillPublicationIT {
                       LeaseStateMessages::decode, LeaseBindingMessages::decode)),
               stores.invocations(), handoff, stores.finalizer());
           var result = new EventBackfillExecutor(stores.control(), preparation, publisher, Clock.systemUTC())
-              .publish(invocation, owner, checkpoint, window, scope, account, budget).join();
+              .publish(invocation, owner, checkpoint, window,
+                  serviceProof(fixture, stores, scope), scope, account, budget).join();
           assertEquals(CommitOutcomeResolver.State.SELECTED_FINALIZED, result.state());
           var state = stores.control().read(scope).join().orElseThrow().state();
           assertEquals(2, state.finalizedSequence());
@@ -223,6 +230,7 @@ class EventBackfillPublicationIT {
     }
   }
 
+  // Legacy here means no event-index capability; new publication still requires the auth fence.
   private static void writeLegacyPut(M3TestEnvironment fixture, TableGroupStores stores,
       CommitOwnerService.OwnerToken owner) throws Exception {
     var limits = new BudgetManager.Limits(4, 4, 4, 4, 4, 1L << 20, 256L << 20);
@@ -248,7 +256,7 @@ class EventBackfillPublicationIT {
       var command = new PutCommand(ByteKey.copyOf(new byte[] {1, 0, (byte) 0xff}),
           new byte[] {4, 2}, 0, false, false, false);
       assertEquals(binding.invocationId(), executor.executeNew(command, binding, owner,
-          fixture.identity(), scope, account).join());
+          fixture.identity(), serviceProof(fixture, stores, scope), scope, account).join());
     } finally {
       handoff.close();
       handoff.drained().join();
@@ -289,7 +297,8 @@ class EventBackfillPublicationIT {
         TransactionId.create(), owner.epoch(), 2, 2);
     var invocation = invocations.bindOrJoin(proposed, scope).join();
     var result = new EventBackfillExecutor(stores.control(), preparation, publisher, Clock.systemUTC())
-        .publish(invocation, owner, advanced, window, scope, account, windowBudget).join();
+        .publish(invocation, owner, advanced, window,
+            serviceProof(fixture, stores, scope), scope, account, windowBudget).join();
     assertEquals(CommitOutcomeResolver.State.SELECTED_FINALIZED, result.state());
     return advanced;
   }
@@ -305,5 +314,12 @@ class EventBackfillPublicationIT {
     descriptor = fixture.system().withEventRevisionIndexCapability(descriptor);
     var replacement = descriptor;
     request.execute(() -> admin.modifyTable(replacement)).join();
+  }
+
+  private static CommitAuthorizationProof serviceProof(
+      M3TestEnvironment fixture, TableGroupStores stores, RequestScope scope) {
+    var state = stores.control().read(scope).join().orElseThrow().state();
+    return ServiceAuthorizationContextReference.publicationProof(
+        fixture.identity(), AUTHORIZATION, state.authorizationBarrierGeneration());
   }
 }

@@ -121,6 +121,7 @@ public final class HBaseCommitControlStore implements CommitControlStore {
         || !observed.state().profileFingerprint().equals(binding.profileFingerprint())
         || !observed.state().profileFingerprint().equals(replacement.profileFingerprint())
         || replacement.stateVersion() != Math.addExact(observed.state().stateVersion(), 1)
+        || !isValidAuthorizationBarrierTransition(observed.state(), replacement)
         || replacement.supportsEventRevisionIndex() && !eventRevisionIndexSupported) {
       return CompletableFuture.failedFuture(new IllegalArgumentException(
           "control replacement must advance the exact observed state"));
@@ -174,6 +175,40 @@ public final class HBaseCommitControlStore implements CommitControlStore {
           .build(controlPut(replacement));
       return table.checkAndMutate(condition).thenApply(result -> result.isSuccess());
     });
+  }
+
+  static boolean isValidAuthorizationBarrierTransition(
+      CommitState observed, CommitState replacement) {
+    long currentGeneration = observed.authorizationBarrierGeneration();
+    long nextGeneration = replacement.authorizationBarrierGeneration();
+    if (!observed.supportsAuthorizationBarrier()) {
+      if (!replacement.supportsAuthorizationBarrier()) return nextGeneration == currentGeneration;
+      if (nextGeneration != 0 || observed.ownerInstance().isEmpty()) return false;
+      try {
+        CommitState expected = observed.enableAuthorizationBarrier(
+            observed.ownerInstance().orElseThrow(), observed.ownerEpoch(), 0);
+        return Arrays.equals(CommitControlMessages.encode(expected),
+            CommitControlMessages.encode(replacement));
+      } catch (IllegalArgumentException | IllegalStateException | ArithmeticException invalid) {
+        return false;
+      }
+    }
+    if (!replacement.supportsAuthorizationBarrier()) return false;
+    if (nextGeneration < currentGeneration) return false;
+    if (nextGeneration == currentGeneration) return true;
+    if (!observed.supportsAuthorizationBarrier() || !replacement.supportsAuthorizationBarrier()
+        || observed.ownerInstance().isEmpty()) {
+      return false;
+    }
+    try {
+      if (nextGeneration != Math.addExact(currentGeneration, 1)) return false;
+      CommitState expected = observed.advanceAuthorizationBarrier(
+          observed.ownerInstance().orElseThrow(), observed.ownerEpoch(), currentGeneration);
+      return Arrays.equals(CommitControlMessages.encode(expected),
+          CommitControlMessages.encode(replacement));
+    } catch (IllegalArgumentException | IllegalStateException | ArithmeticException invalid) {
+      return false;
+    }
   }
 
   private Optional<ControlSnapshot> snapshot(Result row) {

@@ -38,6 +38,17 @@ public final class RangeReadCache implements AutoCloseable {
   private final String group;
   private final Optional<ProofOptions> proofOptions;
 
+  /** Captured before physical reading begins; a later invalidation fences its cache fill. */
+  public static final class ReadGeneration {
+    private final RangeReadCache owner;
+    private final Object value;
+
+    private ReadGeneration(RangeReadCache owner, Object value) {
+      this.owner = owner;
+      this.value = value;
+    }
+  }
+
   public RangeReadCache(long tableGroupId, ByteKey storageProfile, long maximumBytes,
       int maximumEntries, int maximumRecords, BudgetManager budget, String group,
       RequestScope owner) throws BackendFailure {
@@ -62,11 +73,28 @@ public final class RangeReadCache implements AutoCloseable {
   /** Evaluates one standalone current Range after its authoritative read view has been opened. */
   public CompletableFuture<TxnEvaluator.ValidatedRead> read(TxnCommand command, TxnReadSession session,
       TxnEvaluator evaluator, BudgetManager.Account account, RequestScope scope) {
+    return read(command, session, evaluator, account, scope, beginRead());
+  }
+
+  public ReadGeneration beginRead() {
+    return new ReadGeneration(this, cache.invalidationGeneration());
+  }
+
+  /** Evicts the specified authorization; all earlier fills are conservatively fenced. */
+  public void invalidateAuthorization(ByteKey authorization) {
+    cache.invalidateAuthorization(authorization);
+  }
+
+  public CompletableFuture<TxnEvaluator.ValidatedRead> read(TxnCommand command, TxnReadSession session,
+      TxnEvaluator evaluator, BudgetManager.Account account, RequestScope scope, ReadGeneration generation) {
     Objects.requireNonNull(command, "command");
     Objects.requireNonNull(session, "session");
     Objects.requireNonNull(evaluator, "evaluator");
     Objects.requireNonNull(account, "account");
     Objects.requireNonNull(scope, "scope");
+    if (Objects.requireNonNull(generation, "generation").owner != this) {
+      return CompletableFuture.failedFuture(new IllegalArgumentException("read generation belongs to another cache"));
+    }
     if (!session.belongsTo(scope) || !account.belongsTo(scope)
         || !evaluator.belongsTo(session, account, scope)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("invalid cached read ownership or limit"));
@@ -74,21 +102,24 @@ public final class RangeReadCache implements AutoCloseable {
     long maximumResultBytes = evaluator.maximumResultBytes();
     Optional<RangeCommand> selected = TxnEvaluator.standaloneRange(command);
     if (selected.isEmpty() || selected.orElseThrow().revision() != 0) {
-      return direct(command, evaluator, scope, false);
+      return direct(command, evaluator, scope, false, generation.value);
+    }
+    if (!cache.isCurrent(generation.value)) {
+      return direct(command, evaluator, scope, false, generation.value);
     }
     RangeCommand range = selected.orElseThrow();
     try {
       var key = RangeResultCache.Key.from(tableGroupId, storageProfile,
           session.protectedView(session.currentRevision()), range);
       Optional<RangeResultCache.Hit> found = cache.get(key, account, scope);
-      if (found.isPresent()) return finishHit(found.orElseThrow(), command, session, evaluator, scope, maximumResultBytes);
-      if (proofOptions.isEmpty()) return direct(command, evaluator, scope, true);
+      if (found.isPresent()) return finishHit(found.orElseThrow(), command, session, evaluator, scope, maximumResultBytes, generation.value);
+      if (proofOptions.isEmpty()) return direct(command, evaluator, scope, true, generation.value);
       return prove(range, session, account, scope).thenCompose(proved -> proved.isPresent()
-          ? finishHit(proved.orElseThrow(), command, session, evaluator, scope, maximumResultBytes)
-          : direct(command, evaluator, scope, true));
+          ? finishHit(proved.orElseThrow(), command, session, evaluator, scope, maximumResultBytes, generation.value)
+          : direct(command, evaluator, scope, true, generation.value));
     } catch (BackendFailure failure) {
       return failure.category() == BackendFailure.Category.RESOURCE_LIMIT
-          ? direct(command, evaluator, scope, true) : CompletableFuture.failedFuture(failure);
+          ? direct(command, evaluator, scope, true, generation.value) : CompletableFuture.failedFuture(failure);
     } catch (RuntimeException failure) {
       return CompletableFuture.failedFuture(failure);
     }
@@ -96,18 +127,25 @@ public final class RangeReadCache implements AutoCloseable {
 
   private CompletableFuture<TxnEvaluator.ValidatedRead> finishHit(RangeResultCache.Hit hit,
       TxnCommand command, TxnReadSession session, TxnEvaluator evaluator, RequestScope scope,
-      long maximumResultBytes) {
+      long maximumResultBytes, Object generation) {
     try {
+      if (!cache.isCurrent(generation)) {
+        hit.close();
+        return direct(command, evaluator, scope, false, generation);
+      }
       var header = new ResultNode.Header(true, session.currentRevision());
       var tree = new ResultTree(new ResultNode.Txn(0, header, true,
           List.of(new ResultNode.Range(0, header, hit.records(), hit.count(), false))));
       if (tree.retainedBytes() > maximumResultBytes) {
         hit.close();
-        return direct(command, evaluator, scope, true);
+        return direct(command, evaluator, scope, true, generation);
       }
-      return TxnEvaluator.ValidatedRead.finishCached(tree, session).thenApply(result -> {
+      return TxnEvaluator.ValidatedRead.finishCached(tree, session).thenCompose(result -> {
+        if (!cache.isCurrent(generation)) {
+          return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+        }
         hits.increment();
-        return result;
+        return CompletableFuture.completedFuture(result);
       }).whenComplete((result, failure) -> {
         if (failure != null) hit.close();
       });
@@ -190,11 +228,11 @@ public final class RangeReadCache implements AutoCloseable {
   public long hitCount() { return hits.sum(); }
 
   private CompletableFuture<TxnEvaluator.ValidatedRead> direct(
-      TxnCommand command, TxnEvaluator evaluator, RequestScope scope, boolean cacheable) {
+      TxnCommand command, TxnEvaluator evaluator, RequestScope scope, boolean cacheable, Object generation) {
     return evaluator.evaluate(command, Optional.empty()).thenCompose(evaluation -> cacheable
             ? evaluation.finishReadOnlyForCache() : evaluation.finishReadOnly())
         .thenApply(result -> {
-          cache.putValidated(tableGroupId, storageProfile, result, scope);
+          cache.putValidated(tableGroupId, storageProfile, result, scope, generation);
           return result;
         });
   }

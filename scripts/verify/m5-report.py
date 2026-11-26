@@ -102,6 +102,140 @@ J50_REQUIRED_TESTS = {
 }
 
 
+J51_SCENARIOS = {
+    "identity-retirement-and-acl-recheck",
+    "single-group-revocation-recovery-and-publication-fencing",
+    "deployment-registry-and-cross-group-revocation-mock",
+    "queued-read-and-cache-invalidation",
+    "lease-expiry-owner-handoff",
+    "watch-and-keepalive-revalidation",
+    "unsupported-auth-management-wire",
+}
+J51_REQUIRED_TESTS = {
+    ("server", "surefire", "io.etcdhbase.server.AuthRegistryAdminCommandTest"):
+        {"commandPersistsInventoryAndWorkersRecoverAnUnknownUpdateBeforeStatusChanges",
+         "productionLeaseRequiresVersionedSecureIdentityAndIsolatedRecovery",
+         "disabledGroupCanRecoverLaterConfigurationUpdates",
+         "timedOutWriteKeepsControlResourcesUntilItsPhysicalProducerDrains",
+         "inventoryRejectsDifferentControlBindingsAndDuplicateGroupsBeforeBackendAccess"},
+    ("server", "surefire", "io.etcdhbase.server.AuthRegistryInventoryTest"):
+        {"inventoryUsesTheRuntimeDatasetAndConfigurationBindings"},
+    ("core", "surefire", "io.etcdhbase.core.auth.AuthDeploymentRegistryAdminTest"):
+        {"explicitInitializationAndUpdateUseFullInventoryAndRejectInFlightRevocation",
+         "reserveDoesNotPublishTheReplacementOrPermitAnotherOperation"},
+    ("core", "surefire", "io.etcdhbase.core.auth.AuthConfigurationUpdateExecutorTest"):
+        {"workersResumePartialFailureAndSwitchOnlyAfterAllOldGroupsAreFenced"},
+    ("core", "surefire", "io.etcdhbase.core.auth.AuthDeploymentRegistryTest"):
+        {"configurationReservationExcludesRevocationAndRequiresEveryBarrierBeforeSwitch"},
+    ("hbase", "surefire", "io.etcdhbase.hbase.codec.AuthDeploymentRegistryMessagesTest"):
+        {"preservesPartiallyInstalledConfigurationUpdate"},
+    ("core", "surefire", "io.etcdhbase.core.auth.RegistryRevocationStoreTest"):
+        {"reservationAndConfigurationUpdateCompeteOnTheSameRow",
+         "staleReservationRetriesAfterAnotherOperationOrConfigurationUpdate"},
+    ("core", "surefire", "io.etcdhbase.core.auth.RegistryAuthConfigurationStoreTest"):
+        {"projectsDeploymentGenerationFromTheRegistry"},
+    ("core", "surefire", "io.etcdhbase.core.auth.AuthorizationRevocationExecutorTest"):
+        {"partialFailureKeepsTheSnapshotAndRestartResumesTheSameBarriers",
+         "unknownCasOutcomeIsRecoveredFromTheSameDurableOperation",
+         "workersForDifferentGroupsCooperateWithoutReleasingBeforeAllBarriers"},
+    ("hbase", "surefire", "io.etcdhbase.hbase.storage.HBaseAuthDeploymentRegistryStoreTest"):
+        {"usesStrongReadsAndExactDurableCasAndRejectsInvalidTransitions"},
+    ("server", "surefire", "io.etcdhbase.server.auth.TargetAuthorizationBarriersTest"):
+        {"partialFailureAndRestartFenceAndReleaseEveryRegisteredGroup"},
+    ("server", "surefire", "io.etcdhbase.server.auth.DeploymentAuthorizationAdmissionTest"):
+        {"blocksOnlyAffectedSubjectsAndRejectsStaleIncarnations",
+         "rejectsAllSubjectsWhileConfigurationBarriersAreInstalling"},
+    ("server", "surefire", "io.etcdhbase.server.auth.AuthorizationRevocationSnapshotTest"):
+        {"snapshotsAllAndOnlyRegisteredFamilyScopesWithTheirIncarnations"},
+    ("server", "surefire", "io.etcdhbase.server.auth.VersionedHBaseAuthenticatorTest"):
+        {"configuredCredentialIsBoundToItsVersionAndDelegatesCleanup",
+         "oldSecretCannotBePromotedToTheNewGeneration",
+         "unconfiguredOrMissingVersionDoesNotBecomeAClaimedGeneration",
+         "mismatchedBackendUserIsClosedWithoutAttestingAVersion"},
+    ("server", "surefire", "io.etcdhbase.server.M3RuntimeGroupsTest"):
+        {"secureGroupWaitsForRecoveryAndDrainsItsProducerBeforeClosing"},
+    ("server", "surefire", "io.etcdhbase.server.auth.AuthDeploymentRecoveryWorkerTest"):
+        {"retriesARecoveredOperationAfterFailure",
+         "stopCancelsTheScopeAndWaitsForThePhysicalProducer",
+         "cleanupFailureStopsRecoveryAndIsReportedToTheOwner"},
+    ("core", "surefire", "io.etcdhbase.core.commit.AuthorizationBarrierInstallerTest"):
+        {
+            "allocatesTargetAfterCallerHasMadeRevocationDurableAndInstallsIt",
+            "resolvesUnknownCasOnlyAfterStrongReadShowsTheTarget",
+        },
+    ("core", "surefire", "io.etcdhbase.core.commit.CommitPublisherTest"):
+        {
+            "installedRevocationBarrierRejectsASelectionUsingAnEarlierControlSnapshot",
+            "configurationUpdateFencesAnAlreadyAuthorizedSelection",
+            "selectedPublicationRemainsSelectedWhenRevocationInstallsBeforeCasReply",
+            "timedOutSelectionIsResolvedAfterRevocationWithoutReauthorization",
+            "deniedReauthorizationAfterBarrierAdvanceDoesNotAttemptAnotherCas",
+        },
+    ("core", "surefire", "io.etcdhbase.core.commit.ReadViewRecordStoreTest"):
+        {
+            "invalidationPreventsAnInFlightPhysicalReadFromRefillingTheCache",
+            "invalidationRejectsAnInFlightCacheProof",
+        },
+    ("core", "surefire", "io.etcdhbase.core.kv.RangeResultCacheTest"):
+        {
+            "invalidationEvictsOnlyItsAuthorizationAndFencesEarlierFills",
+            "entryCannotCrossAuthorizationOrBarrierAndHitSurvivesEvictionOnlyWhileCharged",
+        },
+    ("hbase", "surefire", "io.etcdhbase.hbase.identity.HBaseBackendIdentityProviderTest"):
+        {
+            "retirementStopsNewBorrowsAndWaitsForExistingBorrowToDrain",
+            "identityCleanupFailureKeepsCapacityAndCanBeRetried",
+            "accessRecheckUsesTheRealConnectionAndRetiresOnPermissionLoss",
+        },
+    ("server", "surefire", "io.etcdhbase.server.auth.AuthSessionServiceTest"):
+        {
+            "rotationResumesAfterAnUnknownAuthorityWriteAtEveryPersistedPhase",
+            "rotationResumesAfterAnUnknownRegistryWriteAtEveryPersistedPhase",
+            "failedBarrierInstallationIsRecoveredByAnotherRuntimeFromTheSameRegistry",
+            "newerRotationFencesAnOlderRotationWaitingForBarrierCas",
+            "deploymentRotationBlocksBothGroupsUntilTheirBarriersComplete",
+            "independentGroupServicesResumeOnlyTheirOwnRegisteredBarriers",
+            "localServicesCooperativelyRecoverConfigurationBarriers",
+            "registryBindingMustMatchBeforeAuthenticationCanChangeAuthority",
+            "authStatusConfigurationMustMatchThePersistedBridge",
+        },
+    ("server", "surefire", "io.etcdhbase.server.auth.ProviderSessionIdentityManagerTest"):
+        {
+            "explicitRetirementStopsNewBorrowsAndWaitsForExistingOnes",
+            "rechecksReusedIdentityAndRejectsNewBorrowsAfterPermissionLoss",
+        },
+    ("server", "surefire", "io.etcdhbase.server.commit.SessionAuthorizationResolverTest"):
+        {
+            "userSessionCannotAuthorizeInternalLeaseExpiryStep",
+            "ownerRetiresCapturedIdentityWhenPublicationRecheckFindsRevokedSession",
+        },
+    ("server", "surefire", "io.etcdhbase.server.commit.LocalLeaseExpiryAuthorizationResolverTest"):
+        {
+            "localCurrentOwnerCanResolveExpiryButCannotAuthorizeOtherMutations",
+            "queuedExpiryIsFencedOnOwnerChangeAndNewOwnerCanContinue",
+        },
+    ("server", "surefire", "io.etcdhbase.server.commit.TxnGatewayAuthenticationTest"):
+        {
+            "queuedReadsOnBothGatewaysRejectSharedSessionRevocation",
+            "queuedReadRevalidatesBeforeDeliveryAndRejectsRevokedSession",
+        },
+    ("server", "surefire", "io.etcdhbase.server.commit.LeaseKeepAliveStreamTest"):
+        {
+            "rejectsZeroTtlWhenIdentityRevalidationFails",
+            "discardsValidationThatSpansAnOutboundNotReadyTransition",
+        },
+    ("server", "surefire", "io.etcdhbase.server.commit.WatchGatewayTest"):
+        {
+            "periodicRevalidationUsesResolvedIdentityAndDefersReleaseUntilSessionDrain",
+        },
+    ("server", "surefire", "io.etcdhbase.server.AuthManagementWireTest"):
+        {
+            "configuredAuthServiceRejectsEveryUnsupportedManagementMethodOverWire",
+            "authStatusReturnsThePersistedBridgeRevisionAndUnavailableWhenMissing",
+        },
+}
+
+
 class ReportError(Exception):
     """A task registry or evidence contract is invalid."""
 
@@ -193,6 +327,8 @@ def _validate_task(task: dict[str, object], path: Path, repo: Path) -> None:
         raise ReportError(f"execution profile is missing or mismatched in {path.name}")
     if task_id == "J50":
         _validate_j50(task, path, repo)
+    elif task_id == "J51":
+        _validate_j51(task, repo)
     else:
         raise ReportError(f"registered task lacks an implemented verifier contract: {task_id}")
 
@@ -216,47 +352,69 @@ def _validate_j50(task: dict[str, object], path: Path, repo: Path) -> None:
     for entry in expected_profiles:
         _validate_maven_profile(repo, entry["module"], entry["id"])
 
+    found = _validate_suites(task, repo, "J50", J50_REQUIRED_TESTS, {"grpc", "hbase", "server"})
+    if ("hbase", "failsafe", "io.etcdhbase.hbase.storage.HBaseAuthControlIT") not in found:
+        raise ReportError("J50 must execute the real auth-control storage integration test")
+    if ("server", "failsafe", "io.etcdhbase.server.M5AuthProcessIT") not in found:
+        raise ReportError("J50 must execute the independent secure process integration test")
+
+
+def _validate_j51(task: dict[str, object], repo: Path) -> None:
+    if task.get("backend_adapters") != ["mock-identity"]:
+        raise ReportError("J51 backend adapter registration changed or is incomplete")
+    if task.get("layouts") != ["mock-storage"]:
+        raise ReportError("J51 layout registration changed or is incomplete")
+    scenarios = task.get("scenarios")
+    if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)
+            or len(scenarios) != len(set(scenarios)) or set(scenarios) != J51_SCENARIOS):
+        raise ReportError("J51 required scenario registration is missing, duplicated, or unknown")
+    if task.get("maven_profiles") != []:
+        raise ReportError("J51 mock gate must not require a real-cluster Maven profile")
+    _validate_suites(task, repo, "J51", J51_REQUIRED_TESTS, {"core", "hbase", "server"})
+
+
+def _validate_suites(task: dict[str, object], repo: Path, task_id: str,
+                     required_tests: dict[tuple[str, str, str], set[str]],
+                     allowed_modules: set[str]) -> dict[tuple[str, str, str], set[str]]:
+
     tests = task.get("tests")
     if not isinstance(tests, list) or not tests:
-        raise ReportError("J50 must register one or more non-empty test suites")
+        raise ReportError(f"{task_id} must register one or more non-empty test suites")
     found: dict[tuple[str, str, str], set[str]] = {}
     for entry in tests:
         if not isinstance(entry, dict) or set(entry) != TEST_KEYS:
-            raise ReportError("J50 test suite has missing or unknown fields")
+            raise ReportError(f"{task_id} test suite has missing or unknown fields")
         module, kind, class_name, methods = (
             entry.get("module"), entry.get("kind"), entry.get("class"), entry.get("methods"))
-        if (module not in MODULES or module not in {"grpc", "hbase", "server"}
-                or kind not in TEST_KINDS
+        if (not isinstance(module, str) or module not in MODULES or module not in allowed_modules
+                or not isinstance(kind, str) or kind not in TEST_KINDS
                 or not isinstance(class_name, str)
                 or not re.fullmatch(r"[A-Za-z0-9_.]+", class_name)
                 or not isinstance(methods, list) or not methods
                 or any(not isinstance(method, str) or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", method)
                        for method in methods)
                 or len(methods) != len(set(methods))):
-            raise ReportError("J50 test suite has an invalid module, class, kind, or method list")
+            raise ReportError(f"{task_id} test suite has an invalid module, class, kind, or method list")
         key = (module, kind, class_name)
         if key in found:
             raise ReportError(f"duplicate registered test suite: {class_name}")
         found[key] = set(methods)
-    for key, methods in J50_REQUIRED_TESTS.items():
+    for key, methods in required_tests.items():
         if not methods.issubset(found.get(key, set())):
-            raise ReportError(f"J50 required test methods are missing: {key[2]}")
+            raise ReportError(f"{task_id} required test methods are missing: {key[2]}")
     for (module, _kind, class_name), methods in found.items():
         source = repo / module / "src/test/java" / Path(*class_name.split(".")).with_suffix(".java")
         if source.is_symlink() or not source.is_file():
-            raise ReportError(f"registered J50 test source is missing or unsafe: {class_name}")
+            raise ReportError(f"registered {task_id} test source is missing or unsafe: {class_name}")
         try:
             source_text = source.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
-            raise ReportError(f"registered J50 test source cannot be read: {class_name}") from error
+            raise ReportError(f"registered {task_id} test source cannot be read: {class_name}") from error
         absent = sorted(method for method in methods
                         if not re.search(rf"\bvoid\s+{re.escape(method)}\s*\(", source_text))
         if absent:
-            raise ReportError(f"registered J50 methods are absent from source: {class_name}: {absent}")
-    if ("hbase", "failsafe", "io.etcdhbase.hbase.storage.HBaseAuthControlIT") not in found:
-        raise ReportError("J50 must execute the real auth-control storage integration test")
-    if ("server", "failsafe", "io.etcdhbase.server.M5AuthProcessIT") not in found:
-        raise ReportError("J50 must execute the independent secure process integration test")
+            raise ReportError(f"registered {task_id} methods are absent from source: {class_name}: {absent}")
+    return found
 
 
 def _validate_maven_profile(repo: Path, module: str, profile_id: str) -> None:
@@ -282,14 +440,15 @@ def _validate_maven_profile(repo: Path, module: str, profile_id: str) -> None:
         raise ReportError(f"execution profile can silently skip integration tests: {module}/{profile_id}")
     includes = {include.text for include in configuration.findall("m:includes/m:include", namespace)}
     required = {
-        "hbase": {"**/HBaseAuthControlIT.java"},
-        "server": {"**/M5AuthProcessIT.java", "**/M5AuthenticateGatewayProcessIT.java"},
-    }.get(module, set())
+        ("m5-j50-public", "hbase"): {"**/HBaseAuthControlIT.java"},
+        ("m5-j50-public", "server"): {"**/M5AuthProcessIT.java", "**/M5AuthenticateGatewayProcessIT.java"},
+        ("m5-j51-public", "server"): {"**/M5AuthenticateGatewayProcessIT.java"},
+    }.get((profile_id, module), set())
     if not required.issubset(includes):
         raise ReportError(f"execution profile does not include required IT: {module}/{profile_id}")
-    if (module == "server" and profile_id == "m5-j50-public"
+    if (module == "server" and profile_id in {"m5-j50-public", "m5-j51-public"}
             and configuration.findtext("m:reuseForks", namespaces=namespace) != "false"):
-        raise ReportError("J50 server profile must isolate Kerberos MiniKDC tests by JVM")
+        raise ReportError(f"{profile_id[3:6].upper()} server profile must isolate Kerberos MiniKDC tests by JVM")
 
 
 def _validate_all(registered: dict[str, dict[str, object]]) -> None:
@@ -299,12 +458,17 @@ def _validate_all(registered: dict[str, dict[str, object]]) -> None:
 
 
 def _maven_selectors(task: dict[str, object]) -> tuple[str, str]:
-    selectors: dict[str, list[str]] = {"surefire": [], "failsafe": []}
+    surefire: set[str] = set()
+    failsafe: dict[str, set[str]] = {}
     for entry in task["tests"]:
         class_name = entry["class"].rsplit(".", 1)[-1]
-        selectors[entry["kind"]].append(class_name)
-    return tuple(",".join(sorted(set(selectors[kind])))
-                 for kind in ("surefire", "failsafe"))
+        if entry["kind"] == "surefire":
+            surefire.add(class_name)
+        else:
+            failsafe.setdefault(class_name, set()).update(entry["methods"])
+    integration = [f"{name}#{'+'.join(sorted(methods))}"
+                   for name, methods in sorted(failsafe.items())]
+    return ",".join(sorted(surefire)), ",".join(integration)
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -383,6 +547,12 @@ def init_run(repo: Path, task_id: str, scope: str, artifact_root: Path) -> None:
         "commands": [],
         "reports": [],
     }
+    if task_id == "J51":
+        run["unverified"] = [
+            "operator inventory completeness, credential rotation and real HBase behavior",
+            "target-environment clock, ACL and Lease acceptance",
+            "real cross-process cache invalidation and target-environment acceptance",
+        ]
     _write_json(artifact_root / "run.json", run)
 
 

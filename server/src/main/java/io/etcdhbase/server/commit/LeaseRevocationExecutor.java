@@ -4,6 +4,7 @@ import etcdserverpb.Rpc;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
 import io.etcdhbase.core.commit.CommitState;
@@ -27,6 +28,7 @@ import io.etcdhbase.core.lease.LeaseTimeRules;
 import io.etcdhbase.core.lease.LeaseTimeSource;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
+import io.etcdhbase.core.storage.RecordStore;
 import io.etcdhbase.grpc.protocol.ResponseHeaderFactory;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.LeaseKeepAliveResultMessages;
@@ -114,12 +116,21 @@ public final class LeaseRevocationExecutor {
   /** Caller owns the serialized owner lane and durable invocation binding. */
   public CompletableFuture<InvocationId> executeNew(long leaseId, InvocationBinding binding,
       CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
-      RequestScope scope, BudgetManager.Account account) {
+      CommitAuthorizationProof publicationProof, RequestScope scope, BudgetManager.Account account) {
+    return executeNew(leaseId, binding, owner, identity, publicationProof, scope, account, () -> { });
+  }
+
+  CompletableFuture<InvocationId> executeNew(long leaseId, InvocationBinding binding,
+      CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
+      CommitAuthorizationProof publicationProof, RequestScope scope, BudgetManager.Account account,
+      Runnable retireUserIdentity) {
     Objects.requireNonNull(binding, "binding");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
+    Objects.requireNonNull(retireUserIdentity, "retireUserIdentity");
     if (binding.state() != InvocationBinding.State.PREPARING
         || binding.preparedOwnerEpoch() != owner.epoch() || !account.belongsTo(scope)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("invalid new Lease Revoke attempt"));
@@ -142,7 +153,8 @@ public final class LeaseRevocationExecutor {
       operation = currentBase(binding, owner, scope)
           .thenCompose(ignored -> views.openAuxiliary(binding.authorizationScopeDigest(), scope))
           .thenCompose(pin -> withManagedRead(pin, scope,
-              managed -> prepareExplicit(leaseId, binding, owner, identity, managed, scope, account)));
+              managed -> prepareExplicit(leaseId, binding, owner, identity, publicationProof,
+                  managed, scope, account, retireUserIdentity)));
     } catch (BackendFailure | RuntimeException failure) {
       drained.complete(null);
       return CompletableFuture.failedFuture(failure);
@@ -161,16 +173,20 @@ public final class LeaseRevocationExecutor {
    */
   CompletableFuture<InvocationId> executeExpiredKeepAlive(long leaseId, LeaseState state,
       InvocationBinding binding, CommitOwnerService.OwnerToken owner,
-      AuthorizedBackendIdentity backendIdentity, PinnedReadView pin,
-      LeaseTimeObservation observation, RequestScope scope, BudgetManager.Account account) {
+      AuthorizedBackendIdentity backendIdentity, CommitAuthorizationProof publicationProof,
+      PinnedReadView pin,
+      LeaseTimeObservation observation, RequestScope scope, BudgetManager.Account account,
+      Runnable retireUserIdentity) {
     Objects.requireNonNull(state, "state");
     Objects.requireNonNull(binding, "binding");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(backendIdentity, "backendIdentity");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(pin, "pin");
     Objects.requireNonNull(observation, "observation");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
+    Objects.requireNonNull(retireUserIdentity, "retireUserIdentity");
     if (leaseId != state.identity().leaseId() || binding.state() != InvocationBinding.State.PREPARING
         || binding.preparedOwnerEpoch() != owner.epoch() || !account.belongsTo(scope)
         || !observation.healthy()
@@ -197,8 +213,8 @@ public final class LeaseRevocationExecutor {
       }
       return currentBase(binding, owner, scope).thenCompose(ignored ->
           prepareAndPublish(state, binding, owner, backendIdentity, managed.pin(),
-              managed::finish, true, observation, Optional.empty(), scope, account,
-              keepAliveResult));
+              managed::finish, true, observation, Optional.empty(), publicationProof, scope, account,
+              keepAliveResult, Optional.of(retireUserIdentity)));
     });
   }
 
@@ -209,11 +225,13 @@ public final class LeaseRevocationExecutor {
   CompletableFuture<java.util.Optional<InvocationId>> revokePinnedCandidate(
       ExpiryCandidateIdentity candidate, long candidateStateSequence,
       InvocationBinding binding, CommitOwnerService.OwnerToken owner,
-      AuthorizedBackendIdentity identity, PinnedReadView pin,
+      AuthorizedBackendIdentity identity, CommitAuthorizationProof publicationProof,
+      PinnedReadView pin,
       Supplier<CompletableFuture<Void>> finishPinnedRead,
       LeaseTimeObservation observation, LeaseExpiryCheckpoint.Position nextPosition,
       RequestScope scope, BudgetManager.Account account) {
     Objects.requireNonNull(candidate, "candidate");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(pin, "pin");
     Objects.requireNonNull(finishPinnedRead, "finishPinnedRead");
     Objects.requireNonNull(observation, "observation");
@@ -235,7 +253,8 @@ public final class LeaseRevocationExecutor {
                 "closed expiry window contains a Lease that has not reached its deadline"));
           }
           return prepareAndPublish(state, binding, owner, identity, pin,
-              finishPinnedRead, true, observation, Optional.of(nextPosition), scope, account)
+              finishPinnedRead, true, observation, Optional.of(nextPosition),
+              publicationProof, scope, account)
               .thenApply(Optional::of);
         }));
     return operation.handle((value, failure) -> new ReadOutcome<>(value, failure))
@@ -297,8 +316,9 @@ public final class LeaseRevocationExecutor {
 
   private CompletableFuture<InvocationId> prepareExplicit(long leaseId,
       InvocationBinding binding, CommitOwnerService.OwnerToken owner,
-      AuthorizedBackendIdentity identity, ManagedRead managed, RequestScope scope,
-      BudgetManager.Account account) {
+      AuthorizedBackendIdentity identity, CommitAuthorizationProof publicationProof,
+      ManagedRead managed, RequestScope scope,
+      BudgetManager.Account account, Runnable retireUserIdentity) {
     PinnedReadView pin = managed.pin();
     if (!pinnedAtBase(pin, binding)) {
       return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
@@ -311,7 +331,7 @@ public final class LeaseRevocationExecutor {
         return CompletableFuture.failedFuture(new LeaseFailure(LeaseFailure.Reason.NOT_FOUND));
       }
       return prepareAndPublish(state, binding, owner, identity, managed,
-          false, null, Optional.empty(), scope, account);
+          false, null, Optional.empty(), publicationProof, scope, account, retireUserIdentity);
     });
   }
 
@@ -320,9 +340,11 @@ public final class LeaseRevocationExecutor {
       AuthorizedBackendIdentity backendIdentity, ManagedRead managed,
       boolean requireExpired, LeaseTimeObservation expiryProof,
       Optional<LeaseExpiryCheckpoint.Position> nextPosition,
-      RequestScope scope, BudgetManager.Account account) {
+      CommitAuthorizationProof publicationProof,
+      RequestScope scope, BudgetManager.Account account, Runnable retireUserIdentity) {
     return prepareAndPublish(state, binding, owner, backendIdentity, managed.pin(),
-        managed::finish, requireExpired, expiryProof, nextPosition, scope, account);
+        managed::finish, requireExpired, expiryProof, nextPosition, publicationProof, scope, account,
+        prepared -> revokeResultPayload(prepared, binding), Optional.of(retireUserIdentity));
   }
 
   private CompletableFuture<InvocationId> prepareAndPublish(LeaseState state,
@@ -331,10 +353,11 @@ public final class LeaseRevocationExecutor {
       Supplier<CompletableFuture<Void>> finishPinnedRead,
       boolean requireExpired, LeaseTimeObservation expiryProof,
       Optional<LeaseExpiryCheckpoint.Position> nextPosition,
+      CommitAuthorizationProof publicationProof,
       RequestScope scope, BudgetManager.Account account) {
     return prepareAndPublish(state, binding, owner, backendIdentity, pin,
-        finishPinnedRead, requireExpired, expiryProof, nextPosition, scope, account,
-        prepared -> revokeResultPayload(prepared, binding));
+        finishPinnedRead, requireExpired, expiryProof, nextPosition, publicationProof, scope, account,
+        prepared -> revokeResultPayload(prepared, binding), Optional.empty());
   }
 
   private CompletableFuture<InvocationId> prepareAndPublish(LeaseState state,
@@ -343,10 +366,16 @@ public final class LeaseRevocationExecutor {
       Supplier<CompletableFuture<Void>> finishPinnedRead,
       boolean requireExpired, LeaseTimeObservation expiryProof,
       Optional<LeaseExpiryCheckpoint.Position> nextPosition,
+      CommitAuthorizationProof publicationProof,
       RequestScope scope, BudgetManager.Account account,
-      Function<LeaseRevocationPreparer.Prepared, ByteKey> resultPayload) {
+      Function<LeaseRevocationPreparer.Prepared, ByteKey> resultPayload,
+      Optional<Runnable> retireUserIdentity) {
     long started = System.nanoTime();
-    return HBaseRecordStore.open(connections, backendIdentity, primary, scope, backendWorker)
+    CompletableFuture<? extends RecordStore> records = retireUserIdentity.isPresent()
+        ? UserIdentityRecordStore.open(connections, backendIdentity, primary, scope, backendWorker,
+            retireUserIdentity.orElseThrow())
+        : HBaseRecordStore.open(connections, backendIdentity, primary, scope, backendWorker);
+    return records
         .thenCompose(currentRecords -> revocations.prepare(state.identity(), binding, requireExpired,
             pin, currentRecords, scope, account,
             new ManifestCatalog.ProofReadBudget(scope, account, MAX_METADATA_RECORDS, MAX_METADATA_BYTES),
@@ -359,7 +388,7 @@ public final class LeaseRevocationExecutor {
         .thenCompose(sealed -> currentBase(binding, owner, scope)
             .thenCompose(ignored -> validateExpiryAtSelection(requireExpired, expiryProof, state)
                 .thenCompose(checked -> publisher.publish(
-                    sealed.invocation(), owner, sealed.manifest(), scope))))
+                    sealed.invocation(), owner, sealed.manifest(), scope, publicationProof))))
         .thenCompose(outcome -> {
           metrics.recordLeaseRevocationStage(RequestMetrics.LeaseRevocationStage.PUBLISH_AND_FINALIZE,
               Math.max(0, System.nanoTime() - started));

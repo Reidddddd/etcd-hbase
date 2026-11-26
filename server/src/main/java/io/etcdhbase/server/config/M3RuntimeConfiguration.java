@@ -58,7 +58,7 @@ public record M3RuntimeConfiguration(
   public static final class LeaseActivationUnavailable extends IllegalArgumentException {
     private static final long serialVersionUID = 1L;
     public LeaseActivationUnavailable() {
-      super("M4 Lease activation requires an explicit PUBLIC_TEST profile until J51 identity lifecycle is ready");
+      super("production Lease requires authenticated identity, authorization and recovery capabilities");
     }
   }
 
@@ -169,9 +169,6 @@ public record M3RuntimeConfiguration(
       throw new CacheActivationUnavailable();
     }
     if (activationProfile == null) activationProfile = ActivationProfile.PRODUCTION;
-    if (m4LeaseApiEnabled && activationProfile != ActivationProfile.PUBLIC_TEST) {
-      throw new LeaseActivationUnavailable();
-    }
     if (memberId == null || !memberId.matches("[1-9][0-9]{0,19}")) {
       throw new IllegalArgumentException("member ID must be an explicit nonzero uint64");
     }

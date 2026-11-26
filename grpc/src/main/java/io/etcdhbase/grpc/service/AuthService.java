@@ -6,19 +6,28 @@ import io.grpc.stub.StreamObserver;
 import java.util.Objects;
 import java.util.function.BiConsumer;
 
-/** Auth service surface with an optional Authenticate handler; management methods remain unimplemented. */
+/** Auth service surface with optional Authenticate and AuthStatus handlers. */
 public final class AuthService extends AuthGrpc.AuthImplBase {
   private final BiConsumer<Rpc.AuthenticateRequest, StreamObserver<Rpc.AuthenticateResponse>>
       authenticateHandler;
+  private final BiConsumer<Rpc.AuthStatusRequest, StreamObserver<Rpc.AuthStatusResponse>> statusHandler;
 
   public AuthService() {
     this.authenticateHandler = null;
+    this.statusHandler = null;
   }
 
   public AuthService(
       BiConsumer<Rpc.AuthenticateRequest, StreamObserver<Rpc.AuthenticateResponse>>
           authenticateHandler) {
+    this(authenticateHandler, null);
+  }
+
+  public AuthService(
+      BiConsumer<Rpc.AuthenticateRequest, StreamObserver<Rpc.AuthenticateResponse>> authenticateHandler,
+      BiConsumer<Rpc.AuthStatusRequest, StreamObserver<Rpc.AuthStatusResponse>> statusHandler) {
     this.authenticateHandler = Objects.requireNonNull(authenticateHandler, "authenticateHandler");
+    this.statusHandler = statusHandler;
   }
 
   @Override
@@ -36,7 +45,8 @@ public final class AuthService extends AuthGrpc.AuthImplBase {
   @Override
   public void authStatus(
       Rpc.AuthStatusRequest request, StreamObserver<Rpc.AuthStatusResponse> responseObserver) {
-    UnimplementedStreams.failUnary(responseObserver, "Auth.AuthStatus");
+    if (statusHandler == null) UnimplementedStreams.failUnary(responseObserver, "Auth.AuthStatus");
+    else statusHandler.accept(request, responseObserver);
   }
 
   @Override

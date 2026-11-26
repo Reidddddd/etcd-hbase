@@ -5,6 +5,9 @@ import io.etcdhbase.spi.salt.SaltStrategy;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Objects;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import org.apache.hadoop.hbase.HConstants;
 
 /** Salted, length-prefixed row keys for the isolated authentication-control table. */
@@ -12,7 +15,8 @@ public final class AuthControlKeyCodec {
   public enum Kind {
     SESSION(1, 32),
     SUBJECT_AUTHORITY(2, 32),
-    SLOT(3, Integer.BYTES);
+    SLOT(3, Integer.BYTES),
+    AUTH_DEPLOYMENT_REGISTRY(8, 32);
 
     private final int id;
     private final int identityLength;
@@ -52,6 +56,20 @@ public final class AuthControlKeyCodec {
 
   public byte[] authority(ByteKey subjectDigest) {
     return encode(Kind.SUBJECT_AUTHORITY, subjectDigest);
+  }
+
+  public byte[] deploymentRegistry(String trustDomain) {
+    if (trustDomain == null || !trustDomain.matches("[A-Za-z][A-Za-z0-9._-]{0,63}")) {
+      throw new IllegalArgumentException("invalid auth deployment binding");
+    }
+    try {
+      var digest = MessageDigest.getInstance("SHA-256");
+      digest.update("etcd-hbase/auth-deployment-registry/v1\0".getBytes(StandardCharsets.UTF_8));
+      return encode(Kind.AUTH_DEPLOYMENT_REGISTRY,
+          ByteKey.copyOf(digest.digest(trustDomain.getBytes(StandardCharsets.UTF_8))));
+    } catch (NoSuchAlgorithmException impossible) {
+      throw new IllegalStateException("SHA-256 unavailable", impossible);
+    }
   }
 
   public byte[] slot(int index) {
@@ -121,6 +139,7 @@ public final class AuthControlKeyCodec {
       case 1 -> Kind.SESSION;
       case 2 -> Kind.SUBJECT_AUTHORITY;
       case 3 -> Kind.SLOT;
+      case 8 -> Kind.AUTH_DEPLOYMENT_REGISTRY;
       default -> throw invalidRow();
     };
   }

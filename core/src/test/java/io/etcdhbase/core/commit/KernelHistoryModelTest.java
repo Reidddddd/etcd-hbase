@@ -458,7 +458,8 @@ class KernelHistoryModelTest {
 
     private final EventClock clock = new EventClock();
     private final MemoryControl control = new MemoryControl(
-        CommitState.initial(PROFILE, 1).claimOwner("history-owner", 1, 100), clock);
+        CommitState.initial(PROFILE, 1).claimOwner("history-owner", 1, 100)
+            .enableAuthorizationBarrier("history-owner", 1, 2), clock);
     private final MemoryInvocations invocations = new MemoryInvocations();
     private final MemoryDecisions decisions = new MemoryDecisions();
     private final MemoryManifests manifests = new MemoryManifests();
@@ -589,7 +590,11 @@ class KernelHistoryModelTest {
           new CommitPlanVerifier(catalog, materialization), invocations, handoff, finalizer);
       CommitOwnerService.OwnerToken owner = new CommitOwnerService.OwnerToken(
           base.ownerInstance().orElseThrow(), base.ownerEpoch());
-      return new PublicationAttempt(transaction, publisher.publish(binding, owner, root, requestScope));
+      CommitAuthorizationProof authorization = CommitAuthorizationProof.capture(PROFILE,
+          base.authorizationBarrierGeneration(),
+          (proofIdentity, barrierGeneration, scope) -> CompletableFuture.completedFuture(null));
+      return new PublicationAttempt(transaction,
+          publisher.publish(binding, owner, root, requestScope, authorization));
     }
 
     private HistoryOperation read(String key) {

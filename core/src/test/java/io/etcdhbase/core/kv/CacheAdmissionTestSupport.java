@@ -23,7 +23,16 @@ public final class CacheAdmissionTestSupport implements AutoCloseable {
   }
 
   public boolean admit(TxnEvaluator.ValidatedRead result, RequestScope scope, ByteKey storageProfile) {
-    return cache.putValidated(7, storageProfile, result, scope);
+    return cache.putValidated(7, storageProfile, result, scope, cache.invalidationGeneration());
+  }
+
+  public Object generation() { return cache.invalidationGeneration(); }
+
+  public void invalidate(ByteKey authorization) { cache.invalidateAuthorization(authorization); }
+
+  public boolean admit(TxnEvaluator.ValidatedRead result, RequestScope scope,
+      ByteKey storageProfile, Object generation) {
+    return cache.putValidated(7, storageProfile, result, scope, generation);
   }
 
   /** Test bridge obtains a fresh view and validates its pin before exposing a hit count. */

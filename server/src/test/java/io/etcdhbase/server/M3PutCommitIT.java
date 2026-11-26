@@ -44,6 +44,7 @@ import io.etcdhbase.server.commit.MutationForwardReceiver;
 import io.etcdhbase.server.commit.MutationOwnerLane;
 import io.etcdhbase.server.commit.MutationRelay;
 import io.etcdhbase.server.commit.PutMutationExecutor;
+import io.etcdhbase.server.commit.CommitAuthorizationProofTestSupport;
 import io.etcdhbase.server.commit.PutOwnerProcessor;
 import io.etcdhbase.server.commit.PutGateway;
 import io.etcdhbase.server.commit.SerialMutationQueue;
@@ -180,6 +181,8 @@ class M3PutCommitIT {
         }
         var owner = new CommitOwnerService(stores.control()).claim("m3-test-owner", now,
             Math.addExact(now, ownerLease.toMillis()), scope).join().orElseThrow();
+        owner = new io.etcdhbase.core.commit.AuthorizationBarrierUpgrade(stores.control())
+            .enable(owner, now, scope).join();
         return new StoreOwner(stores, owner);
       }
     }
@@ -188,9 +191,10 @@ class M3PutCommitIT {
       var processor = new PutOwnerProcessor(fixture.system().tableGroupId(), owner, budgets,
           reservation(), mutations, outcomes);
       var receiver = new MutationForwardReceiver(stores.control(), invocations,
-          (peer, request, scope) -> peer.equals("fixture-loopback-peer")
+          (peer, request, barrierGeneration, scope) -> peer.equals("fixture-loopback-peer")
               ? java.util.concurrent.CompletableFuture.completedFuture(
-                  new MutationForwardReceiver.VerifiedAuthorization(fixture.identity(), AUTHORIZATION))
+                  CommitAuthorizationProofTestSupport.verified(
+                      fixture.identity(), AUTHORIZATION, barrierGeneration))
               : java.util.concurrent.CompletableFuture.failedFuture(
                   new BackendFailure(BackendFailure.Category.PERMISSION)), processor);
       var lane = new MutationOwnerLane(fixture.system().tableGroupId(), ownerQueue, receiver);
@@ -303,7 +307,10 @@ class M3PutCommitIT {
         var stale = new CommitOwnerService.OwnerToken("stale-owner", owner.epoch());
         var command = new PutCommand(KEY, new byte[] {9}, 0, false, false, false);
         CompletionException failure = assertThrows(CompletionException.class, () ->
-            mutations.executeNew(command, binding, stale, fixture.identity(), scope, account).join());
+            mutations.executeNew(command, binding, stale, fixture.identity(),
+                CommitAuthorizationProofTestSupport.serviceProof(
+                    fixture.identity(), AUTHORIZATION, state.authorizationBarrierGeneration()),
+                scope, account).join());
         assertEquals(BackendFailure.Category.UNAVAILABLE,
             assertInstanceOf(BackendFailure.class, failure.getCause()).category());
         assertEquals(state.publishedSequence(),
@@ -327,7 +334,10 @@ class M3PutCommitIT {
             fixture.factory(), fixture.primary(), worker, preparation, publisher, 5L << 20, 64L << 10);
         var command = new PutCommand(KEY, new byte[] {9}, 0, true, false, false);
         CompletionException failure = assertThrows(CompletionException.class, () ->
-            constrained.executeNew(command, binding, owner, fixture.identity(), scope, account).join());
+            constrained.executeNew(command, binding, owner, fixture.identity(),
+                CommitAuthorizationProofTestSupport.serviceProof(
+                    fixture.identity(), AUTHORIZATION, state.authorizationBarrierGeneration()),
+                scope, account).join());
         assertEquals(BackendFailure.Category.RESOURCE_LIMIT,
             assertInstanceOf(BackendFailure.class, failure.getCause()).category());
         var after = fixture.control().read(scope).join().orElseThrow().state();

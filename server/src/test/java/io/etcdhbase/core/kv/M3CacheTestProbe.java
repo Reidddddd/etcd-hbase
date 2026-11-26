@@ -28,7 +28,7 @@ public final class M3CacheTestProbe implements AutoCloseable {
 
   public boolean admit(TxnEvaluator.Evaluation evaluation, RequestScope scope) throws Exception {
     var validated = evaluation.finishReadOnlyForCache().get(30, TimeUnit.SECONDS);
-    return cache.putValidated(group, storageProfile, validated, scope);
+    return cache.putValidated(group, storageProfile, validated, scope, cache.invalidationGeneration());
   }
 
   public Optional<Hit> sameSequence(TxnReadSession session, RangeCommand command,

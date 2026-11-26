@@ -3,6 +3,7 @@ package io.etcdhbase.server.commit;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
 import io.etcdhbase.core.commit.CommitState;
@@ -75,10 +76,12 @@ public final class LeaseGrantExecutor {
   /** Caller owns the serial lane and resolves previously sealed or selected invocations. */
   public CompletableFuture<InvocationId> executeNew(long requestedId, long requestedTtlSeconds,
       InvocationBinding binding, CommitOwnerService.OwnerToken owner,
-      AuthorizedBackendIdentity identity, RequestScope scope, BudgetManager.Account account) {
+      AuthorizedBackendIdentity identity, CommitAuthorizationProof publicationProof,
+      RequestScope scope, BudgetManager.Account account) {
     Objects.requireNonNull(binding, "binding");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
     if (binding.state() != InvocationBinding.State.PREPARING
@@ -102,7 +105,8 @@ public final class LeaseGrantExecutor {
           .thenCompose(ignored -> views.openAuxiliary(binding.authorizationScopeDigest(), scope))
           .thenCompose(pinned -> prepare(requestedId, requestedTtlSeconds, binding, pinned, scope, account))
           .thenCompose(sealed -> currentBase(binding, owner, scope)
-              .thenCompose(ignored -> publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope)))
+              .thenCompose(ignored -> publisher.publish(
+                  sealed.invocation(), owner, sealed.manifest(), scope, publicationProof)))
           .thenCompose(outcome -> outcome.state() == CommitOutcomeResolver.State.SELECTED_FINALIZED
               ? CompletableFuture.completedFuture(binding.invocationId())
               : CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN)));

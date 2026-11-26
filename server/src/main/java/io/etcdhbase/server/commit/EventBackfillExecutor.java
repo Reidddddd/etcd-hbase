@@ -1,6 +1,7 @@
 package io.etcdhbase.server.commit;
 
 import io.etcdhbase.core.commit.CommitControlStore;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
@@ -32,12 +33,14 @@ final class EventBackfillExecutor {
 
   CompletableFuture<CommitOutcomeResolver.Resolution> publish(InvocationBinding invocation,
       CommitOwnerService.OwnerToken owner, EventIndexBackfillCheckpoint checkpoint,
-      EventBackfillWindow window, RequestScope scope, BudgetManager.Account account,
+      EventBackfillWindow window, CommitAuthorizationProof publicationProof,
+      RequestScope scope, BudgetManager.Account account,
       ManifestCatalog.ProofReadBudget budget) {
     Objects.requireNonNull(invocation, "invocation");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(checkpoint, "checkpoint");
     Objects.requireNonNull(window, "window");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
     Objects.requireNonNull(budget, "budget");
@@ -50,7 +53,8 @@ final class EventBackfillExecutor {
             () -> window.checkPublication(checkpoint, owner.epoch(), checkpoint.sequence(), budget), scope, account))
         .thenCompose(sealed -> window.checkPublication(checkpoint, owner.epoch(), checkpoint.sequence(), budget)
             .thenCompose(ignored -> verifyOwner(invocation, owner, checkpoint, window, scope))
-            .thenCompose(ignored -> publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope)));
+            .thenCompose(ignored -> publisher.publish(
+                sealed.invocation(), owner, sealed.manifest(), scope, publicationProof)));
   }
 
   private CompletableFuture<Void> verifyOwner(InvocationBinding invocation,
@@ -66,6 +70,7 @@ final class EventBackfillExecutor {
               || window.registryNamespace().isEmpty()
               || !state.eventRegistryNamespace().equals(window.registryNamespace())
               || !checkpoint.registryIdentity().equals(window.registryIdentity())
+              || !state.supportsAuthorizationBarrier()
               || state.ownerEpoch() != owner.epoch()
               || state.ownerInstance().filter(owner.instance()::equals).isEmpty()
               || state.ownerLeaseExpired(clock.millis()) || state.publication().isPresent()

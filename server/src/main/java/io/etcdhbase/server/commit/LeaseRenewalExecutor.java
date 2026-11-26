@@ -4,6 +4,7 @@ import etcdserverpb.Rpc;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
 import io.etcdhbase.core.commit.CommitState;
@@ -97,12 +98,21 @@ public final class LeaseRenewalExecutor {
   /** Caller owns the serialized mutation lane and the durable invocation binding. */
   public CompletableFuture<InvocationId> executeNew(long leaseId, InvocationBinding binding,
       CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
-      RequestScope scope, BudgetManager.Account account) {
+      CommitAuthorizationProof publicationProof, RequestScope scope, BudgetManager.Account account) {
+    return executeNew(leaseId, binding, owner, identity, publicationProof, scope, account, () -> { });
+  }
+
+  CompletableFuture<InvocationId> executeNew(long leaseId, InvocationBinding binding,
+      CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
+      CommitAuthorizationProof publicationProof, RequestScope scope, BudgetManager.Account account,
+      Runnable retireUserIdentity) {
     Objects.requireNonNull(binding, "binding");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
+    Objects.requireNonNull(retireUserIdentity, "retireUserIdentity");
     if (binding.state() != InvocationBinding.State.PREPARING
         || binding.preparedOwnerEpoch() != owner.epoch() || !account.belongsTo(scope)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("invalid KeepAlive attempt"));
@@ -126,8 +136,8 @@ public final class LeaseRenewalExecutor {
           .thenCompose(ignored -> {
             long started = System.nanoTime();
             return views.openAuxiliary(binding.authorizationScopeDigest(), scope)
-                .thenCompose(pinned -> prepare(leaseId, binding, owner, identity,
-                    pinned, scope, account))
+                .thenCompose(pinned -> prepare(leaseId, binding, owner, identity, publicationProof,
+                    pinned, scope, account, retireUserIdentity))
                 .whenComplete((attempt, failure) -> metrics.recordLeaseRenewalStage(
                     RequestMetrics.LeaseRenewalStage.PREPARE,
                     Math.max(0, System.nanoTime() - started)));
@@ -146,7 +156,7 @@ public final class LeaseRenewalExecutor {
             long started = System.nanoTime();
             return currentBase(binding, owner, scope)
                 .thenCompose(ignored -> publisher.publish(
-                    sealed.invocation(), owner, sealed.manifest(), scope))
+                    sealed.invocation(), owner, sealed.manifest(), scope, publicationProof))
                 .thenCompose(outcome -> {
                   if (outcome.state() == CommitOutcomeResolver.State.SELECTED_FINALIZED) {
                     metrics.recordLeaseRenewalSelected(
@@ -181,8 +191,9 @@ public final class LeaseRenewalExecutor {
 
   private CompletableFuture<RenewalAttempt> prepare(long leaseId,
       InvocationBinding binding, CommitOwnerService.OwnerToken owner,
-      AuthorizedBackendIdentity identity, PinnedReadView pinned,
-      RequestScope scope, BudgetManager.Account account) {
+      AuthorizedBackendIdentity identity, CommitAuthorizationProof publicationProof,
+      PinnedReadView pinned,
+      RequestScope scope, BudgetManager.Account account, Runnable retireUserIdentity) {
     if (pinned.view().barrierSequence() != binding.baseSequence()
         || pinned.view().targetRevision() != binding.baseRevision()
         || pinned.view().selectedDecision().isPresent()
@@ -210,7 +221,7 @@ public final class LeaseRenewalExecutor {
           }
           if (LeaseTimeRules.isExpired(current, observed)) {
             return revocations.executeExpiredKeepAlive(leaseId, current, binding,
-                owner, identity, pinned, observed, scope, account)
+                owner, identity, publicationProof, pinned, observed, scope, account, retireUserIdentity)
                 .thenApply(RevokedAttempt::new);
           }
           long nextSequence = Math.addExact(binding.baseSequence(), 1);

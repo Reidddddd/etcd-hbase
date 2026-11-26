@@ -25,20 +25,20 @@ while (($#)); do
       artifact_request="$2"; seen_artifact=true; shift 2 ;;
     --help)
       cat <<'USAGE'
-用法：scripts/verify/m5.sh --scope public --task J50 --artifact-root .artifacts/m5/<fresh-run-id>
+用法：scripts/verify/m5.sh --scope public --task J50|J51 --artifact-root .artifacts/m5/<fresh-run-id>
 USAGE
       exit 0 ;;
     *) echo "unknown M5 verification option: $1" >&2; exit 2 ;;
   esac
 done
 
-if [[ "$scope" != public || "$task" != J50 || "$seen_scope" != true || \
+if [[ "$scope" != public || ( "$task" != J50 && "$task" != J51 ) || "$seen_scope" != true || \
       "$seen_task" != true || "$seen_artifact" != true ]]; then
-  echo 'M5 public verification currently requires --scope public, --task J50, and --artifact-root' >&2
+  echo 'M5 public verification requires --scope public, --task J50 or J51, and --artifact-root' >&2
   exit 2
 fi
 
-python3 scripts/verify/m5-report.py --validate-task J50
+python3 scripts/verify/m5-report.py --validate-task "$task"
 : "${ETCD_HBASE_JDK21_HOME:?Set ETCD_HBASE_JDK21_HOME to the pinned Temurin JDK 21 home.}"
 "$ETCD_HBASE_JDK21_HOME/bin/java" -version
 
@@ -72,7 +72,7 @@ PY
 )"
 
 run_file="$artifact_root/run.json"
-python3 scripts/verify/m5-report.py --init-run --task J50 --scope public --artifact-root "$artifact_root"
+python3 scripts/verify/m5-report.py --init-run --task "$task" --scope public --artifact-root "$artifact_root"
 
 finalize_run() {
   local final_exit="$?"
@@ -111,18 +111,27 @@ run_logged registry-check registry-check.log registry-check.stderr \
   python3 scripts/verify/m5-report.py --validate-registry
 run_logged report-tests report-tests.log report-tests.stderr \
   python3 scripts/verify/test_m5_report.py
-selectors="$(python3 scripts/verify/m5-report.py --maven-selectors J50)"
+selectors="$(python3 scripts/verify/m5-report.py --maven-selectors "$task")"
 IFS=$'\t' read -r surefire_selector failsafe_selector <<< "$selectors"
-[[ -n "$surefire_selector" && -n "$failsafe_selector" ]] || {
-  echo 'J50 Maven selectors are incomplete' >&2
+[[ -n "$surefire_selector" ]] || {
+  echo "$task Maven selectors are incomplete" >&2
   exit 2
 }
-run_logged maven-verify maven.log maven.stderr \
-  scripts/dev/mvn21.sh -B -ntp -pl server -am clean verify -Pm5-j50-public \
-    "-Dtest=$surefire_selector" -Dsurefire.failIfNoSpecifiedTests=false \
-    "-Dit.test=$failsafe_selector" -Dfailsafe.failIfNoSpecifiedTests=false
+if [[ "$task" == J51 ]]; then
+  [[ -z "$failsafe_selector" ]] || { echo 'J51 mock gate cannot omit registered integration tests' >&2; exit 2; }
+  run_logged maven-verify maven.log maven.stderr \
+    scripts/dev/mvn21.sh -B -ntp -pl server -am clean test \
+      "-Dtest=$surefire_selector" -Dsurefire.failIfNoSpecifiedTests=false
+else
+  [[ -n "$failsafe_selector" ]] || { echo "$task integration selector is missing" >&2; exit 2; }
+  profile="$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')"
+  run_logged maven-verify maven.log maven.stderr \
+    scripts/dev/mvn21.sh -B -ntp -pl server -am clean verify "-Pm5-${profile}-public" \
+      "-Dtest=$surefire_selector" -Dsurefire.failIfNoSpecifiedTests=false \
+      "-Dit.test=$failsafe_selector" -Dfailsafe.failIfNoSpecifiedTests=false
+fi
 run_logged report-verify report-validation.log report-validation.stderr \
-  python3 scripts/verify/m5-report.py --verify-reports --task J50 --artifact-root "$artifact_root"
+  python3 scripts/verify/m5-report.py --verify-reports --task "$task" --artifact-root "$artifact_root"
 
 git diff --check HEAD
-echo "M5 J50 public verification passed: $artifact_root"
+echo "M5 $task public verification passed: $artifact_root"

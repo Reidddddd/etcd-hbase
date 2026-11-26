@@ -11,6 +11,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitDecision;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
@@ -42,13 +43,16 @@ class EventBackfillExecutorTest {
   void rechecksOwnerAndProtectionBeforePublishingTheSealedCheckpoint() {
     try (var fixture = new Fixture()) {
       when(fixture.control.read(fixture.scope)).thenReturn(fixture.snapshot(fixture.state));
-      when(fixture.publisher.publish(eq(fixture.sealed), eq(fixture.owner), eq(fixture.root), eq(fixture.scope)))
+      when(fixture.publisher.publish(eq(fixture.sealed), eq(fixture.owner), eq(fixture.root),
+          eq(fixture.scope), eq((CommitAuthorizationProof) fixture.publicationProof)))
           .thenReturn(CompletableFuture.completedFuture(fixture.finalized));
       assertEquals(fixture.finalized, fixture.executor.publish(fixture.invocation, fixture.owner,
-          fixture.checkpoint, fixture.window, fixture.scope, fixture.account, fixture.budget).join());
+          fixture.checkpoint, fixture.window, fixture.publicationProof,
+          fixture.scope, fixture.account, fixture.budget).join());
       verify(fixture.control, times(2)).read(fixture.scope);
-      verify(fixture.window, times(2)).checkPublication(fixture.checkpoint, 7, 1, fixture.budget);
-      verify(fixture.publisher).publish(fixture.sealed, fixture.owner, fixture.root, fixture.scope);
+      verify(fixture.window, times(2)).checkPublication(fixture.checkpoint, 8, 1, fixture.budget);
+      verify(fixture.publisher).publish(fixture.sealed, fixture.owner, fixture.root,
+          fixture.scope, fixture.publicationProof);
     }
   }
 
@@ -59,8 +63,10 @@ class EventBackfillExecutorTest {
       when(fixture.control.read(fixture.scope)).thenReturn(
           fixture.snapshot(fixture.state), fixture.snapshot(replacement));
       assertThrows(CompletionException.class, () -> fixture.executor.publish(fixture.invocation, fixture.owner,
-          fixture.checkpoint, fixture.window, fixture.scope, fixture.account, fixture.budget).join());
-      verify(fixture.publisher, never()).publish(any(), any(), any(), any());
+          fixture.checkpoint, fixture.window, fixture.publicationProof,
+          fixture.scope, fixture.account, fixture.budget).join());
+      verify(fixture.publisher, never()).publish(any(), any(), any(), any(),
+          any(CommitAuthorizationProof.class));
     }
   }
 
@@ -68,12 +74,14 @@ class EventBackfillExecutorTest {
   void lostProtectionAfterSealingPreventsPublication() {
     try (var fixture = new Fixture()) {
       when(fixture.control.read(fixture.scope)).thenReturn(fixture.snapshot(fixture.state));
-      when(fixture.window.checkPublication(fixture.checkpoint, 7, 1, fixture.budget))
+      when(fixture.window.checkPublication(fixture.checkpoint, 8, 1, fixture.budget))
           .thenReturn(CompletableFuture.completedFuture(null),
               CompletableFuture.failedFuture(new IllegalStateException("protection lost")));
       assertThrows(CompletionException.class, () -> fixture.executor.publish(fixture.invocation, fixture.owner,
-          fixture.checkpoint, fixture.window, fixture.scope, fixture.account, fixture.budget).join());
-      verify(fixture.publisher, never()).publish(any(), any(), any(), any());
+          fixture.checkpoint, fixture.window, fixture.publicationProof,
+          fixture.scope, fixture.account, fixture.budget).join());
+      verify(fixture.publisher, never()).publish(any(), any(), any(), any(),
+          any(CommitAuthorizationProof.class));
     }
   }
 
@@ -82,9 +90,11 @@ class EventBackfillExecutorTest {
     try (var fixture = new Fixture()) {
       fixture.scope.close();
       assertThrows(CompletionException.class, () -> fixture.executor.publish(fixture.invocation, fixture.owner,
-          fixture.checkpoint, fixture.window, fixture.scope, fixture.account, fixture.budget).join());
+          fixture.checkpoint, fixture.window, fixture.publicationProof,
+          fixture.scope, fixture.account, fixture.budget).join());
       verify(fixture.control, never()).read(any());
-      verify(fixture.publisher, never()).publish(any(), any(), any(), any());
+      verify(fixture.publisher, never()).publish(any(), any(), any(), any(),
+          any(CommitAuthorizationProof.class));
     }
   }
 
@@ -97,9 +107,11 @@ class EventBackfillExecutorTest {
       var checkpoint = new EventIndexBackfillCheckpoint(7, 1, 1, 0, 1, 1, 1, 1, 0,
           ByteKey.copyOf(otherRegistry));
       assertThrows(CompletionException.class, () -> fixture.executor.publish(fixture.invocation, fixture.owner,
-          checkpoint, fixture.window, fixture.scope, fixture.account, fixture.budget).join());
+          checkpoint, fixture.window, fixture.publicationProof,
+          fixture.scope, fixture.account, fixture.budget).join());
       verify(fixture.preparation, never()).prepare(any(), any(), any(), any(), any());
-      verify(fixture.publisher, never()).publish(any(), any(), any(), any());
+      verify(fixture.publisher, never()).publish(any(), any(), any(), any(),
+          any(CommitAuthorizationProof.class));
     }
   }
 
@@ -111,9 +123,11 @@ class EventBackfillExecutorTest {
       otherNamespace[0] = 1;
       when(fixture.window.registryNamespace()).thenReturn(Optional.of(ByteKey.copyOf(otherNamespace)));
       assertThrows(CompletionException.class, () -> fixture.executor.publish(fixture.invocation, fixture.owner,
-          fixture.checkpoint, fixture.window, fixture.scope, fixture.account, fixture.budget).join());
+          fixture.checkpoint, fixture.window, fixture.publicationProof,
+          fixture.scope, fixture.account, fixture.budget).join());
       verify(fixture.preparation, never()).prepare(any(), any(), any(), any(), any());
-      verify(fixture.publisher, never()).publish(any(), any(), any(), any());
+      verify(fixture.publisher, never()).publish(any(), any(), any(), any(),
+          any(CommitAuthorizationProof.class));
     }
   }
 
@@ -128,18 +142,22 @@ class EventBackfillExecutorTest {
     private final EventBackfillPreparation preparation = mock(EventBackfillPreparation.class);
     private final EventBackfillWindow window = mock(EventBackfillWindow.class);
     private final CommitPublisher publisher = mock(CommitPublisher.class);
-    private final CommitOwnerService.OwnerToken owner = new CommitOwnerService.OwnerToken("owner", 7);
+    private final CommitOwnerService.OwnerToken owner = new CommitOwnerService.OwnerToken("owner", 8);
     private final CommitState state = CommitState.initial(fingerprint, 1).claimOwner("owner", 10, 100)
         .upgradeAuxiliaryFormat("owner", 1, 11).upgradeLeaseBindingFormat("owner", 2, 12)
         .upgradeLeaseExpiryFormat("owner", 3, 13).upgradeEventIndexFormat("owner", 4, 14)
-        .reserveEventRegistry("owner", 5, 15, namespace).upgradeEventRegistryFormat("owner", 6, 16, namespace);
+        .reserveEventRegistry("owner", 5, 15, namespace).upgradeEventRegistryFormat("owner", 6, 16, namespace)
+        .enableAuthorizationBarrier("owner", 7, 17);
     private final InvocationBinding invocation = InvocationBinding.begin(InvocationId.create(), fingerprint,
-        fingerprint, TransactionId.create(), 7, 0, 1);
+        fingerprint, TransactionId.create(), 8, 0, 1);
     private final InvocationBinding sealed = invocation.seal(rootIdentity);
-    private final EventIndexBackfillCheckpoint checkpoint = new EventIndexBackfillCheckpoint(7, 1, 1, 0,
+    private final EventIndexBackfillCheckpoint checkpoint = new EventIndexBackfillCheckpoint(8, 1, 1, 0,
         1, 1, 1, 1, 0, registry);
     private final ManifestRoot root = mock(ManifestRoot.class);
     private final ManifestCatalog.ProofReadBudget budget;
+    private final CommitAuthorizationProof publicationProof = CommitAuthorizationProof.capture(
+        ByteKey.copyOf(new byte[32]), 0, (identity, generation, scope) ->
+            CompletableFuture.completedFuture(null));
     private final CommitOutcomeResolver.Resolution finalized;
     private final EventBackfillExecutor executor;
 
@@ -150,7 +168,7 @@ class EventBackfillExecutorTest {
       budget = new ManifestCatalog.ProofReadBudget(scope, account, 10, 1L << 30);
       when(root.systemIdentity()).thenReturn(rootIdentity);
       var plan = new LeaseAuxiliaryMutationPreparation.Sealed(sealed, root);
-      when(window.checkPublication(checkpoint, 7, 1, budget))
+      when(window.checkPublication(checkpoint, 8, 1, budget))
           .thenReturn(CompletableFuture.completedFuture(null));
       when(preparation.prepare(eq(invocation), eq(checkpoint), any(), eq(scope), eq(account)))
           .thenAnswer(call -> {

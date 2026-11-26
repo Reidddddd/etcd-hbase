@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -37,27 +38,36 @@ import io.etcdhbase.core.commit.ProtectedEventCursor;
 import io.etcdhbase.core.commit.SelectedSequenceReader;
 import io.etcdhbase.core.commit.SharedEventTailer;
 import io.etcdhbase.core.commit.TransactionId;
+import io.etcdhbase.core.auth.AuthSession;
+import io.etcdhbase.core.auth.AuthSessionException;
+import io.etcdhbase.core.auth.CredentialEnvelope;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.core.storage.StorageMetadata;
 import io.etcdhbase.core.storage.StoredRecord;
 import io.grpc.Status;
+import io.etcdhbase.server.auth.AuthSessionService;
 import io.etcdhbase.server.observability.RequestMetrics;
+import io.etcdhbase.spi.identity.AuthenticationScope;
+import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import io.grpc.stub.StreamObserver;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -69,6 +79,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 class WatchGatewayTest {
   private static final String TABLE_GROUP = "watch-test";
   private static final int RESPONSE_BYTES = 64 * 1024;
+  private static final String AUTH_TOKEN = "watch-auth-token";
+  private static final AuthenticationScope AUTH_SCOPE =
+      new AuthenticationScope(TABLE_GROUP, "profile");
 
   @Test
   void mapsEveryTailerTerminationToItsTypedWatchTermination() throws Exception {
@@ -78,6 +91,224 @@ class WatchGatewayTest {
         WatchTermination.resourceLimit("etcd-hbase: Watch subscription resource limit exceeded"));
     assertTailerTermination(SharedEventTailer.Termination.TAILER_CLOSED,
         WatchTermination.unavailable("etcd-hbase: Watch event source is unavailable"));
+  }
+
+  @Test
+  void periodicRevalidationUsesResolvedIdentityAndDefersReleaseUntilSessionDrain() throws Exception {
+    assertPeriodicRevalidationDrain(null, null);
+  }
+
+  @Test
+  void watchDrainReportsReplayAndBudgetCleanupFailuresTogether() throws Exception {
+    assertPeriodicRevalidationDrain(new IllegalStateException("history pin release failed"),
+        new IllegalStateException("Watch account cleanup failed"));
+  }
+
+  private static void assertPeriodicRevalidationDrain(RuntimeException replayFailure,
+      RuntimeException budgetFailure) throws Exception {
+    try (var startup = RequestScope.withoutDeadline();
+         var scope = RequestScope.withoutDeadline()) {
+      var budgets = historicalWatchBudgets();
+      var gatewayBudgets = budgetFailure == null ? budgets : failWatchBudgetClose(budgets, budgetFailure);
+      var tailer = openTailer();
+      var subscription = mock(SharedEventTailer.Subscription.class);
+      when(subscription.poll()).thenReturn(Optional.empty());
+      when(subscription.termination()).thenReturn(Optional.empty());
+      var watchAccount = new AtomicReference<BudgetManager.Account>();
+      var subscriptionCloses = new AtomicInteger();
+      doAnswer(ignored -> {
+        subscriptionCloses.incrementAndGet();
+        return null;
+      }).when(subscription).close();
+      when(tailer.subscribeWithCheckpoint(any(KeyRange.class), any(BudgetManager.Account.class),
+          anyInt(), anyLong(), anyLong()))
+          .thenAnswer(invocation -> {
+            watchAccount.set(invocation.getArgument(1));
+            return new SharedEventTailer.SubscriptionStart(subscription, 0, 1);
+          });
+
+      var barrier = snapshot(3, 0, 1);
+      CommitControlStore control = mock(CommitControlStore.class);
+      when(control.read(any(RequestScope.class))).thenReturn(
+          CompletableFuture.completedFuture(Optional.of(barrier)));
+      EventHistoryPinManager historyPins = mock(EventHistoryPinManager.class);
+      EventHistoryPinManager.Protection protection =
+          mock(EventHistoryPinManager.Protection.class);
+      var pinReleases = new AtomicInteger();
+      when(historyPins.registerProtection(any(EventHistoryPinManager.Requirement.class),
+          any(RequestScope.class))).thenReturn(CompletableFuture.completedFuture(protection));
+      when(protection.renew(any(RequestScope.class)))
+          .thenReturn(CompletableFuture.completedFuture(null));
+      when(protection.releaseCompletion()).thenReturn(replayFailure == null
+          ? CompletableFuture.completedFuture(null) : CompletableFuture.failedFuture(replayFailure));
+      doAnswer(ignored -> {
+        pinReleases.incrementAndGet();
+        return null;
+      }).when(protection).close();
+
+      SelectedSequenceReader selectedEvents = mock(SelectedSequenceReader.class);
+      when(selectedEvents.sequenceForRevision(anyLong(), any(CommitState.class),
+          any(RequestScope.class), any(ManifestCatalog.ProofReadBudget.class)))
+          .thenReturn(CompletableFuture.completedFuture(1L));
+      when(selectedEvents.readPublishedState(any(RequestScope.class),
+          any(ManifestCatalog.ProofReadBudget.class)))
+          .thenReturn(CompletableFuture.completedFuture(barrier.state()));
+      var physicalProducer = new CompletableFuture<Void>();
+      var pendingEvent = new CompletableFuture<Optional<PreparedEvent>>();
+      var historyReadScope = new AtomicReference<RequestScope>();
+      var historyReadStarted = new CompletableFuture<Void>();
+      ProtectedEventCursor cursor = mock(ProtectedEventCursor.class);
+      when(cursor.next(any(ManifestCatalog.ProofReadBudget.class))).thenReturn(pendingEvent);
+      when(cursor.releaseCompletion()).thenAnswer(ignored ->
+          historyReadScope.get().physicalProducersCompletion());
+      doAnswer(ignored -> {
+        pendingEvent.completeExceptionally(new BackendFailure(BackendFailure.Category.CANCELLED));
+        return null;
+      }).when(cursor).close();
+      PreparedEvent replayEvent = event(3);
+      var decision = new CommitDecision(replayEvent.transactionId(), InvocationId.create(),
+          1, 2, 3, ByteKey.copyOf(new byte[] {1}), ByteKey.copyOf(new byte[32]), true);
+      var eventReference = new EventReference(ByteKey.copyOf(new byte[] {2}),
+          ByteKey.copyOf(new byte[32]), 0, 0, 1, replayEvent.retainedBytes(), 1, 0);
+      var selected = new SelectedSequenceReader.Selected(decision, Optional.of(cursor),
+          Optional.of(new EventRevisionIndex(decision, eventReference)));
+      when(selectedEvents.openUnderProtection(anyLong(), anyLong(), any(ByteKey.class),
+          any(EventHistoryPinManager.Protection.class), any(RequestScope.class),
+          any(ManifestCatalog.ProofReadBudget.class))).thenAnswer(invocation -> {
+            RequestScope readScope = invocation.getArgument(4);
+            historyReadScope.set(readScope);
+            readScope.trackPhysicalProducer(physicalProducer);
+            readScope.registerScopedCleanup(cursor, readScope.physicalProducersCompletion());
+            historyReadStarted.complete(null);
+            return CompletableFuture.completedFuture(Optional.of(selected));
+          });
+
+      var session = authSession();
+      var identity = authorizedIdentity();
+      var initialIdentity = mock(AuthSessionService.ResolvedIdentity.class);
+      when(initialIdentity.session()).thenReturn(session);
+      when(initialIdentity.identity()).thenReturn(identity);
+      var identityReleases = new AtomicInteger();
+      when(initialIdentity.release()).thenAnswer(ignored -> {
+        identityReleases.incrementAndGet();
+        return CompletableFuture.completedFuture(null);
+      });
+
+      var activeRecheckIdentity = mock(AuthSessionService.ResolvedIdentity.class);
+      when(activeRecheckIdentity.session()).thenReturn(session);
+      when(activeRecheckIdentity.identity()).thenReturn(identity);
+      when(activeRecheckIdentity.release()).thenReturn(CompletableFuture.completedFuture(null));
+      var revokedRecheck = new CompletableFuture<AuthSessionService.ResolvedIdentity>();
+      AuthSessionService authSessions = mock(AuthSessionService.class);
+      when(authSessions.resolve(AUTH_TOKEN, scope))
+          .thenReturn(CompletableFuture.completedFuture(initialIdentity));
+      when(authSessions.resolveByDigest(eq(session.tokenDigest()), any(RequestScope.class)))
+          .thenReturn(CompletableFuture.completedFuture(activeRecheckIdentity), revokedRecheck);
+
+      var pending = new M3TableGroupRuntime.Pending(startup, null, true);
+      pending.installEventTailer(tailer);
+      var periodicTick = new AtomicReference<Runnable>();
+      var worker = new QueuedExecutor();
+      ScheduledExecutorService timers = timers(periodicTick, 13);
+      ByteKey serviceAuthorization = ByteKey.copyOf(new byte[32]);
+      var invalidatedAuthorization = new AtomicReference<ByteKey>();
+      var gateway = new WatchGateway(TABLE_GROUP, pending, control, gatewayBudgets,
+          Runnable::run, timers, 11, 12, RESPONSE_BYTES, historyPins,
+          selectedEvents, serviceAuthorization, new RequestMetrics(),
+          identity, authSessions, invalidatedAuthorization::set);
+      var observer = new RecordingWatchObserver();
+      var identityReleasesAtError = new AtomicInteger(-1);
+      observer.onErrorHook = () -> identityReleasesAtError.set(identityReleases.get());
+      var stream = new WatchStream(observer, scope, worker, timers,
+          () -> gateway.openSession(scope, Optional.of(AUTH_TOKEN)), 11, 12, RESPONSE_BYTES,
+          new CompactedWatchIdBudget(8), TimeUnit.MINUTES.toMillis(10), 13);
+
+      try (stream) {
+        stream.onNext(Rpc.WatchRequest.newBuilder()
+            .setCreateRequest(Rpc.WatchCreateRequest.newBuilder()
+                .setWatchId(72).setKey(ByteString.copyFrom(new byte[] {1}))
+                .setStartRevision(3))
+            .build());
+        worker.runUntilIdle();
+        assertEquals(1, observer.responses.size());
+        assertTrue(observer.responses.getFirst().getCreated());
+        assertFalse(observer.responses.getFirst().getCanceled(),
+            () -> "the historical Watch must be admitted before replay starts: "
+                + observer.responses.getFirst());
+        historyReadStarted.get(5, TimeUnit.SECONDS);
+        BudgetManager.Account admittedWatchAccount = watchAccount.get();
+        assertNotNull(admittedWatchAccount, "the live Watch owns its request budget account");
+        assertTrue(budgets.snapshot().requests() > 0,
+            "the active Watch retains its admitted budget before revocation is observed");
+
+        Runnable tick = periodicTick.getAndSet(null);
+        assertNotNull(tick, "the real WatchGateway session installs a bounded silent-stream check");
+        tick.run();
+        worker.runUntilIdle();
+        assertEquals(0, identityReleases.get());
+
+        revokedRecheck.completeExceptionally(
+            new AuthSessionException(AuthSessionException.Reason.INVALID_TOKEN));
+        worker.runUntilIdle();
+        assertEquals(AuthorizationScopeDigest.fromSessionRead(identity, session),
+            invalidatedAuthorization.get());
+
+        boolean terminatedBeforeDrain = observer.failure != null;
+        int responsesBeforeDrain = observer.responses.size();
+        int identityReleasesBeforeDrain = identityReleases.get();
+        int identityReleasesAtTerminalError = identityReleasesAtError.get();
+        boolean watchBudgetActiveBeforeDrain = admittedWatchAccount.isActive();
+        int pinReleasesBeforeDrain = pinReleases.get();
+        int subscriptionClosesBeforeDrain = subscriptionCloses.get();
+
+        var drain = scope.physicalProducersCompletion().toCompletableFuture();
+        if (!terminatedBeforeDrain) scope.cancel();
+        physicalProducer.complete(null);
+        if (replayFailure == null) {
+          drain.join();
+        } else {
+          var failure = assertThrows(CompletionException.class, drain::join);
+          assertSame(replayFailure, failure.getCause());
+          assertEquals(List.of(budgetFailure), List.of(replayFailure.getSuppressed()));
+          verify(admittedWatchAccount).close();
+        }
+
+        assertTrue(terminatedBeforeDrain, "durable session invalidation terminates a silent Watch");
+        assertEquals(1, responsesBeforeDrain, "no event is needed to terminate the Watch");
+        assertEquals(0, identityReleasesAtTerminalError,
+            "the RPC error is sent while its Watch producer still owns the identity");
+        assertEquals(0, identityReleasesBeforeDrain,
+            "the identity remains held until the replay producer drains");
+        assertTrue(watchBudgetActiveBeforeDrain,
+            "the Watch budget remains active while its replay producer drains");
+        assertEquals(0, pinReleasesBeforeDrain,
+            "the history pin remains held while its replay producer drains");
+        assertEquals(1, subscriptionClosesBeforeDrain,
+            "the live subscription closes as soon as authorization is revoked");
+        assertEquals(1, identityReleases.get(),
+            "the identity is released once the tracked Watch session and replay drain");
+        assertFalse(admittedWatchAccount.isActive(), "the drained Watch releases its budget");
+        assertEquals(1, pinReleases.get(), "the drained replay releases its history pin");
+        verify(subscription).close();
+        assertReleased(budgets);
+      }
+    }
+  }
+
+  private static BudgetManager failWatchBudgetClose(BudgetManager budgets, RuntimeException failure)
+      throws BackendFailure {
+    BudgetManager wrapped = mock(BudgetManager.class, delegatesTo(budgets));
+    doAnswer(invocation -> {
+      BudgetManager.Account account = budgets.admit(invocation.getArgument(0),
+          invocation.getArgument(1), invocation.getArgument(2));
+      BudgetManager.Account wrappedAccount = mock(BudgetManager.Account.class, delegatesTo(account));
+      doAnswer(ignored -> {
+        account.close();
+        throw failure;
+      }).when(wrappedAccount).close();
+      return wrappedAccount;
+    }).when(wrapped).admit(eq(TABLE_GROUP), any(RequestScope.class), any(BudgetManager.Reservation.class));
+    return wrapped;
   }
 
   private static void assertTailerTermination(SharedEventTailer.Termination tailerTermination,
@@ -144,7 +375,7 @@ class WatchGatewayTest {
     try (var startup = RequestScope.withoutDeadline(); var scope = RequestScope.withoutDeadline()) {
       BudgetManager budgets = mock(BudgetManager.class);
       BudgetManager.Account account = mock(BudgetManager.Account.class);
-      when(budgets.admit(eq(TABLE_GROUP), eq(scope), any(BudgetManager.Reservation.class)))
+      when(budgets.admit(eq(TABLE_GROUP), any(RequestScope.class), any(BudgetManager.Reservation.class)))
           .thenReturn(account);
       when(account.tryRetain(eq(BudgetManager.Memory.HEAD), anyLong()))
           .thenReturn(Optional.empty());
@@ -934,6 +1165,40 @@ class WatchGatewayTest {
     return new BudgetManager(limits, Map.of(TABLE_GROUP, limits), limits);
   }
 
+  private static BudgetManager historicalWatchBudgets() {
+    var limits = new BudgetManager.Limits(16, 16, 16, 8, 8, 1L << 20, 128L << 20);
+    var reserved = new BudgetManager.ReservedCapacity(4, 4, 4, 4, 4, 1L << 20, 80L << 20);
+    return new BudgetManager(limits, Map.of(TABLE_GROUP, limits), limits,
+        reserved, Map.of(TABLE_GROUP, reserved));
+  }
+
+  private static ScheduledExecutorService timers(AtomicReference<Runnable> periodicTick,
+      long periodicDelayMillis) {
+    ScheduledExecutorService timers = mock(ScheduledExecutorService.class);
+    ScheduledFuture<?> future = mock(ScheduledFuture.class);
+    doAnswer(invocation -> {
+      Runnable task = invocation.getArgument(0);
+      long delay = invocation.getArgument(1);
+      if (delay == periodicDelayMillis) periodicTick.set(task);
+      return future;
+    }).when(timers).schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
+    return timers;
+  }
+
+  private static AuthSession authSession() {
+    var envelope = new CredentialEnvelope("key-1", CredentialEnvelope.CURRENT_AAD_VERSION,
+        new byte[CredentialEnvelope.NONCE_BYTES], new byte[CredentialEnvelope.TAG_BYTES]);
+    return new AuthSession(ByteKey.copyOf(new byte[16]), ByteKey.copyOf(new byte[32]),
+        ByteKey.copyOf(new byte[32]), "milvus", "provider", AUTH_SCOPE,
+        ByteKey.copyOf(new byte[32]), 1, 1, 1, 1_000, 0, 3,
+        AuthSession.Status.ACTIVE, envelope);
+  }
+
+  private static AuthorizedBackendIdentity authorizedIdentity() {
+    return new AuthorizedBackendIdentity("provider", "milvus-user", "context",
+        AUTH_SCOPE, Set.of(TABLE_GROUP), 1);
+  }
+
   private static WatchGateway gateway(RequestScope startup, BudgetManager budgets) {
     return gateway(startup, budgets, RESPONSE_BYTES);
   }
@@ -1033,12 +1298,31 @@ class WatchGatewayTest {
     }
   }
 
+  private static final class QueuedExecutor implements Executor {
+    private final ArrayDeque<Runnable> queued = new ArrayDeque<>();
+
+    @Override public void execute(Runnable task) { queued.addLast(task); }
+
+    void runUntilIdle() {
+      int remaining = 256;
+      while (!queued.isEmpty()) {
+        if (--remaining < 0) throw new AssertionError("Watch stream work did not become idle");
+        queued.removeFirst().run();
+      }
+    }
+  }
+
   private static final class RecordingWatchObserver implements StreamObserver<Rpc.WatchResponse> {
+    private final List<Rpc.WatchResponse> responses = new ArrayList<>();
     private Throwable failure;
+    private Runnable onErrorHook;
 
-    @Override public void onNext(Rpc.WatchResponse response) {}
+    @Override public void onNext(Rpc.WatchResponse response) { responses.add(response); }
 
-    @Override public void onError(Throwable cause) { failure = cause; }
+    @Override public void onError(Throwable cause) {
+      if (onErrorHook != null) onErrorHook.run();
+      failure = cause;
+    }
 
     @Override public void onCompleted() {}
   }

@@ -3,6 +3,7 @@ package io.etcdhbase.server.commit;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
 import io.etcdhbase.core.commit.CommitState;
@@ -92,11 +93,13 @@ public final class LeaseExpiryStepExecutor {
   /** Caller owns the serialized owner lane and the durable invocation binding. */
   public CompletableFuture<InvocationId> executeNew(LeaseExpiryStepCommand command,
       InvocationBinding binding, CommitOwnerService.OwnerToken owner,
-      AuthorizedBackendIdentity identity, RequestScope scope, BudgetManager.Account account) {
+      AuthorizedBackendIdentity identity, CommitAuthorizationProof publicationProof,
+      RequestScope scope, BudgetManager.Account account) {
     Objects.requireNonNull(command, "command");
     Objects.requireNonNull(binding, "binding");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
     if (binding.state() != InvocationBinding.State.PREPARING
@@ -118,7 +121,7 @@ public final class LeaseExpiryStepExecutor {
       operation = currentBase(binding, owner, scope)
           .thenCompose(ignored -> views.openAuxiliary(binding.authorizationScopeDigest(), scope))
           .thenCompose(pin -> withManagedRead(pin, scope, managed -> executePinned(command,
-              binding, owner, identity, managed, scope, account)));
+              binding, owner, identity, publicationProof, managed, scope, account)));
     } catch (BackendFailure | RuntimeException failure) {
       drained.complete(null);
       return CompletableFuture.failedFuture(failure);
@@ -132,7 +135,8 @@ public final class LeaseExpiryStepExecutor {
 
   private CompletableFuture<InvocationId> executePinned(LeaseExpiryStepCommand command,
       InvocationBinding binding, CommitOwnerService.OwnerToken owner,
-      AuthorizedBackendIdentity identity, ManagedRead managed,
+      AuthorizedBackendIdentity identity, CommitAuthorizationProof publicationProof,
+      ManagedRead managed,
       RequestScope scope, BudgetManager.Account account) {
     PinnedReadView pin = managed.pin();
     if (!LeaseRevocationExecutor.pinnedAtBase(pin, binding)) {
@@ -162,7 +166,7 @@ public final class LeaseExpiryStepExecutor {
         metrics.recordLeaseExpiryRetry();
         return completeWithoutChanges(binding, managed, scope, account);
       }
-      return nextScan(previous, observation, binding, owner, identity, managed,
+      return nextScan(previous, observation, binding, owner, identity, publicationProof, managed,
           scope, account, proof);
     }).copy();
   }
@@ -170,12 +174,14 @@ public final class LeaseExpiryStepExecutor {
   private CompletableFuture<InvocationId> nextScan(Optional<LeaseExpiryCheckpoint> previous,
       LeaseTimeObservation observation, InvocationBinding binding,
       CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
+      CommitAuthorizationProof publicationProof,
       ManagedRead managed, RequestScope scope, BudgetManager.Account account,
       ManifestCatalog.ProofReadBudget proof) {
     if (previous.isEmpty()) {
       long stop = LeaseExpiryCheckpoint.closedWindowStopExclusive(observation.nowLowerEpochMillis());
       return persistCheckpoint(binding, owner, Optional.empty(), observation,
-          new LeaseExpiryCheckpoint.Position(0, stop, 0, Optional.empty()), managed, scope, account);
+          new LeaseExpiryCheckpoint.Position(0, stop, 0, Optional.empty()), managed,
+          publicationProof, scope, account);
     }
     LeaseExpiryCheckpoint checkpoint = previous.orElseThrow();
     LeaseExpiryCheckpoint.Position position = checkpoint.position();
@@ -186,20 +192,21 @@ public final class LeaseExpiryStepExecutor {
       }
       return persistCheckpoint(binding, owner, previous, observation,
           new LeaseExpiryCheckpoint.Position(position.windowStartInclusive(), stop, 0,
-              Optional.empty()), managed, scope, account);
+              Optional.empty()), managed, publicationProof, scope, account);
     }
     if (observation.nowLowerEpochMillis() < checkpoint.trustedTimeLowerEpochMillis()) {
       metrics.recordLeaseExpiryRetry();
       return completeWithoutChanges(binding, managed, scope, account);
     }
     return scanPage(position, checkpoint, observation, binding, owner, identity,
-        managed, scope, account, proof);
+        publicationProof, managed, scope, account, proof);
   }
 
   private CompletableFuture<InvocationId> scanPage(LeaseExpiryCheckpoint.Position position,
       LeaseExpiryCheckpoint checkpoint, LeaseTimeObservation observation,
       InvocationBinding binding, CommitOwnerService.OwnerToken owner,
-      AuthorizedBackendIdentity identity, ManagedRead managed,
+      AuthorizedBackendIdentity identity, CommitAuthorizationProof publicationProof,
+      ManagedRead managed,
       RequestScope scope, BudgetManager.Account account,
       ManifestCatalog.ProofReadBudget proof) {
     return withExpiryPageMemory(scope, account, () -> records.scanExpiryWindow(position.bucket(),
@@ -210,7 +217,7 @@ public final class LeaseExpiryStepExecutor {
                 page.physicalRows(), page.encodedBytes(), page.scanRpcCalls());
             metrics.recordLeaseExpiryScan(page.physicalRows(), page.encodedBytes());
             return processPage(page, position, checkpoint, observation, binding, owner,
-                identity, managed, scope, account, proof);
+                identity, publicationProof, managed, scope, account, proof);
           } catch (BackendFailure | RuntimeException failure) {
             return CompletableFuture.failedFuture(failure);
           }
@@ -241,6 +248,7 @@ public final class LeaseExpiryStepExecutor {
       LeaseExpiryCheckpoint.Position position, LeaseExpiryCheckpoint checkpoint,
       LeaseTimeObservation observation, InvocationBinding binding,
       CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
+      CommitAuthorizationProof publicationProof,
       ManagedRead managed, RequestScope scope, BudgetManager.Account account,
       ManifestCatalog.ProofReadBudget proof) {
     CompletableFuture<Optional<LocatedCandidate>> scan = CompletableFuture.completedFuture(Optional.empty());
@@ -257,19 +265,19 @@ public final class LeaseExpiryStepExecutor {
             position.windowStartInclusive(), position.windowStopExclusive(), position.bucket(),
             Optional.of(located.identity().encode()));
         return revocations.revokePinnedCandidate(located.identity(), located.record().stateSequence(),
-            binding, owner, identity, managed.pin(), managed::finish, observation,
+            binding, owner, identity, publicationProof, managed.pin(), managed::finish, observation,
             nextPosition, scope, account).thenCompose(revoked -> {
               if (revoked.isPresent()) {
                 recordExpiryDelayAfterCommit(located.identity().deadlineEpochMillis());
                 return CompletableFuture.completedFuture(revoked.orElseThrow());
               }
               return persistCheckpoint(binding, owner, Optional.of(checkpoint), observation,
-                  nextPosition, managed, scope, account);
+                  nextPosition, managed, publicationProof, scope, account);
             });
       }
       LeaseExpiryCheckpoint.Position nextPosition = nextPositionAfterPage(page, position);
       return persistCheckpoint(binding, owner, Optional.of(checkpoint), observation,
-          nextPosition, managed, scope, account);
+          nextPosition, managed, publicationProof, scope, account);
     });
   }
 
@@ -334,7 +342,8 @@ public final class LeaseExpiryStepExecutor {
   private CompletableFuture<InvocationId> persistCheckpoint(InvocationBinding binding,
       CommitOwnerService.OwnerToken owner, Optional<LeaseExpiryCheckpoint> previous,
       LeaseTimeObservation observation, LeaseExpiryCheckpoint.Position position,
-      ManagedRead managed, RequestScope scope, BudgetManager.Account account) {
+      ManagedRead managed, CommitAuthorizationProof publicationProof,
+      RequestScope scope, BudgetManager.Account account) {
     long sequence;
     LeaseExpiryCheckpoint checkpoint;
     try {
@@ -358,7 +367,7 @@ public final class LeaseExpiryStepExecutor {
         LeaseExpiryCheckpoint.versionIdentity(sequence), checkpoint.encode());
     return preparation.prepare(binding, STEP_RESULT, List.of(record).iterator(),
         managed::finish, scope, account)
-        .thenCompose(sealed -> publish(binding, owner, sealed, scope));
+        .thenCompose(sealed -> publish(binding, owner, sealed, publicationProof, scope));
   }
 
   private void recordExpiryDelayAfterCommit(long deadlineEpochMillis) {
@@ -387,9 +396,10 @@ public final class LeaseExpiryStepExecutor {
 
   private CompletableFuture<InvocationId> publish(InvocationBinding binding,
       CommitOwnerService.OwnerToken owner, LeaseAuxiliaryMutationPreparation.Sealed sealed,
-      RequestScope scope) {
+      CommitAuthorizationProof publicationProof, RequestScope scope) {
     return currentBase(binding, owner, scope)
-        .thenCompose(ignored -> publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope))
+        .thenCompose(ignored -> publisher.publish(
+            sealed.invocation(), owner, sealed.manifest(), scope, publicationProof))
         .thenCompose(outcome -> outcome.state() == CommitOutcomeResolver.State.SELECTED_FINALIZED
             ? CompletableFuture.completedFuture(binding.invocationId())
             : CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN)));

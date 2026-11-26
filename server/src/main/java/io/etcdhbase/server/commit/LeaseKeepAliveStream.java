@@ -40,7 +40,6 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
     }
 
     CompletionStage<Void> validateBeforeSend() {
-      if (response.getTTL() <= 0) return CompletableFuture.completedFuture(null);
       return Objects.requireNonNull(beforeSendValidation.get(), "before-send validation");
     }
 
@@ -201,11 +200,13 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
     synchronized (lock) {
       if (pending != expected || terminal || cancelled) return;
       waitedNanos = Math.max(0, System.nanoTime() - pendingReadyWaitStartedNanos);
-      failure = new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT);
     }
-    metrics.recordLeaseRenewalStage(
-        RequestMetrics.LeaseRenewalStage.OUTBOUND_READY_WAIT, waitedNanos);
-    scheduleDrain();
+    // A pending frame has not been selected by the writer, so terminal delivery can bypass a
+    // stalled authorization future. Its physical producer still drains through the request scope.
+    if (failDirect(new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT), expected)) {
+      metrics.recordLeaseRenewalStage(
+          RequestMetrics.LeaseRenewalStage.OUTBOUND_READY_WAIT, waitedNanos);
+    }
   }
 
   private void requestNext() {
@@ -225,14 +226,7 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
   private void scheduleDrain() {
     if (!draining.compareAndSet(false, true)) return;
     try {
-      worker.execute(() -> {
-        try {
-          drainLoop();
-        } finally {
-          draining.set(false);
-          if (hasRunnableWork()) scheduleDrain();
-        }
-      });
+      worker.execute(this::runOwnedDrain);
     } catch (RuntimeException rejected) {
       draining.set(false);
       failDirect(new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT, rejected));
@@ -243,7 +237,23 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
     }
   }
 
-  private void drainLoop() {
+  private void runOwnedDrain() {
+    boolean handedOff = false;
+    try {
+      handedOff = drainLoop();
+    } catch (RuntimeException | Error failure) {
+      failDirect(failure);
+      if (failure instanceof Error fatal) throw fatal;
+    } finally {
+      if (!handedOff) {
+        draining.set(false);
+        if (hasRunnableWork()) scheduleDrain();
+      }
+    }
+  }
+
+  /** Returns true only when an authorization completion now owns the writer. */
+  private boolean drainLoop() {
     for (;;) {
       Delivery delivery = null;
       Throwable terminalFailure = null;
@@ -254,7 +264,7 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
       long outboundReadyWaitNanos = 0;
       ScheduledFuture<?> timeout = null;
       synchronized (lock) {
-        if (terminal || cancelled) return;
+        if (terminal || cancelled) return false;
         if (failure != null) {
           terminal = true;
           terminalFailure = failure;
@@ -266,7 +276,7 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
           pendingReadyTimeout = null;
         } else if (pending != null && !isReady()) {
           if (!pendingValidationStarted) pendingValidated = false;
-          return;
+          return false;
         } else if (pending != null) {
           if (pendingValidated) {
             outboundReadyWaitNanos = Math.max(0,
@@ -281,7 +291,7 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
             validate = pending;
             validateAtReadinessGeneration = readinessGeneration;
           } else {
-            return;
+            return false;
           }
         } else if (pending == null && !processing && inboundClosed) {
           terminal = true;
@@ -291,23 +301,23 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
           request = true;
           demandOutstanding = true;
         } else {
-          return;
+          return false;
         }
       }
       cancel(timeout);
       if (terminalFailure != null) {
         release(delivery);
         cancelScope();
-      try {
-        observer.onError(ErrorProjection.project(terminalFailure));
-      } catch (RuntimeException ignored) {
-        // The peer may have cancelled while the terminal status was being sent.
-      }
-        return;
+        try {
+          observer.onError(ErrorProjection.project(terminalFailure));
+        } catch (RuntimeException ignored) {
+          // The peer may have cancelled while the terminal status was being sent.
+        }
+        return false;
       }
       if (complete) {
         observer.onCompleted();
-        return;
+        return false;
       }
       if (request) {
         try {
@@ -315,11 +325,11 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
         } catch (RuntimeException requestFailure) {
           fail(requestFailure);
         }
-        return;
+        return false;
       }
       if (validate != null) {
-        validateBeforeSend(validate, validateAtReadinessGeneration);
-        return;
+        if (validateBeforeSend(validate, validateAtReadinessGeneration)) return true;
+        continue;
       }
       try {
         metrics.recordLeaseRenewalStage(
@@ -330,23 +340,25 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
         release(delivery);
         cancelFromPeer();
         if (writeFailure instanceof Error fatal) throw fatal;
-        return;
+        return false;
       }
       release(delivery);
     }
   }
 
-  private void validateBeforeSend(Delivery expected, long startedAtReadinessGeneration) {
-    CompletionStage<Void> validation;
-    try {
-      validation = expected.validateBeforeSend();
-    } catch (RuntimeException | Error validationFailure) {
-      completePendingValidation(expected, startedAtReadinessGeneration, validationFailure);
-      if (validationFailure instanceof Error fatal) throw fatal;
-      return;
-    }
-    validation.whenComplete((ignored, validationFailure) ->
-        completePendingValidation(expected, startedAtReadinessGeneration, validationFailure));
+  private boolean validateBeforeSend(Delivery expected, long startedAtReadinessGeneration) {
+    return OutboundAuthorizationHandoff.start(completed -> {
+      CompletionStage<Void> validation;
+      try {
+        validation = expected.validateBeforeSend();
+      } catch (RuntimeException | Error validationFailure) {
+        completed.accept(validationFailure);
+        if (validationFailure instanceof Error fatal) throw fatal;
+        return;
+      }
+      validation.whenComplete((ignored, validationFailure) -> completed.accept(validationFailure));
+    }, failure -> completePendingValidation(expected, startedAtReadinessGeneration, failure),
+        this::runOwnedDrain);
   }
 
   private void completePendingValidation(Delivery expected, long startedAtReadinessGeneration,
@@ -363,7 +375,6 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
         pendingValidated = false;
       }
     }
-    scheduleDrain();
   }
 
   private void onTransportReady() {
@@ -400,10 +411,14 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
   }
 
   private void failDirect(Throwable cause) {
+    failDirect(cause, null);
+  }
+
+  private boolean failDirect(Throwable cause, Delivery expected) {
     Delivery release;
     ScheduledFuture<?> timeout;
     synchronized (lock) {
-      if (terminal || cancelled) return;
+      if (terminal || cancelled || expected != null && pending != expected) return false;
       terminal = true;
       release = pending;
       pending = null;
@@ -419,6 +434,7 @@ final class LeaseKeepAliveStream implements StreamObserver<Rpc.LeaseKeepAliveReq
     } catch (RuntimeException ignored) {
       // The peer may have cancelled while the terminal status was being sent.
     }
+    return true;
   }
 
   private void cancelFromPeer() {

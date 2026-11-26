@@ -1,7 +1,9 @@
 package io.etcdhbase.server;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,7 +13,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.protobuf.ByteString;
 import etcdserverpb.AuthGrpc;
 import etcdserverpb.KVGrpc;
+import etcdserverpb.LeaseGrpc;
 import etcdserverpb.Rpc;
+import etcdserverpb.WatchGrpc;
 import io.etcdhbase.admin.M3TableGroupInitializer;
 import io.etcdhbase.admin.M3TableGroupPlan;
 import io.etcdhbase.admin.TableGroupPlanFactory;
@@ -36,12 +40,14 @@ import io.etcdhbase.spi.salt.SaltProfile;
 import io.grpc.ClientInterceptors;
 import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
 import io.grpc.stub.MetadataUtils;
+import io.grpc.stub.StreamObserver;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -57,7 +63,9 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.TableName;
@@ -90,6 +98,28 @@ class M5AuthenticateGatewayProcessIT {
 
   @Test
   void authenticatesOnAThenUsesBGetPutTxnAndReactivatesAfterFullStop() throws Exception {
+    exerciseAuthenticatedRuntimes(Scenario.BASELINE);
+  }
+
+  @Test
+  void bothRuntimesRejectNewReadsAfterExternalAclRemoval() throws Exception {
+    exerciseAuthenticatedRuntimes(Scenario.RANGE_ACL);
+  }
+
+  @Test
+  void idleWatchesOnBothRuntimesEndAfterExternalAclRemoval() throws Exception {
+    exerciseAuthenticatedRuntimes(Scenario.WATCH_ACL);
+  }
+
+  @Test
+  void keepAlivesOnBothRuntimesRejectRequestsAfterExternalAclRemoval() throws Exception {
+    exerciseAuthenticatedRuntimes(Scenario.KEEP_ALIVE_ACL);
+  }
+
+  private enum Scenario { BASELINE, RANGE_ACL, WATCH_ACL, KEEP_ALIVE_ACL }
+
+  private void exerciseAuthenticatedRuntimes(Scenario scenario) throws Exception {
+    boolean publicTestLease = scenario == Scenario.WATCH_ACL || scenario == Scenario.KEEP_ALIVE_ACL;
     Path repositoryRoot = WireProcesses.repositoryRoot();
     try (var cluster = TemporaryHBaseClusterProcess.startSecure();
          var apiCertificate = TestTlsCertificate.createWithDnsSans(
@@ -103,7 +133,7 @@ class M5AuthenticateGatewayProcessIT {
       Path adminKeytab = Path.of(required(hbase, "etcdhbase.test.security.admin.keytab"));
       Path krb5Configuration = Path.of(required(hbase, "etcdhbase.test.security.krb5"));
       Path hbaseSite = writeHBaseSite(hbase);
-      SecretFiles secrets = writeSecrets(adminKeytab);
+      SecretFiles secrets = writeSecrets(adminKeytab, realm);
 
       String namespace = "m5auth" + UUID.randomUUID().toString().replace("-", "");
       InitializationConfiguration initialization = initialization(
@@ -111,8 +141,9 @@ class M5AuthenticateGatewayProcessIT {
       M3TableGroupPlan plan = M3TableGroupPlan.from(
           TableGroupPlanFactory.create(initialization, TABLE_GROUP, null));
       M3RuntimeConfiguration bootstrapActivation = activation("51");
-      String hbaseClusterId = initializeTableGroup(
+      var clusters = initializeTableGroup(
           hbase, plan, adminPrincipal, adminKeytab, bootstrapActivation);
+      String hbaseClusterId = clusters.hbaseClusterId();
       grantUserDataAccess(hbase, plan, adminPrincipal, adminKeytab);
       initializeAuthControl(hbase, plan, adminPrincipal, adminKeytab);
 
@@ -125,6 +156,7 @@ class M5AuthenticateGatewayProcessIT {
           adminPrincipal, secrets.directory(), hbaseSite, apiCertificate, apiPortB);
       Path apiServerCFile = writeRuntimeConfiguration(initialization, hbaseClusterId,
           adminPrincipal, secrets.directory(), hbaseSite, apiCertificate, apiPortC);
+      initializeRegistry(apiServerFile, repositoryRoot, clusters.tableGroupClusterId());
 
       int ownerAPort = freePort();
       int ownerBPort = freePort();
@@ -136,11 +168,11 @@ class M5AuthenticateGatewayProcessIT {
           new OwnerPeer(OWNER_B, "127.0.0.1", ownerBPort, OWNER_B),
           new OwnerPeer(OWNER_C, "127.0.0.1", ownerCPort, OWNER_C));
       Path activationA = writeActivation(repositoryRoot, OWNER_A, "51", ownerAPort,
-          ownerACertificate, trustedPeers, peers);
+          ownerACertificate, trustedPeers, peers, publicTestLease);
       Path activationB = writeActivation(repositoryRoot, OWNER_B, "52", ownerBPort,
-          ownerBCertificate, trustedPeers, peers);
+          ownerBCertificate, trustedPeers, peers, publicTestLease);
       Path activationC = writeActivation(repositoryRoot, OWNER_C, "53", ownerCPort,
-          ownerCCertificate, trustedPeers, peers);
+          ownerCCertificate, trustedPeers, peers, publicTestLease);
 
       ProcessNode processA = null;
       ProcessNode processB = null;
@@ -148,9 +180,12 @@ class M5AuthenticateGatewayProcessIT {
       try (var ownerControl = openOwnerControl(hbase, plan, adminPrincipal, adminKeytab)) {
         assertTrue(ownerControl.read().ownerInstance().isEmpty(),
             "the unique test table group must have no owner before A starts");
-        try {
-          processA = startRuntime(apiServerFile, activationA, hbaseSite, krb5Configuration,
-              "runtime-a.log", apiPortA);
+      }
+      try {
+        processA = startRuntime(apiServerFile, activationA, hbaseSite, krb5Configuration,
+            "runtime-a.log", apiPortA, publicTestLease);
+        // Startup can upgrade the table capability; reopen the reader to observe it.
+        try (var ownerControl = openOwnerControl(hbase, plan, adminPrincipal, adminKeytab)) {
           CommitState ownerAfterAStarts = ownerControl.read();
           assertTrue(ownerAfterAStarts.ownerInstance().isPresent(),
               "A must acquire the owner lease before B starts");
@@ -158,7 +193,7 @@ class M5AuthenticateGatewayProcessIT {
               "A's persisted owner lease must still be active");
 
           processB = startRuntime(apiServerBFile, activationB, hbaseSite, krb5Configuration,
-              "runtime-b.log", apiPortB);
+              "runtime-b.log", apiPortB, publicTestLease);
           assertNotEquals(ProcessHandle.current().pid(), processA.pid());
           assertNotEquals(ProcessHandle.current().pid(), processB.pid());
           assertNotEquals(processA.pid(), processB.pid());
@@ -166,6 +201,18 @@ class M5AuthenticateGatewayProcessIT {
 
           String token = verifyAuthenticateOnAAndKvThroughB(processA.port(), processB.port(),
               apiCertificate.certificate(), realm, ownerControl, ownerAfterAStarts);
+          if (scenario == Scenario.RANGE_ACL) {
+            verifyExternalAclRemoval(hbase, plan, adminPrincipal, adminKeytab,
+                processA.port(), processB.port(), apiCertificate.certificate(), token);
+          }
+          if (scenario == Scenario.WATCH_ACL) {
+            verifyIdleWatchAclRemoval(hbase, plan, adminPrincipal, adminKeytab,
+                processA.port(), processB.port(), apiCertificate.certificate(), token);
+          }
+          if (scenario == Scenario.KEEP_ALIVE_ACL) {
+            verifyKeepAliveAclRemoval(hbase, plan, adminPrincipal, adminKeytab,
+                processA.port(), processB.port(), apiCertificate.certificate(), token);
+          }
 
           // Stop the standby first so it cannot take over while A releases its owner lease.
           processB.close();
@@ -175,16 +222,266 @@ class M5AuthenticateGatewayProcessIT {
           Thread.sleep(OWNER_LEASE_MS + HEARTBEAT_MS);
 
           processC = startRuntime(apiServerCFile, activationC, hbaseSite, krb5Configuration,
-              "runtime-c.log", apiPortC);
+              "runtime-c.log", apiPortC, publicTestLease);
           verifyPersistedTokenOnRestartedReplica(
               processC.port(), apiCertificate.certificate(), token);
-        } finally {
-          closeProcess(processC);
-          closeProcess(processB);
-          closeProcess(processA);
         }
+      } finally {
+        closeProcess(processC);
+        closeProcess(processB);
+        closeProcess(processA);
       }
     }
+  }
+
+  private void verifyKeepAliveAclRemoval(Configuration configuration, M3TableGroupPlan plan,
+      String adminPrincipal, Path adminKeytab, int portA, int portB, Path certificate,
+      String token) throws Exception {
+    ManagedChannel grantChannel = tlsChannel(portA, certificate);
+    long leaseId;
+    try {
+      var metadata = new Metadata();
+      metadata.put(EtcdAuthTokenMetadata.key(), token);
+      var channel = ClientInterceptors.intercept(grantChannel,
+          MetadataUtils.newAttachHeadersInterceptor(metadata));
+      var granted = LeaseGrpc.newBlockingStub(channel).withDeadlineAfter(60, TimeUnit.SECONDS)
+          .leaseGrant(Rpc.LeaseGrantRequest.newBuilder().setTTL(300).build());
+      leaseId = granted.getID();
+      assertNotEquals(0, leaseId);
+      assertTrue(granted.getTTL() > 0);
+    } finally {
+      closeChannel(grantChannel);
+    }
+
+    try (var first = new KeepAlive(portA, certificate, token);
+         var second = new KeepAlive(portB, certificate, token);
+         var operator = KerberosUserContext.fromKeytab(adminPrincipal, adminKeytab);
+         var connection = ConnectionFactory.createAsyncConnection(configuration, operator.user())
+             .get(60, TimeUnit.SECONDS)) {
+      first.send(leaseId);
+      first.awaitInitialRenewal(leaseId);
+      second.send(leaseId);
+      second.awaitInitialRenewal(leaseId);
+
+      var admin = connection.getAdmin();
+      Permission permission = Permission.newBuilder(plan.primary().table())
+          .withActions(Action.READ, Action.WRITE, Action.EXEC).build();
+      var entry = new UserPermission("alice", permission);
+      try {
+        first.assertActive();
+        second.assertActive();
+        admin.revoke(entry).get(60, TimeUnit.SECONDS);
+        waitForPermission(admin, permission, false);
+        first.send(leaseId);
+        second.send(leaseId);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        first.awaitPermissionDenied(deadline);
+        second.awaitPermissionDenied(deadline);
+      } finally {
+        admin.grant(entry, false).get(60, TimeUnit.SECONDS);
+        waitForPermission(admin, permission, true);
+      }
+    }
+  }
+
+  private static final class KeepAlive implements AutoCloseable {
+    private final ManagedChannel channel;
+    private final StreamObserver<Rpc.LeaseKeepAliveRequest> requests;
+    private final CompletableFuture<Rpc.LeaseKeepAliveResponse> initial = new CompletableFuture<>();
+    private final CompletableFuture<Throwable> afterInitial = new CompletableFuture<>();
+    private final AtomicInteger responseCount = new AtomicInteger();
+
+    private KeepAlive(int port, Path certificate, String token) throws Exception {
+      channel = tlsChannel(port, certificate);
+      var metadata = new Metadata();
+      metadata.put(EtcdAuthTokenMetadata.key(), token);
+      var stub = LeaseGrpc.newStub(ClientInterceptors.intercept(channel,
+          MetadataUtils.newAttachHeadersInterceptor(metadata))).withDeadlineAfter(120, TimeUnit.SECONDS);
+      try {
+        requests = stub.leaseKeepAlive(new StreamObserver<>() {
+          @Override public void onNext(Rpc.LeaseKeepAliveResponse response) {
+            if (responseCount.incrementAndGet() == 1) initial.complete(response);
+            else afterInitial.complete(new IllegalStateException("unauthorized KeepAlive response"));
+          }
+          @Override public void onError(Throwable failure) {
+            initial.completeExceptionally(failure);
+            afterInitial.complete(failure);
+          }
+          @Override public void onCompleted() {
+            var failure = new IllegalStateException("KeepAlive ended without an authorization error");
+            initial.completeExceptionally(failure);
+            afterInitial.complete(failure);
+          }
+        });
+      } catch (RuntimeException | Error failure) {
+        channel.shutdownNow();
+        throw failure;
+      }
+    }
+
+    private void send(long leaseId) {
+      requests.onNext(Rpc.LeaseKeepAliveRequest.newBuilder().setID(leaseId).build());
+    }
+
+    private void awaitInitialRenewal(long leaseId) throws Exception {
+      var response = initial.get(60, TimeUnit.SECONDS);
+      assertEquals(leaseId, response.getID());
+      assertTrue(response.getTTL() > 0);
+    }
+
+    private void assertActive() {
+      assertFalse(afterInitial.isDone(), "KeepAlive must remain active before ACL removal");
+    }
+
+    private void awaitPermissionDenied(long deadlineNanos) throws Exception {
+      long remaining = Math.max(0, deadlineNanos - System.nanoTime());
+      Throwable result = afterInitial.get(remaining, TimeUnit.NANOSECONDS);
+      assertEquals(Status.Code.PERMISSION_DENIED, Status.fromThrowable(result).getCode());
+      assertEquals(1, responseCount.get(), "revoked KeepAlive must not return a renewal");
+    }
+
+    @Override public void close() throws Exception {
+      if (!afterInitial.isDone()) requests.onCompleted();
+      closeChannel(channel);
+    }
+  }
+
+  private void verifyIdleWatchAclRemoval(Configuration configuration, M3TableGroupPlan plan,
+      String adminPrincipal, Path adminKeytab, int portA, int portB, Path certificate,
+      String token) throws Exception {
+    try (var first = new IdleWatch(portA, certificate, token);
+         var second = new IdleWatch(portB, certificate, token);
+         var operator = KerberosUserContext.fromKeytab(adminPrincipal, adminKeytab);
+         var connection = ConnectionFactory.createAsyncConnection(configuration, operator.user())
+             .get(60, TimeUnit.SECONDS)) {
+      first.awaitCreated();
+      second.awaitCreated();
+      var admin = connection.getAdmin();
+      Permission permission = Permission.newBuilder(plan.primary().table())
+          .withActions(Action.READ, Action.WRITE, Action.EXEC).build();
+      var entry = new UserPermission("alice", permission);
+      try {
+        first.assertActive();
+        second.assertActive();
+        admin.revoke(entry).get(60, TimeUnit.SECONDS);
+        waitForPermission(admin, permission, false);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        first.awaitPermissionDenied(deadline);
+        second.awaitPermissionDenied(deadline);
+      } finally {
+        admin.grant(entry, false).get(60, TimeUnit.SECONDS);
+        waitForPermission(admin, permission, true);
+      }
+    }
+  }
+
+  private static final class IdleWatch implements AutoCloseable {
+    private final ManagedChannel channel;
+    private final StreamObserver<Rpc.WatchRequest> requests;
+    private final CompletableFuture<Void> created = new CompletableFuture<>();
+    private final CompletableFuture<Throwable> terminated = new CompletableFuture<>();
+    private final AtomicInteger events = new AtomicInteger();
+
+    private IdleWatch(int port, Path certificate, String token) throws Exception {
+      channel = tlsChannel(port, certificate);
+      var metadata = new Metadata();
+      metadata.put(EtcdAuthTokenMetadata.key(), token);
+      var stub = WatchGrpc.newStub(ClientInterceptors.intercept(channel,
+          MetadataUtils.newAttachHeadersInterceptor(metadata))).withDeadlineAfter(90, TimeUnit.SECONDS);
+      try {
+        requests = stub.watch(new StreamObserver<>() {
+          @Override public void onNext(Rpc.WatchResponse response) {
+            events.addAndGet(response.getEventsCount());
+            if (response.getCanceled()) {
+              var failure = new IllegalStateException("Watch was canceled without an authorization error");
+              created.completeExceptionally(failure);
+              terminated.complete(failure);
+            } else if (response.getCreated()) {
+              created.complete(null);
+            }
+          }
+          @Override public void onError(Throwable failure) {
+            created.completeExceptionally(failure);
+            terminated.complete(failure);
+          }
+          @Override public void onCompleted() {
+            var failure = new IllegalStateException("Watch ended without an authorization error");
+            created.completeExceptionally(failure);
+            terminated.complete(failure);
+          }
+        });
+        requests.onNext(Rpc.WatchRequest.newBuilder().setCreateRequest(
+            Rpc.WatchCreateRequest.newBuilder()
+                .setKey(ByteString.copyFromUtf8("j51-idle-watch"))).build());
+      } catch (RuntimeException | Error failure) {
+        channel.shutdownNow();
+        throw failure;
+      }
+    }
+
+    private void awaitCreated() throws Exception {
+      created.get(60, TimeUnit.SECONDS);
+    }
+
+    private void assertActive() {
+      assertFalse(terminated.isDone(), "Watch must remain active before ACL removal");
+    }
+
+    private void awaitPermissionDenied(long deadlineNanos) throws Exception {
+      long remaining = Math.max(0, deadlineNanos - System.nanoTime());
+      Throwable failure = terminated.get(remaining, TimeUnit.NANOSECONDS);
+      assertEquals(Status.Code.PERMISSION_DENIED, Status.fromThrowable(failure).getCode());
+      assertEquals(0, events.get(), "idle Watch must not require a data event to recheck ACL");
+    }
+
+    @Override public void close() throws Exception {
+      if (!terminated.isDone()) requests.onCompleted();
+      closeChannel(channel);
+    }
+  }
+
+  private void verifyExternalAclRemoval(Configuration configuration, M3TableGroupPlan plan,
+      String adminPrincipal, Path adminKeytab, int portA, int portB, Path certificate,
+      String token) throws Exception {
+    try (var operator = KerberosUserContext.fromKeytab(adminPrincipal, adminKeytab);
+         var connection = ConnectionFactory.createAsyncConnection(configuration, operator.user())
+             .get(60, TimeUnit.SECONDS)) {
+      var admin = connection.getAdmin();
+      Permission permission = Permission.newBuilder(plan.primary().table())
+          .withActions(Action.READ, Action.WRITE, Action.EXEC).build();
+      var entry = new UserPermission("alice", permission);
+      try {
+        admin.revoke(entry).get(60, TimeUnit.SECONDS);
+        waitForPermission(admin, permission, false);
+        for (int port : new int[] {portA, portB}) {
+          ManagedChannel channel = tlsChannel(port, certificate);
+          try {
+            var failure = assertThrows(StatusRuntimeException.class,
+                () -> authenticatedKv(channel, token).withDeadlineAfter(60, TimeUnit.SECONDS)
+                    .range(Rpc.RangeRequest.newBuilder()
+                        .setKey(ByteString.copyFromUtf8("j50-cross-process-put")).build()));
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.getStatus().getCode());
+          } finally {
+            closeChannel(channel);
+          }
+        }
+      } finally {
+        admin.grant(entry, false).get(60, TimeUnit.SECONDS);
+        waitForPermission(admin, permission, true);
+      }
+    }
+  }
+
+  private static void waitForPermission(org.apache.hadoop.hbase.client.AsyncAdmin admin,
+      Permission permission, boolean expected) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
+    while (System.nanoTime() < deadline
+        && !admin.hasUserPermissions("alice", List.of(permission))
+            .get(30, TimeUnit.SECONDS).equals(List.of(expected))) {
+      Thread.sleep(50);
+    }
+    assertEquals(List.of(expected), admin.hasUserPermissions("alice", List.of(permission))
+        .get(30, TimeUnit.SECONDS), "HBase table permission did not converge");
   }
 
   private String verifyAuthenticateOnAAndKvThroughB(int portA, int portB,
@@ -221,8 +518,10 @@ class M5AuthenticateGatewayProcessIT {
           "the response header must identify B, which received the Put request");
       CommitState afterPut = ownerControl.read();
       assertSameOwner(expectedOwner, afterPut, "after B's Put");
-      assertEquals(beforePut.publishedSequence() + 1, afterPut.publishedSequence(),
-          "B's Put must publish one commit while A remains the owner");
+      assertTrue(afterPut.publishedSequence() > beforePut.publishedSequence(),
+          "B's Put must publish while A remains the owner");
+      assertEquals(beforePut.publishedRevision() + 1, afterPut.publishedRevision());
+      assertEquals(afterPut.publishedRevision(), put.getHeader().getRevision());
       Rpc.RangeResponse readBack = kv.withDeadlineAfter(60, TimeUnit.SECONDS)
           .range(Rpc.RangeRequest.newBuilder().setKey(putKey).build());
       assertEquals(1, readBack.getKvsCount());
@@ -245,8 +544,10 @@ class M5AuthenticateGatewayProcessIT {
           "the response header must identify B, which received the transaction");
       CommitState afterTxn = ownerControl.read();
       assertSameOwner(expectedOwner, afterTxn, "after B's transaction");
-      assertEquals(beforeTxn.publishedSequence() + 1, afterTxn.publishedSequence(),
-          "B's transaction must publish one commit while A remains the owner");
+      assertTrue(afterTxn.publishedSequence() > beforeTxn.publishedSequence(),
+          "B's transaction must publish while A remains the owner");
+      assertEquals(beforeTxn.publishedRevision() + 1, afterTxn.publishedRevision());
+      assertEquals(afterTxn.publishedRevision(), txn.getHeader().getRevision());
       Rpc.RangeResponse txnReadBack = kv.withDeadlineAfter(60, TimeUnit.SECONDS)
           .range(Rpc.RangeRequest.newBuilder().setKey(txnKey).build());
       assertEquals(1, txnReadBack.getKvsCount());
@@ -261,8 +562,10 @@ class M5AuthenticateGatewayProcessIT {
       assertEquals(1, deleted.getDeleted(), "DeleteRange must remove the transaction's key");
       CommitState afterDelete = ownerControl.read();
       assertSameOwner(expectedOwner, afterDelete, "after B's DeleteRange");
-      assertEquals(beforeDelete.publishedSequence() + 1, afterDelete.publishedSequence(),
-          "B's DeleteRange must publish one commit while A remains the owner");
+      assertTrue(afterDelete.publishedSequence() > beforeDelete.publishedSequence(),
+          "B's DeleteRange must publish while A remains the owner");
+      assertEquals(beforeDelete.publishedRevision() + 1, afterDelete.publishedRevision());
+      assertEquals(afterDelete.publishedRevision(), deleted.getHeader().getRevision());
       Rpc.RangeResponse deletedReadBack = kv.withDeadlineAfter(60, TimeUnit.SECONDS)
           .range(Rpc.RangeRequest.newBuilder().setKey(txnKey).build());
       assertEquals(0, deletedReadBack.getKvsCount());
@@ -372,10 +675,11 @@ class M5AuthenticateGatewayProcessIT {
         new ByteArrayInputStream(mapper.writeValueAsBytes(tree)));
   }
 
-  private static String initializeTableGroup(Configuration configuration, M3TableGroupPlan plan,
+  private static InitializedClusters initializeTableGroup(Configuration configuration, M3TableGroupPlan plan,
       String adminPrincipal, Path adminKeytab, M3RuntimeConfiguration activation) throws Exception {
     AuthenticationScope scope = new AuthenticationScope(
         plan.source().tableGroupId(), plan.source().hbaseProfile().id());
+    long tableGroupClusterId;
     try (var provider = new HBaseBackendIdentityProvider(plan.source().identityProviderId(), scope,
         configuration, HBaseAuthenticators.kerberosPassword(),
         (connection, ignored) -> connection.getAdmin().listNamespaces().thenApply(names -> null),
@@ -383,15 +687,30 @@ class M5AuthenticateGatewayProcessIT {
       var identity = provider.activateTrusted(() ->
           KerberosUserContext.fromKeytab(adminPrincipal, adminKeytab))
           .toCompletableFuture().get(60, TimeUnit.SECONDS);
-      M3TableGroupInitializer.initializeFresh(plan, "sha256:" + plan.source().fingerprint(),
-          identity, provider, activation.pinConfiguration());
+      tableGroupClusterId = M3TableGroupInitializer.initializeFresh(plan,
+          "sha256:" + plan.source().fingerprint(), identity, provider, activation.pinConfiguration()).clusterId();
     }
     try (var operator = KerberosUserContext.fromKeytab(adminPrincipal, adminKeytab);
          var connection = ConnectionFactory.createAsyncConnection(configuration, operator.user())
              .get(60, TimeUnit.SECONDS)) {
-      return connection.getAdmin().getClusterMetrics()
-          .get(60, TimeUnit.SECONDS).getClusterId();
+      return new InitializedClusters(connection.getAdmin().getClusterMetrics()
+          .get(60, TimeUnit.SECONDS).getClusterId(), tableGroupClusterId);
     }
+  }
+
+  private void initializeRegistry(Path runtime, Path repositoryRoot, long clusterId) throws Exception {
+    var inventory = new ObjectMapper().createObjectNode();
+    inventory.putArray("groups").addObject().put("configuration_file", runtime.toAbsolutePath().toString())
+        .put("table_group_id", TABLE_GROUP).put("cluster_id", Long.toUnsignedString(clusterId))
+        .put("enabled", true);
+    Path path = temporary.resolve("auth-inventory.json");
+    Files.writeString(path, inventory.toString());
+    var output = new java.io.ByteArrayOutputStream();
+    var error = new java.io.ByteArrayOutputStream();
+    int result = AuthRegistryAdminCommand.run(new String[] {"initialize", "--config", runtime.toString(),
+        "--m3-config", repositoryRoot.resolve("config/examples/m3/activation.json").toString(),
+        "--inventory", path.toString()}, new java.io.PrintStream(output), new java.io.PrintStream(error));
+    assertEquals(0, result, "auth registry initialization failed: " + error);
   }
 
   private static void grantUserDataAccess(Configuration configuration, M3TableGroupPlan plan,
@@ -458,7 +777,13 @@ class M5AuthenticateGatewayProcessIT {
 
     ArrayNode clients = auth.putArray("client_profiles");
     addClientProfile(clients.addObject(), "m5-admin-client", clusterId, hbaseSite);
-    addClientProfile(clients.addObject(), "m5-endpoint-client", clusterId, hbaseSite);
+    ObjectNode endpointClient = clients.addObject();
+    addClientProfile(endpointClient, "m5-endpoint-client", clusterId, hbaseSite);
+    endpointClient.put("backend_identity_domain", "fixture-realm");
+    endpointClient.putArray("credential_versions").addObject()
+        .put("principal", "alice@" + adminPrincipal.substring(adminPrincipal.indexOf('@') + 1))
+        .put("generation", 1)
+        .put("credential_reference", "secret://alice-v1");
     auth.putArray("endpoint_bindings").addObject()
         .put("table_group_id", TABLE_GROUP)
         .put("provider_id", ENDPOINT_PROVIDER)
@@ -493,10 +818,11 @@ class M5AuthenticateGatewayProcessIT {
 
   private Path writeActivation(Path repositoryRoot, String instanceId, String memberId,
       int ownerPort, TestTlsCertificate certificate, Path trustedPeers,
-      List<OwnerPeer> peers) throws Exception {
+      List<OwnerPeer> peers, boolean publicTestLease) throws Exception {
     ObjectMapper mapper = new ObjectMapper();
     ObjectNode tree = (ObjectNode) mapper.readTree(Files.readAllBytes(
-        repositoryRoot.resolve("config/examples/m3/activation.json")));
+        repositoryRoot.resolve(publicTestLease
+            ? "config/examples/m4/activation.json" : "config/examples/m3/activation.json")));
     tree.put("member_id", memberId)
         .put("owner_lease_ms", OWNER_LEASE_MS)
         .put("heartbeat_ms", HEARTBEAT_MS)
@@ -518,19 +844,24 @@ class M5AuthenticateGatewayProcessIT {
     Path output = temporary.resolve("activation-" + instanceId + ".json");
     Files.write(output, mapper.writeValueAsBytes(tree));
     try (var input = Files.newInputStream(output)) {
-      new io.etcdhbase.server.config.M3RuntimeConfigurationLoader().load(input);
+      new io.etcdhbase.server.config.M3RuntimeConfigurationLoader(publicTestLease
+          ? M3RuntimeConfiguration.ActivationProfile.PUBLIC_TEST
+          : M3RuntimeConfiguration.ActivationProfile.PRODUCTION).load(input);
     }
     return output;
   }
 
   private ProcessNode startRuntime(Path runtime, Path activation, Path hbaseSite,
-      Path krb5Configuration, String logName, int expectedPort) throws Exception {
+      Path krb5Configuration, String logName, int expectedPort, boolean publicTestLease) throws Exception {
     Path log = temporary.resolve(logName);
-    var process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+    var command = new java.util.ArrayList<>(List.of(
+        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
         "-Djava.security.krb5.conf=" + krb5Configuration,
         "-cp", System.getProperty("java.class.path"),
         M5AuthenticateGatewayRuntimeProcess.class.getName(), runtime.toString(),
-        activation.toString(), hbaseSite.toString(), krb5Configuration.toString())
+        activation.toString(), hbaseSite.toString(), krb5Configuration.toString()));
+    if (publicTestLease) command.add("PUBLIC_TEST");
+    var process = new ProcessBuilder(command)
         .directory(WireProcesses.repositoryRoot().toFile())
         .redirectErrorStream(true).redirectOutput(log.toFile()).start();
     ProcessNode node = new ProcessNode(process, log, expectedPort);
@@ -557,11 +888,15 @@ class M5AuthenticateGatewayProcessIT {
     return destination;
   }
 
-  private SecretFiles writeSecrets(Path adminKeytab) throws Exception {
+  private SecretFiles writeSecrets(Path adminKeytab, String realm) throws Exception {
     Path directory = Files.createDirectory(temporary.resolve("secrets"));
     Path keytab = directory.resolve("admin.keytab");
     Files.copy(adminKeytab, keytab);
     makePrivate(keytab);
+    Path aliceCredential = directory.resolve("alice-v1");
+    Files.writeString(aliceCredential, "alice@" + realm + "\n" + fixturePassword(),
+        StandardCharsets.UTF_8);
+    makePrivate(aliceCredential);
     Path credentialKey = directory.resolve("credential.key");
     byte[] key = new byte[32];
     try {
@@ -651,6 +986,8 @@ class M5AuthenticateGatewayProcessIT {
   }
 
   private record SecretFiles(Path directory) {}
+
+  private record InitializedClusters(String hbaseClusterId, long tableGroupClusterId) {}
 
   private static final class OwnerControlReader implements AutoCloseable {
     private final HBaseBackendIdentityProvider provider;

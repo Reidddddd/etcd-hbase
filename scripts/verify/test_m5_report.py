@@ -45,11 +45,11 @@ class M5ReportTest(unittest.TestCase):
             declarations = "\n".join(f"  void {method}() {{}}" for method in sorted(methods))
             path.write_text(f"class TestSource {{\n{declarations}\n}}\n", encoding="utf-8")
 
-    def _write_profile(self, module: str, *includes: str) -> None:
+    def _write_profile(self, module: str, *includes: str, profile_id: str = "m5-j50-public") -> None:
         include_xml = "\n".join(f"<include>{include}</include>" for include in includes)
         profile = f"""<project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
-  <profiles><profile><id>m5-j50-public</id><build><plugins><plugin>
+  <profiles><profile><id>{profile_id}</id><build><plugins><plugin>
     <artifactId>maven-failsafe-plugin</artifactId><configuration>
       <skipITs>false</skipITs><includes>{include_xml}</includes>
       {"<reuseForks>false</reuseForks>" if module == "server" else ""}
@@ -82,11 +82,11 @@ class M5ReportTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
 
-    def _write_run(self, artifact: Path, maven_exit_code: int = 0) -> None:
+    def _write_run(self, artifact: Path, maven_exit_code: int = 0, task_id: str = "J50") -> None:
         artifact.mkdir(parents=True)
         run = {
             "schema": m5_report.RUN_SCHEMA,
-            "task": "J50",
+            "task": task_id,
             "scope": "public",
             "status": "running",
             "commands": [{"name": "maven-verify", "exit_code": maven_exit_code}],
@@ -107,7 +107,10 @@ class M5ReportTest(unittest.TestCase):
         })
         self.assertEqual(",".join(expected_surefire), surefire)
         self.assertEqual(
-            "HBaseAuthControlIT,M5AuthProcessIT,M5AuthenticateGatewayProcessIT", failsafe)
+            "HBaseAuthControlIT#provisionsExactDescriptorAndPersistsSessionAuthorityAndSlotCas,"
+            "M5AuthProcessIT#sessionsActivateAllRegisteredHBaseMechanismsAcrossProcessesAndFullRestart,"
+            "M5AuthenticateGatewayProcessIT#authenticatesOnAThenUsesBGetPutTxnAndReactivatesAfterFullStop",
+            failsafe)
 
     def test_registry_rejects_duplicate_json_keys_and_unknown_tasks(self) -> None:
         path = self.registry / "J50.json"
@@ -309,6 +312,65 @@ class M5ReportTest(unittest.TestCase):
         with self.assertRaisesRegex(m5_report.ReportError, "missing command or test report"):
             m5_report.finalize_run(run_file, 0)
         self.assertEqual("failed", json.loads(run_file.read_text())["status"])
+
+    def test_j51_reports_require_each_registered_suite_and_method(self) -> None:
+        source = Path(__file__).parents[2] / "testkit/cases/m5/J51.json"
+        self.task = json.loads(source.read_text(encoding="utf-8"))
+        (self.registry / "J51.json").write_text(json.dumps(self.task), encoding="utf-8")
+        self._write_profile("server", "**/M5AuthenticateGatewayProcessIT.java",
+                            profile_id="m5-j51-public")
+        self._write_test_sources()
+        self._write_reports()
+        success = self.repo / ".artifacts/m5/j51-success"
+        self._write_run(success, task_id="J51")
+        m5_report.verify_reports(self.repo, "J51", success)
+        run = json.loads((success / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(self.task["tests"]), run["test_counts"]["suites"])
+
+        first = self.task["tests"][0]
+        report = (self.repo / first["module"] / "target" / f"{first['kind']}-reports"
+                  / f"TEST-{first['class']}.xml")
+        report.unlink()
+        missing = self.repo / ".artifacts/m5/j51-missing"
+        self._write_run(missing, task_id="J51")
+        with self.assertRaisesRegex(m5_report.ReportError, "registered Maven test report is missing"):
+            m5_report.verify_reports(self.repo, "J51", missing)
+
+
+class J51RegistryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repo = Path(__file__).parents[2]
+        self.path = self.repo / "testkit/cases/m5/J51.json"
+        self.task = json.loads(self.path.read_text(encoding="utf-8"))
+
+    def test_j50_and_j51_registry_validate_together(self) -> None:
+        registered = m5_report._validate_registry()
+        self.assertEqual({"J50", "J51"}, set(registered))
+        surefire, failsafe = m5_report._maven_selectors(registered["J51"])
+        self.assertIn("CommitPublisherTest", surefire.split(","))
+        self.assertEqual("", failsafe)
+
+    def test_j51_rejects_missing_required_revocation_and_cache_tests(self) -> None:
+        for method in ("installedRevocationBarrierRejectsASelectionUsingAnEarlierControlSnapshot",
+                       "invalidationPreventsAnInFlightPhysicalReadFromRefillingTheCache",
+                       "staleReservationRetriesAfterAnotherOperationOrConfigurationUpdate",
+                       "deploymentRotationBlocksBothGroupsUntilTheirBarriersComplete",
+                       "authStatusReturnsThePersistedBridgeRevisionAndUnavailableWhenMissing",
+                       "configurationUpdateFencesAnAlreadyAuthorizedSelection"):
+            with self.subTest(method=method):
+                task = json.loads(self.path.read_text(encoding="utf-8"))
+                entry = next(test for test in task["tests"] if method in test["methods"])
+                entry["methods"].remove(method)
+                with self.assertRaisesRegex(m5_report.ReportError, "J51 required test methods are missing"):
+                    m5_report._validate_task(task, self.path, self.repo)
+
+    def test_j51_rejects_non_string_module_and_test_kind(self) -> None:
+        for key in ("module", "kind"):
+            with self.subTest(field=key):
+                task = json.loads(self.path.read_text(encoding="utf-8"))
+                task["tests"][0][key] = []
+                with self.assertRaisesRegex(m5_report.ReportError, "invalid module, class, kind"):
+                    m5_report._validate_task(task, self.path, self.repo)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
@@ -49,18 +50,20 @@ class LeaseRenewalExecutorTest {
     try (Fixture fixture = new Fixture()) {
       when(fixture.revocations.executeExpiredKeepAlive(eq(fixture.leaseId),
           eq(fixture.lease), eq(fixture.binding), eq(fixture.owner),
-          eq(fixture.identity), eq(fixture.pin), eq(fixture.observation),
-          eq(fixture.scope), eq(fixture.account)))
+          eq(fixture.identity), eq(fixture.publicationProof), eq(fixture.pin), eq(fixture.observation),
+          eq(fixture.scope), eq(fixture.account), any(Runnable.class)))
           .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(
               fixture.binding.invocationId()));
 
       InvocationId completed = fixture.executor.executeNew(fixture.leaseId, fixture.binding,
-          fixture.owner, fixture.identity, fixture.scope, fixture.account).join();
+          fixture.owner, fixture.identity, fixture.publicationProof,
+          fixture.scope, fixture.account).join();
 
       assertEquals(fixture.binding.invocationId(), completed);
-      verify(fixture.revocations).executeExpiredKeepAlive(fixture.leaseId,
-          fixture.lease, fixture.binding, fixture.owner, fixture.identity,
-          fixture.pin, fixture.observation, fixture.scope, fixture.account);
+      verify(fixture.revocations).executeExpiredKeepAlive(eq(fixture.leaseId),
+          eq(fixture.lease), eq(fixture.binding), eq(fixture.owner), eq(fixture.identity),
+          eq(fixture.publicationProof), eq(fixture.pin), eq(fixture.observation), eq(fixture.scope),
+          eq(fixture.account), any(Runnable.class));
       verifyNoInteractions(fixture.renewalPreparation, fixture.publisher);
     }
   }
@@ -70,12 +73,13 @@ class LeaseRenewalExecutorTest {
     try (Fixture fixture = new Fixture()) {
       BackendFailure unknown = new BackendFailure(BackendFailure.Category.UNKNOWN);
       when(fixture.revocations.executeExpiredKeepAlive(anyLong(), any(), any(), any(), any(),
-          any(), any(), any(), any()))
+          any(CommitAuthorizationProof.class), any(), any(), any(), any(), any(Runnable.class)))
           .thenReturn(java.util.concurrent.CompletableFuture.failedFuture(unknown));
 
       CompletionException failure = assertThrows(CompletionException.class,
           () -> fixture.executor.executeNew(fixture.leaseId, fixture.binding,
-              fixture.owner, fixture.identity, fixture.scope, fixture.account).join());
+              fixture.owner, fixture.identity, fixture.publicationProof,
+              fixture.scope, fixture.account).join());
 
       assertSame(unknown, failure.getCause());
       verifyNoInteractions(fixture.renewalPreparation, fixture.publisher);
@@ -99,6 +103,8 @@ class LeaseRenewalExecutorTest {
     private final AuthorizedBackendIdentity identity = new AuthorizedBackendIdentity(
         "test-provider", "test-subject", "fixture-context",
         new AuthenticationScope(TABLE_GROUP, "test-profile"), Set.of(TABLE_GROUP), 0);
+    private final CommitAuthorizationProof publicationProof =
+        CommitAuthorizationProofTestSupport.alwaysValid(0);
     private final InvocationBinding binding = InvocationBinding.begin(InvocationId.create(),
         ByteKey.copyOf(new byte[32]), AUTHORIZATION,
         io.etcdhbase.core.commit.TransactionId.create(), owner.epoch(), 3, 9);

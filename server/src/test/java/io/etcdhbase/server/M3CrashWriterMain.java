@@ -20,6 +20,7 @@ import io.etcdhbase.hbase.storage.HBaseSystemRecordStore;
 import io.etcdhbase.hbase.storage.StorageTableBinding;
 import io.etcdhbase.hbase.storage.SystemTableBinding;
 import io.etcdhbase.server.commit.BoundedPublicationHandoff;
+import io.etcdhbase.server.commit.CommitAuthorizationProofTestSupport;
 import io.etcdhbase.spi.identity.AuthenticationScope;
 import io.etcdhbase.spi.identity.BackendCredentials;
 import io.etcdhbase.spi.salt.HashSaltStrategy;
@@ -87,7 +88,10 @@ public final class M3CrashWriterMain {
             Runtime.getRuntime().halt(SELECTED_EXIT);
             return CompletableFuture.failedFuture(new AssertionError("process halt returned"));
           });
-      publisher.publish(binding, owner, manifest, scope).join();
+      var controlState = control.read(scope).join().orElseThrow().state();
+      var authorization = CommitAuthorizationProofTestSupport.serviceProof(
+          identity, binding.authorizationScopeDigest(), controlState.authorizationBarrierGeneration());
+      publisher.publish(binding, owner, manifest, scope, authorization).join();
       throw new IllegalStateException("selected crash fixture did not halt");
     }
   }

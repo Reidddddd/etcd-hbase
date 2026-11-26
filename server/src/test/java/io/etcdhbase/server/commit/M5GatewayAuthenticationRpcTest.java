@@ -13,7 +13,9 @@ import static org.mockito.Mockito.when;
 import com.google.protobuf.ByteString;
 import etcdserverpb.AuthGrpc;
 import etcdserverpb.KVGrpc;
+import etcdserverpb.LeaseGrpc;
 import etcdserverpb.Rpc;
+import io.etcdhbase.core.auth.AuthToken;
 import io.etcdhbase.core.auth.AuthSession;
 import io.etcdhbase.core.auth.AuthSessionStore;
 import io.etcdhbase.core.auth.AuthSlot;
@@ -28,13 +30,18 @@ import io.etcdhbase.core.commit.InvocationBinding;
 import io.etcdhbase.core.commit.InvocationId;
 import io.etcdhbase.core.commit.InvocationResultResolver;
 import io.etcdhbase.core.commit.InvocationService;
+import io.etcdhbase.core.commit.LeaseBindingReader;
+import io.etcdhbase.core.commit.LeaseEnumerationReader;
+import io.etcdhbase.core.commit.LeaseReadView;
 import io.etcdhbase.core.commit.MutationForwardRequest;
 import io.etcdhbase.core.commit.OwnerForwarding;
+import io.etcdhbase.core.commit.ReadViewService;
 import io.etcdhbase.core.commit.ResultCatalog;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.kv.PutResult;
 import io.etcdhbase.core.kv.ResultNode;
 import io.etcdhbase.core.kv.ResultTree;
+import io.etcdhbase.core.lease.LeaseTimeSource;
 import io.etcdhbase.core.kv.TxnCommand;
 import io.etcdhbase.core.kv.TxnEvaluator;
 import io.etcdhbase.core.request.RequestScope;
@@ -43,9 +50,11 @@ import io.etcdhbase.grpc.EtcdAuthTokenMetadata;
 import io.etcdhbase.grpc.RequestScopeInterceptor;
 import io.etcdhbase.grpc.service.AuthService;
 import io.etcdhbase.grpc.service.KvService;
+import io.etcdhbase.grpc.service.LeaseService;
 import io.etcdhbase.hbase.codec.ResultMessages;
 import io.etcdhbase.server.auth.AesGcmCredentialEnvelopeProtector;
 import io.etcdhbase.server.auth.AuthSessionService;
+import io.etcdhbase.server.auth.AuthDeploymentFixture;
 import io.etcdhbase.server.auth.AuthenticateRpcHandler;
 import io.etcdhbase.server.auth.CredentialKeyProvider;
 import io.etcdhbase.server.auth.SessionIdentityLease;
@@ -130,7 +139,7 @@ class M5GatewayAuthenticationRpcTest {
 
     var observedIdentity = new AtomicReference<AuthorizedBackendIdentity>();
     var reads = mock(TxnReadExecutor.class);
-    when(reads.execute(any(), any(), any(), any(), any(), anyBoolean())).thenAnswer(call -> {
+    when(reads.execute(any(), any(), any(), any(), any(), anyBoolean(), any())).thenAnswer(call -> {
       observedIdentity.set(call.getArgument(2));
       var header = new ResultNode.Header(true, 2);
       var tree = new ResultTree(new ResultNode.Txn(0, header, true,
@@ -175,8 +184,8 @@ class M5GatewayAuthenticationRpcTest {
     var keyProvider = new TestCredentialKeyProvider();
     var protector = new AesGcmCredentialEnvelopeProtector(keyProvider, new SecureRandom());
     var authenticateIdentities = new TestSessionIdentityManager("replica-a", 0);
-    var nonOwnerIdentities = new TestSessionIdentityManager("replica-b", 2);
-    var ownerIdentities = new TestSessionIdentityManager("owner-a", 1);
+    var nonOwnerIdentities = new TestSessionIdentityManager("replica-b", 3);
+    var ownerIdentities = new TestSessionIdentityManager("owner-a", 2);
     var sessionsA = sessions(store, protector, authenticateIdentities);
     var sessionsB = sessions(store, protector, nonOwnerIdentities);
     var ownerSessions = sessions(store, protector, ownerIdentities);
@@ -191,17 +200,20 @@ class M5GatewayAuthenticationRpcTest {
         .thenReturn(CompletableFuture.failedFuture(
             new BackendFailure(BackendFailure.Category.UNAVAILABLE)));
 
-    var ownerPhysicalWork = new AtomicReference<CompletableFuture<Void>>();
+    var ownerPhysicalWorks = new java.util.concurrent.CopyOnWriteArrayList<CompletableFuture<Void>>();
     var ownerResolvedIdentity = new AtomicReference<AuthorizedBackendIdentity>();
+    var ownerResolvedIdentities = new java.util.concurrent.CopyOnWriteArrayList<AuthorizedBackendIdentity>();
     var forwardedRequest = new AtomicReference<MutationForwardRequest>();
+    var forwardedRequests = new java.util.concurrent.CopyOnWriteArrayList<MutationForwardRequest>();
     var route = new AtomicReference<OwnerForwarding.Route>();
     var ownerReceiver = new MutationForwardReceiver(control, invocations,
         new SessionAuthorizationResolver(TABLE_GROUP, ownerSessions,
             peerIdentity -> NON_OWNER_PEER.equals(peerIdentity)),
-        (request, binding, identity, scope) -> {
-          ownerResolvedIdentity.set(identity);
+        (request, binding, authorization, scope) -> {
+          ownerResolvedIdentity.set(authorization.identity());
+          ownerResolvedIdentities.add(authorization.identity());
           var physical = new CompletableFuture<Void>();
-          ownerPhysicalWork.set(physical);
+          ownerPhysicalWorks.add(physical);
           scope.trackPhysicalProducer(physical);
           return CompletableFuture.completedFuture(
               new OwnerForwarding.Unknown(BackendFailure.Category.UNAVAILABLE));
@@ -215,6 +227,7 @@ class M5GatewayAuthenticationRpcTest {
         },
         (resolvedRoute, request, scope) -> {
           forwardedRequest.set(request);
+          forwardedRequests.add(request);
           return ownerReceiver.receive(NON_OWNER_PEER, request, scope);
         });
 
@@ -223,7 +236,7 @@ class M5GatewayAuthenticationRpcTest {
     var readAuthorization = new AtomicReference<ByteKey>();
     when(readExecutor.execute(any(TxnCommand.class), any(ByteKey.class),
         any(AuthorizedBackendIdentity.class), any(RequestScope.class),
-        any(BudgetManager.Account.class), anyBoolean()))
+        any(BudgetManager.Account.class), anyBoolean(), any()))
         .thenAnswer(call -> {
           readIdentity.set(call.getArgument(2));
           readAuthorization.set(call.getArgument(1));
@@ -242,12 +255,25 @@ class M5GatewayAuthenticationRpcTest {
     var putGateway = new PutGateway(TABLE_GROUP, serviceIdentity, serviceAuthorization,
         1, 1, 1 << 20, control, relay, results, budgets, reservation,
         Runnable::run, metrics, sessionsB);
+    when(results.resolve(any(InvocationId.class), any(ByteKey.class), any(ByteKey.class),
+        any(RequestScope.class), any(BudgetManager.Account.class)))
+        .thenReturn(CompletableFuture.failedFuture(
+            new BackendFailure(BackendFailure.Category.UNAVAILABLE)));
+    var leaseTimers = new ScheduledThreadPoolExecutor(1,
+        Thread.ofPlatform().daemon().name("m5-lease-auth-test-", 0).factory());
+    var leaseGateway = new LeaseGateway(TABLE_GROUP, serviceIdentity, serviceAuthorization,
+        1, 1, 1 << 20, control, relay, results, mock(ReadViewService.class),
+        mock(LeaseReadView.class), mock(LeaseEnumerationReader.class), mock(LeaseBindingReader.class),
+        mock(LeaseTimeSource.class), budgets, reservation, Runnable::run, leaseTimers, metrics, sessionsB);
+    var leaseService = new LeaseService(leaseGateway.grantHandler(),
+        leaseGateway.timeToLiveHandler(), leaseGateway.leasesHandler(),
+        leaseGateway.keepAliveHandler(), leaseGateway.revokeHandler());
     var kv = new KvService(putGateway, txnGateway, txnGateway::deleteRange, txnGateway::range);
 
     try (var keys = keyProvider;
          var authenticateReplica = RpcNode.start(new KvService(),
              new AuthService(new AuthenticateRpcHandler(sessionsA)));
-         var nonOwnerReplica = RpcNode.start(kv,
+         var nonOwnerReplica = RpcNode.start(kv, leaseService,
              new AuthService(new AuthenticateRpcHandler(sessionsB)))) {
       try {
         String token = AuthGrpc.newBlockingStub(authenticateReplica.channel())
@@ -286,7 +312,8 @@ class M5GatewayAuthenticationRpcTest {
         AuthorizedBackendIdentity readResolvedIdentity = readIdentity.get();
         assertNotNull(readResolvedIdentity, "the B transaction gateway must resolve the token");
         assertEquals(PRINCIPAL, readResolvedIdentity.subject());
-        assertEquals(AuthorizationScopeDigest.fromIdentity(readResolvedIdentity),
+        assertEquals(AuthorizationScopeDigest.fromSessionRead(readResolvedIdentity,
+                store.sessions.values().iterator().next()),
             readAuthorization.get());
 
         StatusRuntimeException mutationFailure = assertThrows(StatusRuntimeException.class,
@@ -315,16 +342,39 @@ class M5GatewayAuthenticationRpcTest {
         assertEquals(0, ownerIdentities.releaseCount(),
             "owner identity must remain leased while the physical producer is active");
 
-        ownerPhysicalWork.get().complete(null);
+        StatusRuntimeException leaseFailure = assertThrows(StatusRuntimeException.class,
+            () -> LeaseGrpc.newBlockingStub(authenticatedChannel)
+                .withDeadlineAfter(3, TimeUnit.SECONDS)
+                .leaseGrant(Rpc.LeaseGrantRequest.newBuilder().setTTL(30).build()));
+        assertEquals(Status.Code.UNAVAILABLE, leaseFailure.getStatus().getCode());
+        assertEquals(2, ownerResolvedIdentities.size(),
+            "LeaseGrant must use the real owner authorization resolver");
+        AuthorizedBackendIdentity ownerLeaseIdentity = ownerResolvedIdentities.get(1);
+        assertEquals(PRINCIPAL, ownerLeaseIdentity.subject());
+        assertEquals("owner-a-context-2", ownerLeaseIdentity.contextRef());
+        MutationForwardRequest leaseForward = forwardedRequests.get(1);
+        AuthorizedBackendIdentity nonOwnerLeaseIdentity = nonOwnerIdentities.activatedIdentities().get(2);
+        assertEquals(AuthorizationScopeDigest.fromIdentity(nonOwnerLeaseIdentity),
+            leaseForward.authorizationScopeDigest());
+        assertEquals(AuthorizationScopeDigest.fromIdentity(ownerLeaseIdentity),
+            leaseForward.authorizationScopeDigest());
+        try (AuthToken parsed = AuthToken.parse(token)) {
+          assertEquals(parsed.digest(), SessionAuthorizationContextReference.parse(
+              leaseForward.authorizationContextReference()).tokenDigest());
+        }
+        assertEquals(0, ownerIdentities.releaseCount(),
+            "Lease owner identity must remain leased while its producer is active");
+
+        ownerPhysicalWorks.forEach(work -> work.complete(null));
         assertTrue(ownerIdentities.awaitReleases(), "owner identity release must follow physical drain");
         assertTrue(nonOwnerIdentities.awaitReleases(), "non-owner request identities must be released");
-        assertEquals(1, ownerIdentities.releaseCount());
-        assertEquals(2, nonOwnerIdentities.releaseCount());
+        assertEquals(2, ownerIdentities.releaseCount());
+        assertEquals(3, nonOwnerIdentities.releaseCount());
       } finally {
-        CompletableFuture<Void> physical = ownerPhysicalWork.get();
-        if (physical != null) physical.complete(null);
+        ownerPhysicalWorks.forEach(work -> work.complete(null));
       }
     } finally {
+      leaseTimers.shutdownNow();
       authenticateIdentities.close();
       nonOwnerIdentities.close();
       ownerIdentities.close();
@@ -334,7 +384,9 @@ class M5GatewayAuthenticationRpcTest {
   private static AuthSessionService sessions(InMemoryAuthSessionStore store,
       CredentialEnvelopeProtector protector, TestSessionIdentityManager identities) {
     return new AuthSessionService(store, protector, identities, "milvus", PROVIDER, AUTH_SCOPE,
-        DATASET, Duration.ofMinutes(5), 8, Clock.systemUTC(), new SecureRandom());
+        DATASET, Duration.ofMinutes(5), 8, Clock.systemUTC(), new SecureRandom(),
+        store.deployment, store.deployment.barriers(),
+        AuthDeploymentFixture.IDENTITY_DOMAIN, store.deployment.configurationDigest());
   }
 
   private static AuthorizedBackendIdentity identity(String subject, String context) {
@@ -408,6 +460,10 @@ class M5GatewayAuthenticationRpcTest {
     }
 
     static RpcNode start(KvService kv, AuthService auth) throws Exception {
+      return start(kv, new LeaseService(), auth);
+    }
+
+    static RpcNode start(KvService kv, LeaseService lease, AuthService auth) throws Exception {
       var deadlines = new ScheduledThreadPoolExecutor(1,
           Thread.ofPlatform().daemon().name("j50-rpc-deadline-", 0).factory());
       deadlines.setRemoveOnCancelPolicy(true);
@@ -419,6 +475,7 @@ class M5GatewayAuthenticationRpcTest {
           .maxInboundMessageSize(1 << 20)
           .intercept(requests)
           .addService(kv)
+          .addService(lease)
           .addService(auth)
           .build()
           .start();
@@ -526,6 +583,8 @@ class M5GatewayAuthenticationRpcTest {
   }
 
   private static final class InMemoryAuthSessionStore implements AuthSessionStore {
+    private final AuthDeploymentFixture deployment = new AuthDeploymentFixture(
+        this, "milvus", PROVIDER, AUTH_SCOPE, DATASET, Clock.systemUTC());
     private final Map<ByteKey, AuthSession> sessions = new HashMap<>();
     private final Map<Integer, AuthSlot> slots = new HashMap<>();
     private final Map<ByteKey, SubjectAuthority> authorities = new HashMap<>();
@@ -591,7 +650,9 @@ class M5GatewayAuthenticationRpcTest {
     @Override
     public synchronized CompletionStage<Boolean> createAuthorityIfAbsent(
         SubjectAuthority authority, RequestScope scope) {
-      if (authorities.containsKey(authority.subjectDigest())) {
+      if (authority.state() != SubjectAuthority.State.ACTIVE
+          || !authority.revocationTargets().isEmpty()
+          || authorities.containsKey(authority.subjectDigest())) {
         return CompletableFuture.completedFuture(false);
       }
       authorities.put(authority.subjectDigest(), authority);
@@ -601,7 +662,8 @@ class M5GatewayAuthenticationRpcTest {
     @Override
     public synchronized CompletionStage<Boolean> compareAndSetAuthority(
         SubjectAuthority observed, SubjectAuthority replacement, RequestScope scope) {
-      if (!observed.equals(authorities.get(observed.subjectDigest()))) {
+      if (!observed.equals(authorities.get(observed.subjectDigest()))
+          || !observed.allowsTransitionTo(replacement)) {
         return CompletableFuture.completedFuture(false);
       }
       authorities.put(observed.subjectDigest(), replacement);

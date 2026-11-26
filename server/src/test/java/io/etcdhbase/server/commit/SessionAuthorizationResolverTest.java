@@ -17,11 +17,15 @@ import io.etcdhbase.core.auth.CredentialEnvelope;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.InvocationId;
 import io.etcdhbase.core.commit.MutationForwardRequest;
+import io.etcdhbase.core.commit.MutationOperationEnvelope;
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.lease.LeaseExpiryStepCommand;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.server.auth.AuthSessionService;
 import io.etcdhbase.spi.identity.AuthenticationScope;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +36,33 @@ class SessionAuthorizationResolverTest {
   private static final String TABLE_GROUP = "auth-group";
   private static final String PEER = "authenticated-owner-peer";
   private static final AuthenticationScope SCOPE = new AuthenticationScope(TABLE_GROUP, "profile");
+  private static final long AUTHORIZATION_BARRIER_GENERATION = 19;
+
+  @Test
+  void userSessionCannotAuthorizeInternalLeaseExpiryStep() {
+    AuthSessionService sessions = mock(AuthSessionService.class);
+    AuthSessionService.ResolvedIdentity resolved = mock(AuthSessionService.ResolvedIdentity.class);
+    AuthSession session = session(3);
+    when(resolved.session()).thenReturn(session);
+    when(resolved.identity()).thenReturn(identity(TABLE_GROUP));
+    when(resolved.release()).thenReturn(CompletableFuture.completedFuture(null));
+    when(sessions.resolveByDigest(eq(session.tokenDigest()), any(RequestScope.class)))
+        .thenReturn(CompletableFuture.completedFuture(resolved));
+    ByteKey operation = MutationOperationEnvelope.leaseExpiryStep(
+        new LeaseExpiryStepCommand(0).encode().bytes());
+    var request = new MutationForwardRequest(TABLE_GROUP, InvocationId.create(),
+        MutationForwardRequest.digest(TABLE_GROUP, operation),
+        AuthorizationScopeDigest.fromIdentity(identity(TABLE_GROUP)),
+        SessionAuthorizationContextReference.fromSession(session).encode(), 1,
+        TimeUnit.SECONDS.toNanos(1), MutationForwardRequest.MAX_HOPS, operation);
+    var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals);
+    try (RequestScope scope = RequestScope.withoutDeadline()) {
+      var failure = assertThrows(java.util.concurrent.CompletionException.class,
+          () -> resolver.verifyAndResolve(PEER, request, AUTHORIZATION_BARRIER_GENERATION, scope).join());
+      assertEquals(BackendFailure.Category.PERMISSION,
+          ((BackendFailure) failure.getCause()).category());
+    }
+  }
 
   @Test
   void ownerResolvesMatchingDurableReferenceAndReleasesAfterPhysicalDrain() throws Exception {
@@ -54,10 +85,13 @@ class SessionAuthorizationResolverTest {
     var physicalProducer = new CompletableFuture<Void>();
     scope.trackPhysicalProducer(physicalProducer);
     try {
-      var verified = resolver.verifyAndResolve(PEER, request(session), scope).join();
+      var verified = resolver.verifyAndResolve(
+          PEER, request(session), AUTHORIZATION_BARRIER_GENERATION, scope).join();
       assertSame(identity, verified.identity());
       assertEquals(AuthorizationScopeDigest.fromIdentity(identity),
           verified.authorizationScopeDigest());
+      assertEquals(AUTHORIZATION_BARRIER_GENERATION,
+          verified.publicationProof().authorizationBarrierGeneration());
 
       scope.cancel();
       assertEquals(0, releases.get(), "identity must remain borrowed while owner work is active");
@@ -69,6 +103,144 @@ class SessionAuthorizationResolverTest {
     } finally {
       physicalProducer.complete(null);
       scope.close();
+    }
+  }
+
+  @Test
+  void ownerRetiresCapturedIdentityWhenPublicationRecheckFindsRevokedSession() throws Exception {
+    AuthSessionService sessions = mock(AuthSessionService.class);
+    AuthSessionService.ResolvedIdentity held = mock(AuthSessionService.ResolvedIdentity.class);
+    AuthSession session = session(3);
+    when(held.session()).thenReturn(session);
+    when(held.identity()).thenReturn(identity(TABLE_GROUP));
+    when(held.retire()).thenReturn(CompletableFuture.completedFuture(null));
+    when(held.release()).thenReturn(CompletableFuture.completedFuture(null));
+    when(sessions.resolveByDigest(eq(session.tokenDigest()), any(RequestScope.class)))
+        .thenReturn(CompletableFuture.completedFuture(held), CompletableFuture.failedFuture(
+            new AuthSessionException(AuthSessionException.Reason.INVALID_TOKEN)));
+    var invalidated = new ArrayList<ByteKey>();
+    var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals, invalidated::add);
+    RequestScope scope = RequestScope.withoutDeadline();
+    var physicalProducer = new CompletableFuture<Void>();
+    scope.trackPhysicalProducer(physicalProducer);
+    try {
+      var proof = resolver.verifyAndResolve(
+          PEER, request(session), AUTHORIZATION_BARRIER_GENERATION, scope).join().publicationProof();
+      var failure = assertThrows(java.util.concurrent.CompletionException.class,
+          () -> proof.reauthorize(AUTHORIZATION_BARRIER_GENERATION, scope).join());
+      assertEquals(BackendFailure.Category.INVALID_AUTH_TOKEN,
+          ((BackendFailure) failure.getCause()).category());
+      verify(held).retire();
+      assertEquals(List.of(AuthorizationScopeDigest.fromSessionRead(identity(TABLE_GROUP), session)),
+          invalidated);
+      scope.cancel();
+      verify(held, never()).release();
+      physicalProducer.complete(null);
+      scope.cleanupCompletion().toCompletableFuture().get(1, TimeUnit.SECONDS);
+      verify(held).release();
+    } finally {
+      physicalProducer.complete(null);
+      scope.close();
+    }
+  }
+
+  @Test
+  void ownerPhysicalDenialSignalsTheHeldIdentityWithoutWaitingForRetirement() throws Exception {
+    AuthSessionService sessions = mock(AuthSessionService.class);
+    AuthSessionService.ResolvedIdentity held = mock(AuthSessionService.ResolvedIdentity.class);
+    AuthSession session = session(3);
+    when(held.session()).thenReturn(session);
+    when(held.identity()).thenReturn(identity(TABLE_GROUP));
+    var retirement = new CompletableFuture<Void>();
+    when(held.retire()).thenReturn(retirement);
+    when(held.release()).thenReturn(CompletableFuture.completedFuture(null));
+    when(sessions.resolveByDigest(eq(session.tokenDigest()), any(RequestScope.class)))
+        .thenReturn(CompletableFuture.completedFuture(held));
+    var invalidated = new ArrayList<ByteKey>();
+    var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals, invalidated::add);
+    var physicalProducer = new CompletableFuture<Void>();
+    RequestScope scope = RequestScope.withoutDeadline();
+    scope.trackPhysicalProducer(physicalProducer);
+    try {
+      var verified = resolver.verifyAndResolve(
+          PEER, request(session), AUTHORIZATION_BARRIER_GENERATION, scope).join();
+      var denied = new BackendFailure(BackendFailure.Category.PERMISSION);
+      var operation = UserIdentityRecordStore.observe(
+          CompletableFuture.failedFuture(denied), verified.retireUserIdentity());
+      assertSame(denied, assertThrows(java.util.concurrent.CompletionException.class,
+          operation::join).getCause());
+      verify(held).retire();
+      assertEquals(List.of(AuthorizationScopeDigest.fromSessionRead(identity(TABLE_GROUP), session)),
+          invalidated);
+      assertFalse(retirement.isDone());
+      scope.cancel();
+      verify(held, never()).release();
+      physicalProducer.complete(null);
+      scope.cleanupCompletion().toCompletableFuture().get(1, TimeUnit.SECONDS);
+      verify(held).release();
+    } finally {
+      retirement.complete(null);
+      physicalProducer.complete(null);
+      scope.close();
+    }
+  }
+
+  @Test
+  void changedPublicationSessionInvalidatesHeldIdentityAndReleasesNewBorrow() {
+    var sessions = mock(AuthSessionService.class);
+    var held = mock(AuthSessionService.ResolvedIdentity.class);
+    var current = mock(AuthSessionService.ResolvedIdentity.class);
+    var oldSession = session(3);
+    when(held.session()).thenReturn(oldSession);
+    when(held.identity()).thenReturn(identity(TABLE_GROUP));
+    when(held.retire()).thenReturn(CompletableFuture.completedFuture(null));
+    when(held.release()).thenReturn(CompletableFuture.completedFuture(null));
+    when(current.session()).thenReturn(session(4));
+    when(current.identity()).thenReturn(identity(TABLE_GROUP));
+    when(current.release()).thenReturn(CompletableFuture.completedFuture(null));
+    when(sessions.resolveByDigest(eq(oldSession.tokenDigest()), any(RequestScope.class)))
+        .thenReturn(CompletableFuture.completedFuture(held), CompletableFuture.completedFuture(current));
+    var invalidated = new ArrayList<ByteKey>();
+    var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals, invalidated::add);
+    try (RequestScope scope = RequestScope.withoutDeadline()) {
+      var proof = resolver.verifyAndResolve(
+          PEER, request(oldSession), AUTHORIZATION_BARRIER_GENERATION, scope).join().publicationProof();
+      var failure = assertThrows(java.util.concurrent.CompletionException.class,
+          () -> proof.reauthorize(AUTHORIZATION_BARRIER_GENERATION, scope).join());
+      assertEquals(BackendFailure.Category.PERMISSION, ((BackendFailure) failure.getCause()).category());
+      verify(held).retire();
+      verify(current).release();
+      assertEquals(List.of(AuthorizationScopeDigest.fromSessionRead(identity(TABLE_GROUP), oldSession)),
+          invalidated);
+    }
+  }
+
+  @Test
+  void ownerDoesNotRetireIdentityForUnavailableOrUnattributedBackendFailure() {
+    var failures = List.of(
+        new AuthSessionException(AuthSessionException.Reason.DEPENDENCY_UNAVAILABLE),
+        new BackendFailure(BackendFailure.Category.PERMISSION));
+    for (var recheckFailure : failures) {
+      AuthSessionService sessions = mock(AuthSessionService.class);
+      AuthSessionService.ResolvedIdentity held = mock(AuthSessionService.ResolvedIdentity.class);
+      AuthSession session = session(3);
+      when(held.session()).thenReturn(session);
+      when(held.identity()).thenReturn(identity(TABLE_GROUP));
+      when(held.release()).thenReturn(CompletableFuture.completedFuture(null));
+      when(sessions.resolveByDigest(eq(session.tokenDigest()), any(RequestScope.class)))
+          .thenReturn(CompletableFuture.completedFuture(held),
+              CompletableFuture.failedFuture(recheckFailure));
+      var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals);
+      try (RequestScope scope = RequestScope.withoutDeadline()) {
+        var proof = resolver.verifyAndResolve(
+            PEER, request(session), AUTHORIZATION_BARRIER_GENERATION, scope).join().publicationProof();
+        var failure = assertThrows(java.util.concurrent.CompletionException.class,
+            () -> proof.reauthorize(AUTHORIZATION_BARRIER_GENERATION, scope).join());
+        var expected = recheckFailure instanceof BackendFailure
+            ? BackendFailure.Category.PERMISSION : BackendFailure.Category.UNAVAILABLE;
+        assertEquals(expected, ((BackendFailure) failure.getCause()).category());
+        verify(held, never()).retire();
+      }
     }
   }
 
@@ -91,7 +263,8 @@ class SessionAuthorizationResolverTest {
     var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals);
     try (RequestScope scope = RequestScope.withoutDeadline()) {
       var failure = assertThrows(java.util.concurrent.CompletionException.class,
-          () -> resolver.verifyAndResolve(PEER, request(referenced), scope).join());
+          () -> resolver.verifyAndResolve(
+              PEER, request(referenced), AUTHORIZATION_BARRIER_GENERATION, scope).join());
       assertEquals(BackendFailure.Category.PERMISSION,
           ((BackendFailure) failure.getCause()).category());
       assertEquals(1, releases.get());
@@ -112,7 +285,8 @@ class SessionAuthorizationResolverTest {
     var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals);
     try (RequestScope scope = RequestScope.withoutDeadline()) {
       var failure = assertThrows(java.util.concurrent.CompletionException.class,
-          () -> resolver.verifyAndResolve(PEER, request(session), scope).join());
+          () -> resolver.verifyAndResolve(
+              PEER, request(session), AUTHORIZATION_BARRIER_GENERATION, scope).join());
       assertEquals(BackendFailure.Category.PERMISSION,
           ((BackendFailure) failure.getCause()).category());
       verify(resolved).release();
@@ -130,7 +304,8 @@ class SessionAuthorizationResolverTest {
     var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals);
     try (RequestScope scope = RequestScope.withoutDeadline()) {
       var failure = assertThrows(java.util.concurrent.CompletionException.class,
-          () -> resolver.verifyAndResolve(PEER, request(referenced), scope).join());
+          () -> resolver.verifyAndResolve(
+              PEER, request(referenced), AUTHORIZATION_BARRIER_GENERATION, scope).join());
       assertEquals(BackendFailure.Category.INVALID_AUTH_TOKEN,
           ((BackendFailure) failure.getCause()).category());
     }
@@ -143,7 +318,8 @@ class SessionAuthorizationResolverTest {
     var resolver = new SessionAuthorizationResolver(TABLE_GROUP, sessions, PEER::equals);
     try (RequestScope scope = RequestScope.withoutDeadline()) {
       var failure = assertThrows(java.util.concurrent.CompletionException.class,
-          () -> resolver.verifyAndResolve("untrusted", request(session), scope).join());
+          () -> resolver.verifyAndResolve(
+              "untrusted", request(session), AUTHORIZATION_BARRIER_GENERATION, scope).join());
       assertEquals(BackendFailure.Category.PERMISSION,
           ((BackendFailure) failure.getCause()).category());
       verify(sessions, never()).resolveByDigest(any(), any());

@@ -202,8 +202,8 @@ class MutationOwnerLaneTest {
       var identity = new AuthorizedBackendIdentity("provider", "fixture", "context",
           new AuthenticationScope(GROUP, "profile"), Set.of(GROUP), 0);
       var receiver = new MutationForwardReceiver(control, new InvocationService(repository),
-          (peer, request, scope) -> CompletableFuture.completedFuture(
-              new MutationForwardReceiver.VerifiedAuthorization(identity, DIGEST)), processor);
+          (peer, request, barrierGeneration, scope) -> CompletableFuture.completedFuture(
+              CommitAuthorizationProofTestSupport.verified(identity, DIGEST, barrierGeneration)), processor);
       lane = clock == null ? new MutationOwnerLane(GROUP, queue, receiver)
           : new MutationOwnerLane(GROUP, queue, receiver, clock::get);
     }

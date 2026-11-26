@@ -55,7 +55,8 @@ public final class InvocationResultResolver {
     private final boolean changed;
     private final ResultCatalog.RetainedResult payload;
 
-    private ResolvedTransaction(long revision, boolean changed, ResultCatalog.RetainedResult payload) {
+    /** Value form of an already-resolved decision; only the resolver attributes it to an invocation. */
+    public ResolvedTransaction(long revision, boolean changed, ResultCatalog.RetainedResult payload) {
       this.revision = revision;
       this.changed = changed;
       this.payload = Objects.requireNonNull(payload, "payload");

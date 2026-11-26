@@ -2,9 +2,14 @@ package io.etcdhbase.hbase.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.etcdhbase.core.auth.AuthDeploymentRegistry;
 import io.etcdhbase.core.auth.AuthSession;
+import io.etcdhbase.core.auth.AuthorizationRevocation;
+import io.etcdhbase.core.auth.RegistryAuthConfigurationStore;
+import io.etcdhbase.core.auth.RegistryRevocationStore;
 import io.etcdhbase.core.auth.AuthSlot;
 import io.etcdhbase.core.auth.CredentialEnvelope;
 import io.etcdhbase.core.auth.SubjectAuthority;
@@ -17,7 +22,9 @@ import io.etcdhbase.spi.identity.AuthenticationScope;
 import io.etcdhbase.spi.identity.BackendCredentials;
 import io.etcdhbase.spi.salt.HashSaltStrategy;
 import io.etcdhbase.spi.salt.SaltProfile;
+import java.util.List;
 import java.time.Duration;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.hbase.TableName;
 import org.junit.jupiter.api.Test;
@@ -48,6 +55,7 @@ class HBaseAuthControlIT {
             .get(30, TimeUnit.SECONDS);
         var store = HBaseAuthSessionStore.open(provider, operator, binding, scope)
             .get(30, TimeUnit.SECONDS);
+        verifyRegistryCasAndProjections(store, scope);
 
         AuthSession session = session();
         assertTrue(store.createSessionIfAbsent(session, scope).toCompletableFuture()
@@ -76,10 +84,28 @@ class HBaseAuthControlIT {
             session.authorizationGeneration(), SubjectAuthority.State.ACTIVE);
         assertTrue(store.createAuthorityIfAbsent(authority, scope).toCompletableFuture()
             .get(10, TimeUnit.SECONDS));
-        SubjectAuthority revoked = new SubjectAuthority(authority.subjectDigest(), TRUST_DOMAIN,
-            authority.providerId(), SCOPE, authority.credentialGeneration(),
-            authority.authorizationGeneration() + 1, SubjectAuthority.State.REVOKED);
-        assertTrue(store.compareAndSetAuthority(authority, revoked, scope).toCompletableFuture()
+        SubjectAuthority revoking = authority.beginRevocation(
+            authority.credentialGeneration() + 1, authority.authorizationGeneration() + 1);
+        assertTrue(store.compareAndSetAuthority(authority, revoking, scope).toCompletableFuture()
+            .get(10, TimeUnit.SECONDS));
+        SubjectAuthority targeted = revoking.assignRevocationBarrierTarget(1);
+        assertTrue(store.compareAndSetAuthority(revoking, targeted, scope).toCompletableFuture()
+            .get(10, TimeUnit.SECONDS));
+        SubjectAuthority installed = targeted.markRevocationInstalled(SCOPE.tableGroupId(), 1);
+        assertTrue(store.compareAndSetAuthority(targeted, installed, scope).toCompletableFuture()
+            .get(10, TimeUnit.SECONDS));
+        SubjectAuthority lowerGenerationTerminal = new SubjectAuthority(
+            authority.subjectDigest(), TRUST_DOMAIN, authority.providerId(), SCOPE,
+            authority.credentialGeneration(), authority.authorizationGeneration(),
+            SubjectAuthority.State.REVOKED);
+        ExecutionException rejectedTransition = assertThrows(ExecutionException.class,
+            () -> store.compareAndSetAuthority(installed, lowerGenerationTerminal, scope)
+                .toCompletableFuture().get(10, TimeUnit.SECONDS));
+        assertEquals(IllegalArgumentException.class, rejectedTransition.getCause().getClass());
+        assertEquals(installed, store.readAuthority(authority.subjectDigest(), scope)
+            .toCompletableFuture().get(10, TimeUnit.SECONDS).orElseThrow());
+        SubjectAuthority revoked = installed.finishRevocation(SubjectAuthority.State.REVOKED);
+        assertTrue(store.compareAndSetAuthority(installed, revoked, scope).toCompletableFuture()
             .get(10, TimeUnit.SECONDS));
         assertEquals(revoked, store.readAuthority(authority.subjectDigest(), scope)
             .toCompletableFuture().get(10, TimeUnit.SECONDS).orElseThrow());
@@ -93,6 +119,32 @@ class HBaseAuthControlIT {
             .get(10, TimeUnit.SECONDS).isEmpty());
       }
     }
+  }
+
+  /** Exercises the storage primitive, not installation of a business commit barrier. */
+  private static void verifyRegistryCasAndProjections(HBaseAuthSessionStore store,
+      RequestScope scope) throws Exception {
+    var digest = ByteKey.copyOf(new byte[32]);
+    var group = new AuthDeploymentRegistry.Group(SCOPE.tableGroupId(), "hbase-provider", "realm",
+        SCOPE.connectionProfileId(), digest, digest, true);
+    var initial = AuthDeploymentRegistry.initial(TRUST_DOMAIN, List.of(group));
+    assertTrue(store.createRegistryIfAbsent(initial, scope).toCompletableFuture().get(10, TimeUnit.SECONDS));
+    assertFalse(store.createRegistryIfAbsent(initial, scope).toCompletableFuture().get(10, TimeUnit.SECONDS));
+    assertEquals(initial, store.readRegistry(scope).toCompletableFuture().get(10, TimeUnit.SECONDS).orElseThrow());
+    var configuration = new RegistryAuthConfigurationStore(store)
+        .readConfiguration(SCOPE.tableGroupId(), scope).toCompletableFuture().get(10, TimeUnit.SECONDS).orElseThrow();
+    assertEquals(initial.configurationGeneration(), configuration.revision());
+    assertEquals(group.configurationDigest(), configuration.configurationDigest());
+    assertTrue(configuration.enabled());
+    var operation = AuthorizationRevocation.start(ByteKey.copyOf(new byte[16]), digest,
+        group.providerId(), group.backendIdentityDomain(), 1, 2, 1,
+        List.of(new AuthorizationRevocation.TargetIdentity(SCOPE.tableGroupId(), digest, digest)));
+    var reserved = initial.beginRevocation(operation);
+    assertTrue(store.compareAndSetRegistry(initial, reserved, scope).toCompletableFuture().get(10, TimeUnit.SECONDS));
+    assertFalse(store.compareAndSetRegistry(initial, reserved, scope).toCompletableFuture().get(10, TimeUnit.SECONDS));
+    assertEquals(reserved, store.readRegistry(scope).toCompletableFuture().get(10, TimeUnit.SECONDS).orElseThrow());
+    assertEquals(operation, new RegistryRevocationStore(store).readRevocation(operation.operationId(), scope)
+        .toCompletableFuture().get(10, TimeUnit.SECONDS).orElseThrow());
   }
 
   private static AuthSession session() {

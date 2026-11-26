@@ -33,28 +33,34 @@ public final class CommitPublisher {
   }
 
   /**
-   * Returns only a publication observation. A selected result is pending until materialization and
-   * finalization complete; it is never an etcd success response by itself.
+   * Publishes with a captured proof that is revalidated before every new selection CAS. Returns
+   * only an observation: a selected result is not an etcd success until finalization completes.
    */
   public CompletableFuture<CommitOutcomeResolver.Resolution> publish(
       InvocationBinding invocation,
       CommitOwnerService.OwnerToken owner,
       ManifestRoot manifest,
-      RequestScope requestScope) {
-    return publish(invocation, owner, manifest, requestScope, () -> {});
+      RequestScope requestScope,
+      CommitAuthorizationProof authorization) {
+    return publish(invocation, owner, manifest, requestScope, authorization, () -> {});
   }
 
-  /** Runs the condition immediately before each new selection attempt, never during resolution. */
+  /**
+   * Runs the local selection condition and revalidates authorization immediately before each new
+   * selection attempt. Neither check runs while resolving an already selected invocation.
+   */
   public CompletableFuture<CommitOutcomeResolver.Resolution> publish(
       InvocationBinding invocation,
       CommitOwnerService.OwnerToken owner,
       ManifestRoot manifest,
       RequestScope requestScope,
+      CommitAuthorizationProof authorization,
       Runnable beforeSelection) {
     Objects.requireNonNull(invocation, "invocation");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(manifest, "manifest");
     Objects.requireNonNull(requestScope, "requestScope");
+    Objects.requireNonNull(authorization, "authorization");
     Objects.requireNonNull(beforeSelection, "beforeSelection");
     if (invocation.preparedOwnerEpoch() != owner.epoch()) {
       return CompletableFuture.failedFuture(
@@ -71,7 +77,7 @@ public final class CommitPublisher {
                 new IllegalStateException("durable invocation does not own the sealed plan"));
           }
           return handoff.transfer(durable, requestScope, serviceScope ->
-              attempt(durable, owner, verified, serviceScope, beforeSelection, 0)
+              attempt(durable, owner, verified, serviceScope, authorization, beforeSelection, 0)
                   .thenCompose(publication -> finalizer.finish(durable, publication, serviceScope)));
         }))
         .exceptionallyCompose(CommitPublisher::failed);
@@ -82,6 +88,7 @@ public final class CommitPublisher {
       CommitOwnerService.OwnerToken owner,
       CommitPlanVerifier.VerifiedPlan verified,
       RequestScope scope,
+      CommitAuthorizationProof authorization,
       Runnable beforeSelection,
       int attempt) {
     if (attempt >= MAX_CAS_ATTEMPTS) {
@@ -111,17 +118,56 @@ public final class CommitPublisher {
           || state.publication().isPresent()) {
         return outcomes.resolve(invocation, scope);
       }
-      PublicationSlot slot = new PublicationSlot(invocation.transactionId(), invocation.invocationId(),
-          owner.epoch(), invocation.baseSequence(), invocation.baseRevision(),
-          Math.addExact(invocation.baseSequence(), 1),
-          Math.addExact(invocation.baseRevision(), manifest.containsKeyChanges() ? 1 : 0),
-          manifest.containsKeyChanges(), manifest.systemIdentity(), manifest.digest());
-      CommitState selected = state.publish(slot);
-      beforeSelection.run();
-      return control.compareAndSet(observed, selected, scope)
-          .handle((updated, failure) -> new CasResult(updated, failure))
-          .thenCompose(result -> resolveAttempt(invocation, owner, verified, scope, beforeSelection, attempt, result));
+      if (!state.supportsAuthorizationBarrier()) {
+        return CompletableFuture.failedFuture(
+            new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+      }
+      if (scope.isDeadlineExceeded() || scope.isClosed()) {
+        return CompletableFuture.failedFuture(scopeFailure(scope));
+      }
+      return authorization.reauthorize(state.authorizationBarrierGeneration(), scope)
+          .thenCompose(reauthorized -> {
+            if (scope.isDeadlineExceeded() || scope.isClosed()) {
+              return CompletableFuture.failedFuture(scopeFailure(scope));
+            }
+            if (!reauthorized.proofIdentity().equals(authorization.proofIdentity())
+                || reauthorized.authorizationBarrierGeneration()
+                    != state.authorizationBarrierGeneration()) {
+              return CompletableFuture.failedFuture(
+                  new IllegalStateException("authorization proof changed during revalidation"));
+            }
+            return select(invocation, owner, verified, scope, reauthorized, beforeSelection,
+                attempt, observed, state);
+          });
     });
+  }
+
+  private CompletableFuture<CommitOutcomeResolver.Resolution> select(
+      InvocationBinding invocation,
+      CommitOwnerService.OwnerToken owner,
+      CommitPlanVerifier.VerifiedPlan verified,
+      RequestScope scope,
+      CommitAuthorizationProof authorization,
+      Runnable beforeSelection,
+      int attempt,
+      ControlSnapshot observed,
+      CommitState state) {
+    if (!state.supportsAuthorizationBarrier()
+        || authorization.authorizationBarrierGeneration() != state.authorizationBarrierGeneration()) {
+      return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+    }
+    ManifestRoot manifest = verified.root();
+    PublicationSlot slot = new PublicationSlot(invocation.transactionId(), invocation.invocationId(),
+        owner.epoch(), invocation.baseSequence(), invocation.baseRevision(),
+        Math.addExact(invocation.baseSequence(), 1),
+        Math.addExact(invocation.baseRevision(), manifest.containsKeyChanges() ? 1 : 0),
+        manifest.containsKeyChanges(), manifest.systemIdentity(), manifest.digest());
+    CommitState selected = state.publish(slot);
+    beforeSelection.run();
+    return control.compareAndSet(observed, selected, scope)
+        .handle((updated, failure) -> new CasResult(updated, failure))
+        .thenCompose(result -> resolveAttempt(invocation, owner, verified, scope, authorization,
+            beforeSelection, attempt, result));
   }
 
   private CompletableFuture<CommitOutcomeResolver.Resolution> resolveAttempt(
@@ -129,6 +175,7 @@ public final class CommitPublisher {
       CommitOwnerService.OwnerToken owner,
       CommitPlanVerifier.VerifiedPlan verified,
       RequestScope scope,
+      CommitAuthorizationProof authorization,
       Runnable beforeSelection,
       int attempt,
       CasResult result) {
@@ -151,7 +198,7 @@ public final class CommitPublisher {
           && state.publishedSequence() == invocation.baseSequence()
           && state.publishedRevision() == invocation.baseRevision()
           && state.publication().isEmpty()) {
-        return attempt(invocation, owner, verified, scope, beforeSelection, attempt + 1);
+        return attempt(invocation, owner, verified, scope, authorization, beforeSelection, attempt + 1);
       }
       return outcomes.resolve(invocation, scope);
     });
@@ -159,6 +206,11 @@ public final class CommitPublisher {
 
   private static <T> CompletableFuture<T> failed(Throwable failure) {
     return CompletableFuture.failedFuture(CompletionFailures.unwrapCompletion(failure));
+  }
+
+  private static BackendFailure scopeFailure(RequestScope scope) {
+    return new BackendFailure(scope.isDeadlineExceeded()
+        ? BackendFailure.Category.TIMEOUT : BackendFailure.Category.CANCELLED);
   }
 
   private static boolean isUnknown(BackendFailure.Category category) {

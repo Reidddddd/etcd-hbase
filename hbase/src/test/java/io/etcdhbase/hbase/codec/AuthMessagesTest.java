@@ -29,6 +29,18 @@ class AuthMessagesTest {
     SubjectAuthority authority = new SubjectAuthority(key(32, 8), "milvus", "hbase-provider",
         SCOPE, 3, 5, SubjectAuthority.State.ACTIVE);
     assertEquals(authority, AuthMessages.decodeAuthority(AuthMessages.encode(authority)));
+
+    SubjectAuthority revoking = authority.beginRevocation(4, 6);
+    assertEquals(revoking, AuthMessages.decodeAuthority(AuthMessages.encode(revoking)));
+    SubjectAuthority targeted = revoking.assignRevocationBarrierTarget(7);
+    assertEquals(targeted, AuthMessages.decodeAuthority(AuthMessages.encode(targeted)));
+    SubjectAuthority installed = targeted.markRevocationInstalled("group", 7);
+    assertEquals(installed, AuthMessages.decodeAuthority(AuthMessages.encode(installed)));
+
+    SubjectAuthority deployment = authority.beginDeploymentRevocation(key(16, 9), 2, 1, 4)
+        .assignRevocationBarrierTarget(8).markRevocationInstalled("group", 8)
+        .finishRevocation(SubjectAuthority.State.ACTIVE);
+    assertEquals(deployment, AuthMessages.decodeAuthority(AuthMessages.encode(deployment)));
   }
 
   @Test

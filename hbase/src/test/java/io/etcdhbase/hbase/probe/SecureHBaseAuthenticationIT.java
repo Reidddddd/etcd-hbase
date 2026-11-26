@@ -172,11 +172,25 @@ class SecureHBaseAuthenticationIT {
     AuthorizedBackendIdentity identity;
     try {
       identity = authenticate(original, principal, TemporaryKerberosSecurity.PASSWORD.toCharArray());
+      var held = original.borrow(identity);
       var connection = await(original.connectionFor(identity).toCompletableFuture());
-      var get = new Get(new byte[] {'r'}).addFamily(new byte[] {'d'});
-      await(connection.getTable(table).get(get));
-      await(adminConnection.getAdmin().revoke(new UserPermission(user, permission)));
-      awaitBackendReadDenial(connection, get);
+      try {
+        await(original.verifyCurrentAccess(identity).toCompletableFuture());
+        var get = new Get(new byte[] {'r'}).addFamily(new byte[] {'d'});
+        await(connection.getTable(table).get(get));
+        await(adminConnection.getAdmin().revoke(new UserPermission(user, permission)));
+        awaitBackendReadDenial(connection, get);
+        var recheckFailure = assertThrows(ExecutionException.class,
+            () -> original.verifyCurrentAccess(identity).toCompletableFuture().get(30, TimeUnit.SECONDS));
+        assertEquals(Reason.INSUFFICIENT_PERMISSION,
+            assertInstanceOf(BackendIdentityException.class, recheckFailure.getCause()).reason());
+        assertThrows(BackendIdentityException.class, () -> original.borrow(identity));
+        assertFalse(connection.isClosed());
+      } finally {
+        held.release().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      }
+      original.retire(identity).toCompletableFuture().get(30, TimeUnit.SECONDS);
+      assertTrue(connection.isClosed());
       assertAuthenticationFailure(HBaseAuthenticators.kerberosPassword(), principal,
           TemporaryKerberosSecurity.PASSWORD.toCharArray(), Reason.INSUFFICIENT_PERMISSION);
     } finally {

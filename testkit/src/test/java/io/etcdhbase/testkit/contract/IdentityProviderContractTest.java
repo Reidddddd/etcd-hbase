@@ -79,6 +79,21 @@ class IdentityProviderContractTest {
   }
 
   @Test
+  void legacyProviderDefaultsDoNotClaimBorrowOrRetirementSucceeded() {
+    var provider = new ExtensionProvider(null);
+    AuthorizedBackendIdentity identity;
+    try (var credentials = new BackendCredentials("fixture-user", "fixture-secret".toCharArray())) {
+      identity = provider.authenticate(credentials, SCOPE).toCompletableFuture().join();
+    }
+
+    assertThrows(UnsupportedOperationException.class, () -> provider.borrow(identity));
+    var retirement = assertThrows(
+        CompletionException.class, () -> provider.retire(identity).toCompletableFuture().join());
+    assertTrue(retirement.getCause() instanceof UnsupportedOperationException);
+    provider.close();
+  }
+
+  @Test
   void wrongScopeCannotBecomeAnAuthorizedIdentity() {
     try (var provider = new ExtensionProvider(null);
         var credentials = new BackendCredentials("fixture-user", "fixture-secret".toCharArray())) {

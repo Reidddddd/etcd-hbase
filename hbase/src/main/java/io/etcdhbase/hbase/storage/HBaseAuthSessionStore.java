@@ -1,6 +1,9 @@
 package io.etcdhbase.hbase.storage;
 
 import io.etcdhbase.core.auth.AuthSession;
+import io.etcdhbase.core.auth.AuthDeploymentRegistry;
+import io.etcdhbase.core.auth.AuthDeploymentRegistryStore;
+import io.etcdhbase.core.auth.AuthSessionException;
 import io.etcdhbase.core.auth.AuthSessionStore;
 import io.etcdhbase.core.auth.AuthSlot;
 import io.etcdhbase.core.auth.SubjectAuthority;
@@ -8,6 +11,7 @@ import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.AuthMessages;
+import io.etcdhbase.hbase.codec.AuthDeploymentRegistryMessages;
 import io.etcdhbase.hbase.connection.HBaseRequestContext;
 import io.etcdhbase.hbase.error.HBaseFailures;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
@@ -30,14 +34,15 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 
 /** Strong-read, exact-byte CAS store for the isolated J50 authentication-control table. */
-public final class HBaseAuthSessionStore implements AuthSessionStore {
+public final class HBaseAuthSessionStore
+    implements AuthSessionStore, AuthDeploymentRegistryStore {
   public static final int MAX_RECORD_BYTES = AuthMessages.MAX_RECORD_BYTES;
   private static final byte[] VALUE = {'r'};
 
   private final AsyncConnection connection;
   private final AuthControlBinding binding;
 
-  private HBaseAuthSessionStore(AsyncConnection connection, AuthControlBinding binding) {
+  HBaseAuthSessionStore(AsyncConnection connection, AuthControlBinding binding) {
     this.connection = Objects.requireNonNull(connection, "connection");
     this.binding = Objects.requireNonNull(binding, "binding");
   }
@@ -58,6 +63,48 @@ public final class HBaseAuthSessionStore implements AuthSessionStore {
               return new HBaseAuthSessionStore(connection, binding);
             }))).exceptionallyCompose(failure -> CompletableFuture.failedFuture(
                 HBaseFailures.classify(failure)));
+  }
+
+  @Override
+  public CompletionStage<Optional<AuthDeploymentRegistry>> readRegistry(RequestScope scope) {
+    byte[] row = binding.keyCodec().deploymentRegistry(binding.trustDomain());
+    return execute(scope, (table, timeout) -> table.get(new Get(row)
+        .setConsistency(Consistency.STRONG).addColumn(binding.family(), VALUE)))
+        .thenApply(result -> {
+          try {
+            return decode(result, row).map(bytes -> {
+              var registry = AuthDeploymentRegistryMessages.decode(bytes);
+              if (!registry.trustDomain().equals(binding.trustDomain())) throw invalidRecord();
+              return registry;
+            });
+          } catch (IllegalArgumentException malformed) {
+            throw new AuthSessionException(AuthSessionException.Reason.DEPENDENCY_UNAVAILABLE);
+          }
+        });
+  }
+
+  @Override
+  public CompletionStage<Boolean> createRegistryIfAbsent(AuthDeploymentRegistry initial,
+      RequestScope scope) {
+    Objects.requireNonNull(initial, "initial");
+    if (!initial.trustDomain().equals(binding.trustDomain()) || initial.configurationGeneration() != 1
+        || initial.revision() != 1 || initial.revocation() != null) {
+      return CompletableFuture.failedFuture(new IllegalArgumentException("invalid initial deployment registry"));
+    }
+    return create(binding.keyCodec().deploymentRegistry(binding.trustDomain()),
+        AuthDeploymentRegistryMessages.encode(initial), scope);
+  }
+
+  @Override
+  public CompletionStage<Boolean> compareAndSetRegistry(AuthDeploymentRegistry observed,
+      AuthDeploymentRegistry replacement, RequestScope scope) {
+    Objects.requireNonNull(observed, "observed");
+    if (!observed.trustDomain().equals(binding.trustDomain()) || !observed.permitsReplacement(replacement)) {
+      return CompletableFuture.failedFuture(new IllegalArgumentException("invalid deployment registry transition"));
+    }
+    return compareAndSet(binding.keyCodec().deploymentRegistry(binding.trustDomain()),
+        AuthDeploymentRegistryMessages.encode(observed), AuthDeploymentRegistryMessages.encode(replacement),
+        scope);
   }
 
   @Override
@@ -166,9 +213,11 @@ public final class HBaseAuthSessionStore implements AuthSessionStore {
   public CompletionStage<Boolean> createAuthorityIfAbsent(
       SubjectAuthority authority, RequestScope scope) {
     Objects.requireNonNull(authority, "authority");
-    if (!authority.trustDomain().equals(binding.trustDomain())) {
+    if (!authority.trustDomain().equals(binding.trustDomain())
+        || authority.state() != SubjectAuthority.State.ACTIVE
+        || !authority.revocationTargets().isEmpty()) {
       return CompletableFuture.failedFuture(new IllegalArgumentException(
-          "authority trust domain does not match its auth-control table"));
+          "new auth authority must be active in its bound trust domain"));
     }
     return create(binding.keyCodec().authority(authority.subjectDigest()),
         AuthMessages.encode(authority), scope);
@@ -179,14 +228,9 @@ public final class HBaseAuthSessionStore implements AuthSessionStore {
       SubjectAuthority observed, SubjectAuthority replacement, RequestScope scope) {
     Objects.requireNonNull(observed, "observed");
     Objects.requireNonNull(replacement, "replacement");
-    if (!observed.subjectDigest().equals(replacement.subjectDigest())
-        || !observed.trustDomain().equals(replacement.trustDomain())
-        || !observed.providerId().equals(replacement.providerId())
-        || !observed.scope().equals(replacement.scope())
-        || replacement.authorizationGeneration() <= observed.authorizationGeneration()
-        || replacement.credentialGeneration() < observed.credentialGeneration()) {
+    if (!observed.allowsTransitionTo(replacement)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException(
-          "authority CAS must preserve scope and advance generations"));
+          "authority CAS must preserve scope and follow a safe revocation transition"));
     }
     return compareAndSet(binding.keyCodec().authority(observed.subjectDigest()),
         AuthMessages.encode(observed), AuthMessages.encode(replacement), scope);

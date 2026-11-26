@@ -3,10 +3,18 @@ package io.etcdhbase.server.commit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import io.etcdhbase.core.auth.AuthSession;
 import io.etcdhbase.core.auth.AuthSessionException;
+import io.etcdhbase.core.auth.CredentialEnvelope;
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.server.auth.AuthSessionService;
 import io.etcdhbase.spi.identity.AuthenticationScope;
@@ -14,6 +22,8 @@ import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import io.etcdhbase.spi.identity.BackendIdentityProvider;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class AuthenticatedRequestIdentityResolverTest {
@@ -64,6 +74,89 @@ class AuthenticatedRequestIdentityResolverTest {
 
       assertEquals(AuthSessionException.Reason.DEPENDENCY_UNAVAILABLE,
           ((AuthSessionException) failure.getCause()).reason());
+    }
+  }
+
+  @Test
+  void revalidationRetiresOnlyOnExplicitSessionRejection() {
+    var failures = java.util.List.of(
+        new AuthSessionException(AuthSessionException.Reason.INVALID_TOKEN),
+        new AuthSessionException(AuthSessionException.Reason.DEPENDENCY_UNAVAILABLE),
+        new BackendFailure(BackendFailure.Category.PERMISSION));
+    for (var recheckFailure : failures) {
+      var sessions = mock(AuthSessionService.class);
+      var held = mock(AuthSessionService.ResolvedIdentity.class);
+      var session = mock(AuthSession.class);
+      var digest = ByteKey.copyOf(new byte[32]);
+      when(session.tokenDigest()).thenReturn(digest);
+      when(held.session()).thenReturn(session);
+      when(sessions.resolveByDigest(eq(digest), any(RequestScope.class)))
+          .thenReturn(CompletableFuture.failedFuture(recheckFailure));
+      var identity = identity("hbase-provider");
+      var requestIdentity = new AuthenticatedRequestIdentityResolver.ResolvedRequestIdentity(
+          identity, digest, digest, held);
+      try (RequestScope scope = RequestScope.withoutDeadline()) {
+        assertThrows(java.util.concurrent.CompletionException.class,
+            () -> resolver(identity, sessions).revalidate(requestIdentity, scope).join());
+        if (recheckFailure instanceof AuthSessionException auth
+            && auth.reason() == AuthSessionException.Reason.INVALID_TOKEN) {
+          verify(held).retire();
+        } else {
+          verify(held, never()).retire();
+        }
+      }
+    }
+  }
+
+  @Test
+  void rejectedStreamRevalidationInvalidatesTheCapturedReadAuthorization() {
+    var sessions = mock(AuthSessionService.class);
+    var held = mock(AuthSessionService.ResolvedIdentity.class);
+    var envelope = new CredentialEnvelope("key-1", CredentialEnvelope.CURRENT_AAD_VERSION,
+        new byte[CredentialEnvelope.NONCE_BYTES], new byte[CredentialEnvelope.TAG_BYTES]);
+    var session = new AuthSession(ByteKey.copyOf(new byte[16]), ByteKey.copyOf(new byte[32]),
+        ByteKey.copyOf(new byte[32]), "domain", "hbase-provider", SCOPE,
+        ByteKey.copyOf(new byte[32]), 0, 1, 1, 2, 0, 1, AuthSession.Status.ACTIVE, envelope);
+    var identity = identity("hbase-provider");
+    var invalidated = new AtomicReference<ByteKey>();
+    when(held.session()).thenReturn(session);
+    when(sessions.resolveByDigest(eq(session.tokenDigest()), any(RequestScope.class)))
+        .thenReturn(CompletableFuture.failedFuture(
+            new AuthSessionException(AuthSessionException.Reason.INVALID_TOKEN)));
+    var resolver = new AuthenticatedRequestIdentityResolver(TABLE_GROUP, identity,
+        ByteKey.copyOf(new byte[32]), sessions, invalidated::set);
+    var captured = new AuthenticatedRequestIdentityResolver.ResolvedRequestIdentity(identity,
+        AuthorizationScopeDigest.fromIdentity(identity), ByteKey.copyOf(new byte[32]), held);
+    try (RequestScope scope = RequestScope.withoutDeadline()) {
+      assertThrows(java.util.concurrent.CompletionException.class,
+          () -> resolver.revalidate(captured, scope).join());
+      assertEquals(captured.readAuthorizationDigest(), invalidated.get());
+      verify(held).retire();
+    }
+  }
+
+  @Test
+  void unavailableRevalidationDoesNotInvalidateOrRetireAnIdentity() {
+    var sessions = mock(AuthSessionService.class);
+    var held = mock(AuthSessionService.ResolvedIdentity.class);
+    var session = mock(AuthSession.class);
+    var digest = ByteKey.copyOf(new byte[32]);
+    var invalidated = new AtomicReference<ByteKey>();
+    when(session.tokenDigest()).thenReturn(digest);
+    when(held.session()).thenReturn(session);
+    when(sessions.resolveByDigest(eq(digest), any(RequestScope.class)))
+        .thenReturn(CompletableFuture.failedFuture(
+            new AuthSessionException(AuthSessionException.Reason.DEPENDENCY_UNAVAILABLE)));
+    var identity = identity("hbase-provider");
+    var resolver = new AuthenticatedRequestIdentityResolver(TABLE_GROUP, identity, digest,
+        sessions, invalidated::set);
+    var captured = new AuthenticatedRequestIdentityResolver.ResolvedRequestIdentity(
+        identity, digest, digest, held);
+    try (RequestScope scope = RequestScope.withoutDeadline()) {
+      assertThrows(java.util.concurrent.CompletionException.class,
+          () -> resolver.revalidate(captured, scope).join());
+      assertNull(invalidated.get());
+      verify(held, never()).retire();
     }
   }
 

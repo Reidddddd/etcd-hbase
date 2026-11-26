@@ -30,6 +30,8 @@ public final class CommitState {
   private final Optional<ByteKey> eventRegistryNamespace;
   private final Optional<ByteKey> pendingEventRegistryNamespace;
   private final int eventRegistryAttempts;
+  private final boolean authorizationBarrierEnabled;
+  private final long authorizationBarrierGeneration;
 
   private CommitState(
       int formatVersion,
@@ -46,7 +48,7 @@ public final class CommitState {
       long compactRevision) {
     this(formatVersion, profileFingerprint, ownerInstance, ownerEpoch, ownerLeaseDeadlineEpochMillis,
         stateVersion, publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
-        publication, compactRevision, Optional.empty(), Optional.empty(), 0);
+        publication, compactRevision, Optional.empty(), Optional.empty(), 0, false, 0);
   }
 
   private CommitState(int formatVersion, ByteKey profileFingerprint, Optional<String> ownerInstance,
@@ -54,6 +56,18 @@ public final class CommitState {
       long publishedRevision, long finalizedSequence, long finalizedRevision,
       Optional<PublicationSlot> publication, long compactRevision, Optional<ByteKey> eventRegistryNamespace,
       Optional<ByteKey> pendingEventRegistryNamespace, int eventRegistryAttempts) {
+    this(formatVersion, profileFingerprint, ownerInstance, ownerEpoch, ownerLeaseDeadlineEpochMillis,
+        stateVersion, publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
+        publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
+        eventRegistryAttempts, false, 0);
+  }
+
+  private CommitState(int formatVersion, ByteKey profileFingerprint, Optional<String> ownerInstance,
+      long ownerEpoch, long ownerLeaseDeadlineEpochMillis, long stateVersion, long publishedSequence,
+      long publishedRevision, long finalizedSequence, long finalizedRevision,
+      Optional<PublicationSlot> publication, long compactRevision, Optional<ByteKey> eventRegistryNamespace,
+      Optional<ByteKey> pendingEventRegistryNamespace, int eventRegistryAttempts,
+      boolean authorizationBarrierEnabled, long authorizationBarrierGeneration) {
     this.profileFingerprint = Objects.requireNonNull(profileFingerprint, "profileFingerprint");
     this.ownerInstance = Objects.requireNonNull(ownerInstance, "ownerInstance");
     this.publication = Objects.requireNonNull(publication, "publication");
@@ -66,7 +80,7 @@ public final class CommitState {
         && formatVersion != EVENT_INDEX_FORMAT_VERSION && formatVersion != EVENT_REGISTRY_FORMAT_VERSION) {
       throw new IllegalArgumentException("unknown commit control format");
     }
-    if ((formatVersion == EVENT_REGISTRY_FORMAT_VERSION) != eventRegistryNamespace.isPresent()
+    if ((formatVersion >= EVENT_REGISTRY_FORMAT_VERSION) != eventRegistryNamespace.isPresent()
         || eventRegistryNamespace.filter(value -> value.length() != 16).isPresent()
         || pendingEventRegistryNamespace.filter(value -> value.length() != 16).isPresent()
         || eventRegistryAttempts < 0 || eventRegistryAttempts > MAX_EVENT_REGISTRY_ATTEMPTS
@@ -74,11 +88,15 @@ public final class CommitState {
             && (eventRegistryAttempts != 0 || pendingEventRegistryNamespace.isPresent())
         || formatVersion == EVENT_INDEX_FORMAT_VERSION
             && (eventRegistryAttempts > 0) != pendingEventRegistryNamespace.isPresent()
-        || formatVersion == EVENT_REGISTRY_FORMAT_VERSION
-            && (eventRegistryAttempts == 0 || pendingEventRegistryNamespace.isPresent())) {
-      throw new IllegalArgumentException("invalid event registry namespace");
+        || formatVersion >= EVENT_REGISTRY_FORMAT_VERSION
+            && (eventRegistryAttempts == 0 || pendingEventRegistryNamespace.isPresent())
+        || authorizationBarrierGeneration < 0
+        || !authorizationBarrierEnabled && authorizationBarrierGeneration != 0) {
+      throw new IllegalArgumentException("invalid event registry or authorization barrier state");
     }
     this.eventRegistryAttempts = eventRegistryAttempts;
+    this.authorizationBarrierEnabled = authorizationBarrierEnabled;
+    this.authorizationBarrierGeneration = authorizationBarrierGeneration;
     this.formatVersion = formatVersion;
     validateProfileFingerprint(profileFingerprint);
     validateCountersAndWatermarks(ownerEpoch, stateVersion, publishedSequence, publishedRevision,
@@ -141,11 +159,38 @@ public final class CommitState {
         pendingEventRegistryNamespace, eventRegistryAttempts);
   }
 
+  public static CommitState restore(int formatVersion, ByteKey profileFingerprint,
+      Optional<String> ownerInstance, long ownerEpoch, long ownerLeaseDeadlineEpochMillis,
+      long stateVersion, long publishedSequence, long publishedRevision, long finalizedSequence,
+      long finalizedRevision, Optional<PublicationSlot> publication, long compactRevision,
+      Optional<ByteKey> eventRegistryNamespace, Optional<ByteKey> pendingEventRegistryNamespace,
+      int eventRegistryAttempts, long authorizationBarrierGeneration) {
+    return new CommitState(formatVersion, profileFingerprint, ownerInstance, ownerEpoch,
+        ownerLeaseDeadlineEpochMillis, stateVersion, publishedSequence, publishedRevision,
+        finalizedSequence, finalizedRevision, publication, compactRevision, eventRegistryNamespace,
+        pendingEventRegistryNamespace, eventRegistryAttempts, true, authorizationBarrierGeneration);
+  }
+
+  public static CommitState restore(int formatVersion, ByteKey profileFingerprint,
+      Optional<String> ownerInstance, long ownerEpoch, long ownerLeaseDeadlineEpochMillis,
+      long stateVersion, long publishedSequence, long publishedRevision, long finalizedSequence,
+      long finalizedRevision, Optional<PublicationSlot> publication, long compactRevision,
+      Optional<ByteKey> eventRegistryNamespace, Optional<ByteKey> pendingEventRegistryNamespace,
+      int eventRegistryAttempts, boolean authorizationBarrierEnabled,
+      long authorizationBarrierGeneration) {
+    return new CommitState(formatVersion, profileFingerprint, ownerInstance, ownerEpoch,
+        ownerLeaseDeadlineEpochMillis, stateVersion, publishedSequence, publishedRevision,
+        finalizedSequence, finalizedRevision, publication, compactRevision, eventRegistryNamespace,
+        pendingEventRegistryNamespace, eventRegistryAttempts, authorizationBarrierEnabled,
+        authorizationBarrierGeneration);
+  }
+
   public int formatVersion() { return formatVersion; }
   public boolean supportsAuxiliaryRecords() { return formatVersion >= AUXILIARY_FORMAT_VERSION; }
   public boolean supportsLeaseBindings() { return formatVersion >= LEASE_BINDING_FORMAT_VERSION; }
   public boolean supportsLeaseExpiryCheckpoints() { return formatVersion >= LEASE_EXPIRY_FORMAT_VERSION; }
   public boolean supportsEventRevisionIndex() { return formatVersion >= EVENT_INDEX_FORMAT_VERSION; }
+  public boolean supportsAuthorizationBarrier() { return authorizationBarrierEnabled; }
   public ByteKey profileFingerprint() { return profileFingerprint; }
   public Optional<String> ownerInstance() { return ownerInstance; }
   public long ownerEpoch() { return ownerEpoch; }
@@ -160,6 +205,7 @@ public final class CommitState {
   public Optional<ByteKey> eventRegistryNamespace() { return eventRegistryNamespace; }
   public Optional<ByteKey> pendingEventRegistryNamespace() { return pendingEventRegistryNamespace; }
   public int eventRegistryAttempts() { return eventRegistryAttempts; }
+  public long authorizationBarrierGeneration() { return authorizationBarrierGeneration; }
 
   /** Fences the old owner in the same CAS that enables the auxiliary control format. */
   public CommitState upgradeAuxiliaryFormat(String expectedOwner, long expectedEpoch, long nowMillis) {
@@ -170,7 +216,8 @@ public final class CommitState {
     return new CommitState(AUXILIARY_FORMAT_VERSION, profileFingerprint, ownerInstance,
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
-        publication, compactRevision);
+        publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
+        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration);
   }
 
   /** Fences J40 writers before J41 persists Lease binding histories and accounting. */
@@ -184,7 +231,8 @@ public final class CommitState {
     return new CommitState(LEASE_BINDING_FORMAT_VERSION, profileFingerprint, ownerInstance,
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
-        publication, compactRevision);
+        publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
+        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration);
   }
 
   /** Fences J41 owners before J43 persists expiry checkpoints and runs automatic revocation. */
@@ -198,7 +246,8 @@ public final class CommitState {
     return new CommitState(LEASE_EXPIRY_FORMAT_VERSION, profileFingerprint, ownerInstance,
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
-        publication, compactRevision);
+        publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
+        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration);
   }
 
   /** Fences older owners before event indexes become mandatory for new KV commits. */
@@ -211,7 +260,8 @@ public final class CommitState {
     return new CommitState(EVENT_INDEX_FORMAT_VERSION, profileFingerprint, ownerInstance,
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
-        publication, compactRevision);
+        publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
+        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration);
   }
 
   /** Reserves one bounded staging attempt and fences earlier attempts before any staging writes. */
@@ -226,7 +276,8 @@ public final class CommitState {
     return new CommitState(formatVersion, profileFingerprint, ownerInstance,
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision, publication,
-        compactRevision, Optional.empty(), Optional.of(namespace), eventRegistryAttempts + 1);
+        compactRevision, Optional.empty(), Optional.of(namespace), eventRegistryAttempts + 1,
+        authorizationBarrierEnabled, authorizationBarrierGeneration);
   }
 
   /** Selects one fully prepared registry namespace and fences the previous owner in the same CAS. */
@@ -241,7 +292,35 @@ public final class CommitState {
     return new CommitState(EVENT_REGISTRY_FORMAT_VERSION, profileFingerprint, ownerInstance,
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
-        publication, compactRevision, Optional.of(namespace), Optional.empty(), eventRegistryAttempts);
+        publication, compactRevision, Optional.of(namespace), Optional.empty(), eventRegistryAttempts,
+        authorizationBarrierEnabled, authorizationBarrierGeneration);
+  }
+
+  /** Fences older control-row writers before enabling authorization publication barriers. */
+  public CommitState enableAuthorizationBarrier(
+      String expectedOwner, long expectedEpoch, long nowMillis) {
+    requireOwner(expectedOwner, expectedEpoch);
+    if (authorizationBarrierEnabled || publication.isPresent() || ownerLeaseExpired(nowMillis)) {
+      throw new IllegalStateException("control state cannot enable authorization fencing while work is pending");
+    }
+    return new CommitState(formatVersion, profileFingerprint, ownerInstance,
+        Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
+        publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
+        publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
+        eventRegistryAttempts, true, 0);
+  }
+
+  /** Advances the per-table-group authorization fence without changing an existing selection. */
+  public CommitState advanceAuthorizationBarrier(
+      String expectedOwner, long expectedEpoch, long expectedBarrierGeneration) {
+    requireOwner(expectedOwner, expectedEpoch);
+    if (!supportsAuthorizationBarrier()
+        || authorizationBarrierGeneration != expectedBarrierGeneration) {
+      throw new IllegalStateException("authorization barrier generation is stale");
+    }
+    return copy(ownerInstance, ownerEpoch, ownerLeaseDeadlineEpochMillis, nextStateVersion(),
+        publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
+        publication, compactRevision, Math.addExact(authorizationBarrierGeneration, 1));
   }
 
   public boolean ownerLeaseExpired(long nowEpochMillis) {
@@ -320,10 +399,21 @@ public final class CommitState {
       long nextVersion, long nextPublishedSequence, long nextPublishedRevision,
       long nextFinalizedSequence, long nextFinalizedRevision,
       Optional<PublicationSlot> nextPublication, long nextCompactRevision) {
+    return copy(nextOwner, nextEpoch, nextLeaseDeadline, nextVersion, nextPublishedSequence,
+        nextPublishedRevision, nextFinalizedSequence, nextFinalizedRevision, nextPublication,
+        nextCompactRevision, authorizationBarrierGeneration);
+  }
+
+  private CommitState copy(Optional<String> nextOwner, long nextEpoch, long nextLeaseDeadline,
+      long nextVersion, long nextPublishedSequence, long nextPublishedRevision,
+      long nextFinalizedSequence, long nextFinalizedRevision,
+      Optional<PublicationSlot> nextPublication, long nextCompactRevision,
+      long nextAuthorizationBarrierGeneration) {
     return new CommitState(formatVersion, profileFingerprint, nextOwner, nextEpoch, nextLeaseDeadline, nextVersion,
         nextPublishedSequence, nextPublishedRevision, nextFinalizedSequence,
         nextFinalizedRevision, nextPublication, nextCompactRevision, eventRegistryNamespace,
-        pendingEventRegistryNamespace, eventRegistryAttempts);
+        pendingEventRegistryNamespace, eventRegistryAttempts, authorizationBarrierEnabled,
+        nextAuthorizationBarrierGeneration);
   }
 
   private long nextStateVersion() {

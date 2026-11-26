@@ -2,6 +2,7 @@ package io.etcdhbase.server.commit;
 
 import io.etcdhbase.admin.M3TableGroupPlan;
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.AuthorizationBarrierUpgrade;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitPlanVerifier;
@@ -41,6 +42,7 @@ import io.etcdhbase.grpc.service.KvService;
 import io.etcdhbase.grpc.service.LeaseService;
 import io.etcdhbase.grpc.service.WatchService;
 import io.etcdhbase.grpc.service.AuthService;
+import io.etcdhbase.grpc.protocol.ResponseHeaderFactory;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.LeaseStateMessages;
 import io.etcdhbase.hbase.codec.LeaseBindingMessages;
@@ -53,6 +55,7 @@ import io.etcdhbase.server.observability.RequestMetrics;
 import io.etcdhbase.server.config.M3MemoryReservations;
 import io.etcdhbase.server.auth.AuthSessionService;
 import io.etcdhbase.server.auth.AuthenticateRpcHandler;
+import io.etcdhbase.server.auth.AuthStatusRpcHandler;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import java.time.Duration;
 import java.time.Clock;
@@ -131,6 +134,19 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       BudgetManager budgets, ScanScheduler scans, RequestScope startup,
       OwnerForwardingRuntime ownerForwarding, ScheduledExecutorService leaseTimers,
       LongFunction<AuthSessionService> authSessionFactory) throws Exception {
+    Objects.requireNonNull(authSessionFactory, "authSessionFactory");
+    return openAuthenticated(plan, activation, limits, connections, identity, budgets, scans,
+        startup, ownerForwarding, leaseTimers,
+        (clusterId, ignoredControl) -> authSessionFactory.apply(clusterId));
+  }
+
+  /** Opens authentication with the group control store used to install rotation barriers. */
+  public static M3TableGroupRuntime openAuthenticated(M3TableGroupPlan plan,
+      M3RuntimeConfiguration activation, RuntimeConfiguration.ResourceBudgets limits,
+      HBaseConnectionFactory connections, AuthorizedBackendIdentity identity,
+      BudgetManager budgets, ScanScheduler scans, RequestScope startup,
+      OwnerForwardingRuntime ownerForwarding, ScheduledExecutorService leaseTimers,
+      AuthSessionFactory authSessionFactory) throws Exception {
     return openInternal(plan, activation, limits, connections, identity, budgets, scans, startup,
         Optional.empty(), SYSTEM_LEASE_TIME_SOURCE, ownerForwarding, leaseTimers,
         Objects.requireNonNull(authSessionFactory, "authSessionFactory"));
@@ -192,7 +208,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       BiFunction<Long, Integer, LeaseTimeSource> leaseTimeSourceFactory,
       OwnerForwardingRuntime ownerForwarding,
       ScheduledExecutorService leaseTimers,
-      LongFunction<AuthSessionService> authSessionFactory) throws Exception {
+      AuthSessionFactory authSessionFactory) throws Exception {
     Objects.requireNonNull(plan, "plan");
     Objects.requireNonNull(activation, "activation");
     Objects.requireNonNull(limits, "limits");
@@ -203,6 +219,12 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     Objects.requireNonNull(startup, "startup");
     Objects.requireNonNull(cacheLimits, "cacheLimits");
     Objects.requireNonNull(leaseTimeSourceFactory, "leaseTimeSourceFactory");
+    if (activation.m4LeaseApiEnabled()
+        && activation.activationProfile() == M3RuntimeConfiguration.ActivationProfile.PRODUCTION
+        && (authSessionFactory == null || plan.source().hbaseProfile().authenticationMode()
+            != io.etcdhbase.admin.config.InitializationConfiguration.AuthenticationMode.CREDENTIAL_REFERENCE)) {
+      throw new M3RuntimeConfiguration.LeaseActivationUnavailable();
+    }
     if (limits.maxConcurrentRequests() < 1 || limits.maxConcurrentRequests() > 100_000
         || limits.requestDeadlineMs() < 1 || limits.requestDeadlineMs() > 600_000
         || limits.maxScannersPerTable() < 1 || limits.maxScannersPerTable() > 1024
@@ -214,9 +236,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     try {
       var stores = await(TableGroupStores.openConfigured(connections, identity, plan,
           activation.pinConfiguration(), startup), startup);
-      AuthSessionService authSessions = authSessionFactory == null ? null
-          : Objects.requireNonNull(authSessionFactory.apply(stores.clusterId()),
-              "authenticated session service");
+      AuthSessionService authSessions;
       if (!activation.m4LeaseApiEnabled()) {
         verifyLeaseDisabledFormat(stores, startup);
       }
@@ -258,6 +278,10 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         }
         pending.eventPins = openEventRegistry(stores, activation, owner, startup);
       }
+      ensureAuthorizationBarrier(stores, owner, startup);
+      authSessions = authSessionFactory == null ? null
+          : Objects.requireNonNull(authSessionFactory.create(stores.clusterId(), stores.control()),
+              "authenticated session service");
       ByteKey authorization = authorizationDigest(identity);
       var business = assembleBusiness(plan, activation, connections, budgets, scans, pending, stores,
           invocations, owner, cacheLimits, leaseTimeSourceFactory);
@@ -287,6 +311,11 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     }
   }
 
+  @FunctionalInterface
+  public interface AuthSessionFactory {
+    AuthSessionService create(long clusterId, CommitControlStore commitControlStore);
+  }
+
   private static void verifyLeaseDisabledFormat(TableGroupStores stores, RequestScope startup)
       throws Exception {
     CommitState state = await(stores.control().read(startup), startup)
@@ -295,6 +324,33 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     if (state.formatVersion() != CommitState.FORMAT_VERSION) {
       throw new IllegalStateException(
           "M4 Lease activation must remain enabled for a table group with auxiliary state");
+    }
+  }
+
+  private static void ensureAuthorizationBarrier(
+      TableGroupStores stores, M3OwnerLease ownerLease, RequestScope startup) throws Exception {
+    CommitState current = await(stores.control().read(startup), startup)
+        .orElseThrow(() -> new IllegalStateException("table-group control state is not initialized"))
+        .state();
+    if (ownerLease.isOwner() && !current.supportsAuthorizationBarrier()) {
+      var owners = new CommitOwnerService(stores.control());
+      await(ownerLease.transitionFence(owners,
+          owner -> new AuthorizationBarrierUpgrade(stores.control())
+              .enable(owner, Clock.systemUTC().millis(), startup), startup), startup);
+    }
+    CommitState verified = await(stores.control().read(startup), startup)
+        .orElseThrow(() -> new IllegalStateException("table-group control state is not initialized"))
+        .state();
+    if (!verified.supportsAuthorizationBarrier()) {
+      throw new BackendFailure(BackendFailure.Category.UNAVAILABLE);
+    }
+    if (ownerLease.isOwner()) {
+      CommitOwnerService.OwnerToken token = ownerLease.token();
+      if (verified.ownerEpoch() != token.epoch()
+          || verified.ownerInstance().filter(token.instance()::equals).isEmpty()
+          || verified.ownerLeaseExpired(Clock.systemUTC().millis())) {
+        throw new BackendFailure(BackendFailure.Category.UNAVAILABLE);
+      }
     }
   }
 
@@ -729,7 +785,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         ? owner.currentToken().map(token -> token.instance().equals(peer)).orElse(false)
         : ownerForwarding.isTrustedPeerIdentity(peer);
     MutationForwardReceiver.AuthorizationResolver authorizationResolver = authSessions == null
-        ? (peer, request, scope) -> {
+        ? (peer, request, barrierGeneration, scope) -> {
           if (!trustedPeer.test(peer) || !request.tableGroupId().equals(plan.source().tableGroupId())
               || !authorization.equals(request.authorizationScopeDigest())
               || !ServiceAuthorizationContextReference.matches(identity, authorization,
@@ -738,30 +794,31 @@ public final class M3TableGroupRuntime implements AutoCloseable {
                 new BackendFailure(BackendFailure.Category.PERMISSION));
           }
           return CompletableFuture.completedFuture(
-              new MutationForwardReceiver.VerifiedAuthorization(identity, authorization));
+              new MutationForwardReceiver.VerifiedAuthorization(identity, authorization,
+                  ServiceAuthorizationContextReference.publicationProof(
+                      identity, authorization, barrierGeneration)));
         }
-        : new SessionAuthorizationResolver(plan.source().tableGroupId(), authSessions, trustedPeer);
+        : new SessionAuthorizationResolver(plan.source().tableGroupId(), authSessions, trustedPeer,
+            business.txnReads()::invalidateAuthorization);
     var receiver = new MutationForwardReceiver(stores.control(), invocations,
         authorizationResolver,
-        (request, binding, principal, scope) -> switch (MutationOperationEnvelope.kind(request.operationBytes())) {
-          case PUT -> business.putProcessor().process(request, binding, principal, scope);
-          case TRANSACTION, DELETE_RANGE -> business.txnProcessor().process(request, binding, principal, scope);
+        (request, binding, verified, scope) -> switch (MutationOperationEnvelope.kind(request.operationBytes())) {
+          case PUT -> business.putProcessor().process(request, binding, verified, scope);
+          case TRANSACTION, DELETE_RANGE -> business.txnProcessor().process(request, binding, verified, scope);
           case LEASE_GRANT -> business.lease().isPresent()
-              ? business.lease().orElseThrow().grantProcessor().process(request, binding, principal, scope)
+              ? business.lease().orElseThrow().grantProcessor().process(request, binding, verified, scope)
               : CompletableFuture.completedFuture(
                   new OwnerForwarding.Unknown(BackendFailure.Category.UNAVAILABLE));
           case LEASE_KEEP_ALIVE -> business.lease().isPresent()
-              ? business.lease().orElseThrow().renewalProcessor().process(request, binding, principal, scope)
+              ? business.lease().orElseThrow().renewalProcessor().process(request, binding, verified, scope)
               : CompletableFuture.completedFuture(
                   new OwnerForwarding.Unknown(BackendFailure.Category.UNAVAILABLE));
           case LEASE_REVOKE -> business.lease().isPresent()
-              ? business.lease().orElseThrow().revocationProcessor().process(request, binding, principal, scope)
+              ? business.lease().orElseThrow().revocationProcessor().process(request, binding, verified, scope)
               : CompletableFuture.completedFuture(
                   new OwnerForwarding.Unknown(BackendFailure.Category.UNAVAILABLE));
-          case LEASE_EXPIRY_STEP -> business.lease().isPresent()
-              ? business.lease().orElseThrow().expiryStepProcessor().process(request, binding, principal, scope)
-              : CompletableFuture.completedFuture(
-                  new OwnerForwarding.Unknown(BackendFailure.Category.UNAVAILABLE));
+          case LEASE_EXPIRY_STEP -> CompletableFuture.completedFuture(
+              new OwnerForwarding.Unknown(BackendFailure.Category.PERMISSION));
         });
     var lane = new MutationOwnerLane(plan.source().tableGroupId(), pending.queue, receiver, business.metrics());
     MutationRelay relay;
@@ -783,17 +840,30 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     WatchService watchService = new WatchService();
     if (business.lease().isPresent()) {
       LeaseComponents lease = business.lease().orElseThrow();
+      // This lane is never registered with ownerForwarding: the service reference is a label,
+      // not a remotely usable credential. It shares the same queue and owner/fence checks.
+      var localExpiryReceiver = new MutationForwardReceiver(stores.control(), invocations,
+          new LocalLeaseExpiryAuthorizationResolver(plan.source().tableGroupId(), identity,
+              authorization, peer -> owner.currentToken()
+                  .map(token -> token.instance().equals(peer)).orElse(false)),
+          (request, binding, verified, scope) ->
+              lease.expiryStepProcessor().process(request, binding, verified, scope));
+      var localExpiryLane = new MutationOwnerLane(plan.source().tableGroupId(), pending.queue,
+          localExpiryReceiver, business.metrics());
+      MutationRelay localExpiryRelay = localOwnerRelay(
+          plan.source().tableGroupId(), stores.control(), owner, localExpiryLane);
       var leaseGateway = new LeaseGateway(plan.source().tableGroupId(), identity, authorization,
           stores.clusterId(), activation.memberIdBits(), activation.maxEtcdRequestBytes(),
           stores.control(), relay, stores.invocationResults(), stores.views(), lease.readView(),
           lease.enumeration(), lease.bindings(), lease.time(), budgets, LEASE_REQUEST_MEMORY,
-          pending.worker, pending.leaseTimers, business.metrics());
+          pending.worker, pending.leaseTimers, business.metrics(), authSessions,
+          business.txnReads()::invalidateAuthorization);
       leaseService = new LeaseService(leaseGateway.grantHandler(),
           leaseGateway.timeToLiveHandler(), leaseGateway.leasesHandler(),
           leaseGateway.keepAliveHandler(), leaseGateway.revokeHandler());
       var expiryWorker = new LeaseExpiryWorker(plan.source().tableGroupId(), authorization,
           plan.system().saltProfile().bucketCount(), 30_000,
-          stores.control(), stores.records(), owner, relay, identity, lease.time(), budgets,
+          stores.control(), stores.records(), owner, localExpiryRelay, identity, lease.time(), budgets,
           LeaseBudgetProfile.EXPIRY_WORKER_MEMORY, pending.worker, pending.leaseTimers, Clock.systemUTC(),
           business.metrics());
       pending.startExpiryWorker(expiryWorker);
@@ -802,7 +872,8 @@ public final class M3TableGroupRuntime implements AutoCloseable {
           new ManifestPreparation(stores.manifestRepository(), new ManifestPreparation.Limits(0, 0, 0, 0)),
           invocations));
       var backfill = new EventBackfillCycle(plan.source().tableGroupId(), pending.queue, stores, pending.eventPins,
-          invocations, backfillPreparation, business.publisher(), budgets, authorization, Clock.systemUTC());
+          invocations, backfillPreparation, business.publisher(), budgets, identity, authorization,
+          Clock.systemUTC());
       var tailer = new EventTailerCycle(plan.source().tableGroupId(), pending.queue,
           owner::currentToken, stores, pending.eventPins, budgets, authorization,
           pending, business.metrics());
@@ -814,16 +885,25 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       var watchGateway = new WatchGateway(plan.source().tableGroupId(), pending,
           stores.control(), budgets, pending.worker, pending.leaseTimers,
           stores.clusterId(), activation.memberIdBits(), limits.maxRpcBytes(), pending.eventPins,
-          selectedEvents, authorization, business.metrics());
+          selectedEvents, authorization, business.metrics(), identity, authSessions,
+          business.txnReads()::invalidateAuthorization);
       watchService = new WatchService(watchGateway.handler());
     }
     AuthService authService = authSessions == null ? new AuthService()
-        : new AuthService(new AuthenticateRpcHandler(authSessions));
+        : new AuthService(new AuthenticateRpcHandler(authSessions),
+            new AuthStatusRpcHandler(authSessions::readAuthConfiguration, scope ->
+                stores.control().read(scope).thenApply(found -> {
+                  var snapshot = found.orElseThrow(() ->
+                      new java.util.concurrent.CompletionException(
+                          new BackendFailure(BackendFailure.Category.UNAVAILABLE)));
+                  return ResponseHeaderFactory.create(stores.clusterId(), activation.memberIdBits(),
+                      snapshot.state().publishedRevision(), 0);
+                })));
     return new ServiceComponents(new KvService(gateway, txnGateway, txnGateway::deleteRange,
         txnGateway::range), leaseService, watchService, authService);
   }
 
-  private static MutationRelay localOwnerRelay(String tableGroupId, CommitControlStore control,
+  static MutationRelay localOwnerRelay(String tableGroupId, CommitControlStore control,
       M3OwnerLease owner, MutationOwnerLane lane) {
     return new MutationRelay(control,
         (group, instanceId, epoch) -> owner.currentToken()

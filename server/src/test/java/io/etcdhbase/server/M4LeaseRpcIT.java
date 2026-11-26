@@ -576,7 +576,8 @@ class M4LeaseRpcIT {
                   afterRenewal.ownerEpoch());
               ForwardMutationResponse firstMissingReply = forwardMutation(
                   ownerAPort, "owner-a", trustedPeers, ownerBCertificate, missingAttempt);
-              assertEquals(ForwardMutationResponse.Outcome.COMPLETED, firstMissingReply.getOutcome());
+              assertEquals(ForwardMutationResponse.Outcome.COMPLETED, firstMissingReply.getOutcome(),
+                  () -> "missing-Lease forwarding failed: " + firstMissingReply.getFailureCode());
               assertTrue(java.util.Arrays.equals(missingInvocation.bytes(),
                   firstMissingReply.getOperationResult().toByteArray()));
               CommitState afterMissingReply = controlSnapshot(plan, initializer, identity).state();
@@ -872,7 +873,8 @@ class M4LeaseRpcIT {
                   source.tableGroupId(), runtimeForwardingIdentity, keepAlive, invocation, originalOwnerEpoch);
               ForwardMutationResponse droppedReply = forwardMutationAndDropReply(
                   ownerAPort, "owner-a", trustedPeers, ownerBCertificate, firstAttempt);
-              assertEquals(ForwardMutationResponse.Outcome.COMPLETED, droppedReply.getOutcome());
+              assertEquals(ForwardMutationResponse.Outcome.COMPLETED, droppedReply.getOutcome(),
+                  () -> "lost-reply forwarding failed: " + droppedReply.getFailureCode());
               assertTrue(java.util.Arrays.equals(invocation.bytes(), droppedReply.getOperationResult().toByteArray()));
 
               CommitState selected = controlSnapshot(plan, initializer, identity).state();
@@ -2905,8 +2907,9 @@ class M4LeaseRpcIT {
   private static io.etcdhbase.spi.identity.AuthorizedBackendIdentity runtimeForwardingIdentity(
       String providerId, io.etcdhbase.spi.identity.AuthenticationScope scope) throws IOException {
     String subject = org.apache.hadoop.security.UserGroupInformation.getCurrentUser().getShortUserName();
-    return new io.etcdhbase.spi.identity.AuthorizedBackendIdentity(providerId, subject,
-        "m4-test-forwarding-context", scope, Set.of(scope.tableGroupId()), 0);
+    // SIMPLE cannot attest a credential generation; match the runtime's provider-issued handle.
+    return io.etcdhbase.spi.identity.AuthorizedBackendIdentity.withUnknownCredentialGeneration(
+        providerId, subject, "m4-test-forwarding-context", scope, Set.of(scope.tableGroupId()));
   }
 
   private static ForwardMutationResponse forwardMutationAndDropReply(int port, String authority,

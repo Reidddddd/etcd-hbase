@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 ENTRY="${1:-}"
-if [[ "$ENTRY" != j03 && "$ENTRY" != runtime ]]; then
-  echo "usage: launch-server.sh <j03|runtime> <arguments>" >&2
+if [[ "$ENTRY" != j03 && "$ENTRY" != runtime && "$ENTRY" != auth-registry ]]; then
+  echo "usage: launch-server.sh <j03|runtime|auth-registry> <arguments>" >&2
   exit 2
 fi
 shift
@@ -27,6 +27,7 @@ if [[ "$ENTRY" == j03 && $# -ne 6 ]] \
 fi
 MAIN_CLASS=io.etcdhbase.server.Bootstrap
 if [[ "$ENTRY" == runtime ]]; then MAIN_CLASS=io.etcdhbase.server.RuntimeServer; fi
+if [[ "$ENTRY" == auth-registry ]]; then MAIN_CLASS=io.etcdhbase.server.AuthRegistryAdminCommand; fi
 
 BUILD_DIR="$ROOT/server/target"
 DEPENDENCY_CLASSPATH="$BUILD_DIR/m0-server-dependencies.txt"

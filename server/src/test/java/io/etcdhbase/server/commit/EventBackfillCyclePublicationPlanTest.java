@@ -19,12 +19,15 @@ import io.etcdhbase.core.commit.TransactionId;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.hbase.storage.HBaseCommitControlStore;
+import io.etcdhbase.spi.identity.AuthenticationScope;
+import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.junit.jupiter.api.Test;
@@ -77,7 +80,7 @@ class EventBackfillCyclePublicationPlanTest {
       var budgets = new BudgetManager(limits, Map.of("group", limits), limits);
       var cycle = new EventBackfillCycle("group", mock(SerialMutationQueue.class), stores, pins,
           mock(InvocationService.class), mock(EventBackfillPreparation.class),
-          mock(CommitPublisher.class), budgets, AUTHORIZATION,
+          mock(CommitPublisher.class), budgets, identity("group"), AUTHORIZATION,
           Clock.fixed(Instant.ofEpochMilli(20), ZoneOffset.UTC));
       var owner = new CommitOwnerService.OwnerToken("owner", 7);
 
@@ -110,6 +113,11 @@ class EventBackfillCyclePublicationPlanTest {
     return CommitState.restore(CommitState.EVENT_REGISTRY_FORMAT_VERSION, FINGERPRINT,
         Optional.of("owner"), ownerEpoch, 10_000, 1, publishedSequence, publishedRevision,
         finalizedSequence, finalizedRevision, Optional.empty(), compactRevision,
-        Optional.of(NAMESPACE), Optional.empty(), 1);
+        Optional.of(NAMESPACE), Optional.empty(), 1, true, 0);
+  }
+
+  private static AuthorizedBackendIdentity identity(String tableGroup) {
+    return new AuthorizedBackendIdentity("dev-no-auth", "fixture", "fixture-context",
+        new AuthenticationScope(tableGroup, "primary"), Set.of(tableGroup), 0);
   }
 }

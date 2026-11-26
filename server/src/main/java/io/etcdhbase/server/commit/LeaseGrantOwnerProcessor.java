@@ -54,11 +54,13 @@ public final class LeaseGrantOwnerProcessor implements MutationForwardReceiver.M
 
   @Override
   public CompletableFuture<OwnerForwarding.Reply> process(MutationForwardRequest request,
-      InvocationBinding binding, AuthorizedBackendIdentity identity, RequestScope scope) {
+      InvocationBinding binding, MutationForwardReceiver.VerifiedAuthorization authorization,
+      RequestScope scope) {
     Objects.requireNonNull(request, "request");
     Objects.requireNonNull(binding, "binding");
-    Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(authorization, "authorization");
     Objects.requireNonNull(scope, "scope");
+    AuthorizedBackendIdentity identity = authorization.identity();
     Optional<CommitOwnerService.OwnerToken> currentOwner = owner.get();
     if (currentOwner.isEmpty()) return unknown(BackendFailure.Category.UNAVAILABLE);
     CommitOwnerService.OwnerToken activeOwner = currentOwner.orElseThrow();
@@ -94,7 +96,8 @@ public final class LeaseGrantOwnerProcessor implements MutationForwardReceiver.M
     } catch (BackendFailure failure) {
       return unknown(failure.category());
     }
-    return executor.executeNew(command.getID(), command.getTTL(), binding, activeOwner, identity, scope, account)
+    return executor.executeNew(command.getID(), command.getTTL(), binding, activeOwner, identity,
+        authorization.publicationProof(), scope, account)
         .handle((id, failure) -> handleGrantOutcome(request, binding, id, failure, scope))
         .thenCompose(result -> result);
   }

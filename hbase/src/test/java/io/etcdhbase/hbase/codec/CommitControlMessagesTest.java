@@ -1,7 +1,9 @@
 package io.etcdhbase.hbase.codec;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.UnknownFieldSet;
@@ -32,6 +34,7 @@ class CommitControlMessagesTest {
     var namespace = ByteKey.copyOf(new byte[16]);
     var registryReserved = eventIndexEnabled.reserveEventRegistry("owner-a", 5, 15, namespace);
     var registryEnabled = registryReserved.upgradeEventRegistryFormat("owner-a", 6, 16, namespace);
+    var barrierEnabled = registryEnabled.enableAuthorizationBarrier("owner-a", 7, 17);
     var oldWire = CommitProtos.CommitControlState.parseFrom(CommitControlMessages.encode(legacy));
     var newWire = CommitProtos.CommitControlState.parseFrom(CommitControlMessages.encode(upgraded));
     var bindingWire = CommitProtos.CommitControlState.parseFrom(CommitControlMessages.encode(bindingEnabled));
@@ -48,6 +51,23 @@ class CommitControlMessagesTest {
     assertStateEquals(eventIndexEnabled, roundTrip(eventIndexEnabled));
     assertStateEquals(registryReserved, roundTrip(registryReserved));
     assertStateEquals(registryEnabled, roundTrip(registryEnabled));
+    var barrierWire = CommitProtos.CommitControlState.parseFrom(CommitControlMessages.encode(barrierEnabled));
+    assertEquals(CommitState.EVENT_REGISTRY_FORMAT_VERSION, barrierWire.getFormatVersion());
+    assertTrue(barrierWire.hasAuthorizationBarrierGeneration());
+    assertEquals(0, barrierWire.getAuthorizationBarrierGeneration());
+    assertStateEquals(barrierEnabled, roundTrip(barrierEnabled));
+    var withoutBarrier = CommitControlMessages.decode(
+        barrierWire.toBuilder().clearAuthorizationBarrierGeneration().build().toByteArray());
+    assertFalse(withoutBarrier.supportsAuthorizationBarrier());
+    assertEquals(0, withoutBarrier.authorizationBarrierGeneration());
+    assertThrows(IllegalArgumentException.class, () -> CommitControlMessages.decode(
+        barrierWire.toBuilder().setAuthorizationBarrierGeneration(-1).build().toByteArray()));
+    var barrierWithoutRegistry = CommitState.initial(FINGERPRINT, 1)
+        .claimOwner("owner-a", 10, 100).enableAuthorizationBarrier("owner-a", 1, 11);
+    assertEquals(CommitState.FORMAT_VERSION, barrierWithoutRegistry.formatVersion());
+    assertTrue(roundTrip(barrierWithoutRegistry).supportsAuthorizationBarrier());
+    assertTrue(roundTrip(barrierWithoutRegistry).eventRegistryNamespace().isEmpty());
+    assertFalse(oldWire.hasAuthorizationBarrierGeneration());
     var registryWire = CommitProtos.CommitControlState.parseFrom(CommitControlMessages.encode(registryEnabled));
     assertThrows(IllegalArgumentException.class, () -> CommitControlMessages.decode(
         registryWire.toBuilder().clearEventRegistryNamespace().build().toByteArray()));
@@ -65,6 +85,22 @@ class CommitControlMessagesTest {
         .claimOwner("owner-a", 10, 100)
         .publish(slot(0, 5, true, new byte[] {1, 2, 3}));
     assertStateEquals(pending, roundTrip(pending));
+  }
+
+  @Test
+  void authorizationBarrierPresenceIsIndependentOfControlFormatAndEventRegistry() {
+    var formatFour = CommitState.initial(FINGERPRINT, 1).claimOwner("owner-a", 10, 100)
+        .upgradeAuxiliaryFormat("owner-a", 1, 11)
+        .upgradeLeaseBindingFormat("owner-a", 2, 12)
+        .upgradeLeaseExpiryFormat("owner-a", 3, 13)
+        .enableAuthorizationBarrier("owner-a", 4, 14);
+
+    var restored = roundTrip(formatFour);
+
+    assertEquals(CommitState.LEASE_EXPIRY_FORMAT_VERSION, restored.formatVersion());
+    assertTrue(restored.supportsAuthorizationBarrier());
+    assertTrue(restored.eventRegistryNamespace().isEmpty());
+    assertStateEquals(formatFour, restored);
   }
 
   @Test
@@ -145,6 +181,8 @@ class CommitControlMessagesTest {
     assertEquals(expected.eventRegistryNamespace(), actual.eventRegistryNamespace());
     assertEquals(expected.pendingEventRegistryNamespace(), actual.pendingEventRegistryNamespace());
     assertEquals(expected.eventRegistryAttempts(), actual.eventRegistryAttempts());
+    assertEquals(expected.supportsAuthorizationBarrier(), actual.supportsAuthorizationBarrier());
+    assertEquals(expected.authorizationBarrierGeneration(), actual.authorizationBarrierGeneration());
   }
 
   private static PublicationSlot slot(long baseSequence, long baseRevision,

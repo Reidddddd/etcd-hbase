@@ -197,7 +197,7 @@ class M3ResultRepositoryIT {
 
   private static InvocationBinding beginInvocation() {
     return InvocationBinding.begin(InvocationId.create(), ByteKey.copyOf(new byte[32]),
-        ByteKey.copyOf(new byte[32]), TransactionId.create(), 1, 0, 1);
+        ByteKey.copyOf(new byte[32]), TransactionId.create(), 2, 0, 1);
   }
 
   private static ResultPage resultPage(InvocationBinding invocation, ByteKey logicalKey) {
@@ -302,6 +302,8 @@ class M3ResultRepositoryIT {
     assertTrue(control.initializeIfAbsent(CommitState.initial(binding.profileFingerprint(), 1), scope).join());
     var initial = control.read(scope).join().orElseThrow();
     assertTrue(control.compareAndSet(initial, initial.state().claimOwner("fixture-owner", 0, Long.MAX_VALUE), scope).join());
+    new io.etcdhbase.core.commit.AuthorizationBarrierUpgrade(control)
+        .enable(new CommitOwnerService.OwnerToken("fixture-owner", 1), 0, scope).join();
     return control;
   }
 
@@ -319,8 +321,11 @@ class M3ResultRepositoryIT {
     };
     var published = new CommitPublisher(control, outcomes, persisted.verifier(),
         new HBaseInvocationRepository(records), handoff, finalizer)
-        .publish(persisted.sealed(), new CommitOwnerService.OwnerToken("fixture-owner", 1),
-            persisted.root(), scope).join();
+        .publish(persisted.sealed(), new CommitOwnerService.OwnerToken("fixture-owner", 2),
+            persisted.root(), scope, io.etcdhbase.core.commit.CommitAuthorizationProof.capture(
+                persisted.sealed().authorizationScopeDigest(),
+                control.read(scope).join().orElseThrow().state().authorizationBarrierGeneration(),
+                (identity, generation, request) -> CompletableFuture.completedFuture(null))).join();
     assertEquals(CommitOutcomeResolver.State.SELECTED_FINALIZED, published.state());
   }
 

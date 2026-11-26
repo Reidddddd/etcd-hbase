@@ -130,6 +130,93 @@ class CommitStateTest {
   }
 
   @Test
+  void authorizationBarrierIsIndependentOfControlFormatAndPreservesOwnerFence() {
+    var namespace = ByteKey.copyOf(new byte[16]);
+    var formatOne = CommitState.initial(FINGERPRINT, 7).claimOwner("owner-a", 10, 100);
+    var barrierOne = formatOne.enableAuthorizationBarrier("owner-a", 1, 11);
+    assertEquals(CommitState.FORMAT_VERSION, barrierOne.formatVersion());
+    assertTrue(barrierOne.supportsAuthorizationBarrier());
+    assertEquals(0, barrierOne.authorizationBarrierGeneration());
+    assertEquals(2, barrierOne.ownerEpoch());
+    assertEquals(formatOne.stateVersion() + 1, barrierOne.stateVersion());
+    assertThrows(IllegalStateException.class,
+        () -> barrierOne.heartbeat("owner-a", 1, 200));
+    assertThrows(IllegalStateException.class,
+        () -> formatOne.enableAuthorizationBarrier("owner-a", 1, 100));
+    assertThrows(IllegalStateException.class,
+        () -> barrierOne.enableAuthorizationBarrier("owner-a", 2, 20));
+
+    var formatFour = formatOne.upgradeAuxiliaryFormat("owner-a", 1, 11)
+        .upgradeLeaseBindingFormat("owner-a", 2, 12)
+        .upgradeLeaseExpiryFormat("owner-a", 3, 13);
+    var barrierFour = formatFour.enableAuthorizationBarrier("owner-a", 4, 14);
+    assertEquals(CommitState.LEASE_EXPIRY_FORMAT_VERSION, barrierFour.formatVersion());
+    assertTrue(barrierFour.eventRegistryNamespace().isEmpty());
+
+    var barrierSix = barrierFour.upgradeEventIndexFormat("owner-a", 5, 15)
+        .reserveEventRegistry("owner-a", 6, 16, namespace)
+        .upgradeEventRegistryFormat("owner-a", 7, 17, namespace);
+    assertEquals(CommitState.EVENT_REGISTRY_FORMAT_VERSION, barrierSix.formatVersion());
+    assertTrue(barrierSix.supportsAuthorizationBarrier());
+    assertEquals(0, barrierSix.authorizationBarrierGeneration());
+    assertEquals(Optional.of(namespace), barrierSix.eventRegistryNamespace());
+    assertThrows(IllegalStateException.class,
+        () -> barrierSix.heartbeat("owner-a", 7, 200));
+    assertThrows(IllegalStateException.class,
+        () -> barrierSix.enableAuthorizationBarrier("owner-a", 8, 18));
+    assertThrows(IllegalStateException.class,
+        () -> barrierSix.advanceAuthorizationBarrier("owner-a", 8, 0)
+            .enableAuthorizationBarrier("owner-a", 8, 18));
+    assertThrows(IllegalStateException.class,
+        () -> formatOne.publish(slot(0, 7, false, 7))
+            .enableAuthorizationBarrier("owner-a", 1, 17));
+  }
+
+  @Test
+  void authorizationBarrierAdvancesMonotonicallyWithoutReplacingSelectedPublication() {
+    var namespace = ByteKey.copyOf(new byte[16]);
+    var enabled = CommitState.initial(FINGERPRINT, 7).claimOwner("owner-a", 10, 100)
+        .upgradeAuxiliaryFormat("owner-a", 1, 11)
+        .upgradeLeaseBindingFormat("owner-a", 2, 12)
+        .upgradeLeaseExpiryFormat("owner-a", 3, 13)
+        .upgradeEventIndexFormat("owner-a", 4, 14)
+        .reserveEventRegistry("owner-a", 5, 15, namespace)
+        .upgradeEventRegistryFormat("owner-a", 6, 16, namespace)
+        .enableAuthorizationBarrier("owner-a", 7, 17);
+    var advanced = enabled.advanceAuthorizationBarrier("owner-a", 8, 0);
+
+    assertEquals(1, advanced.authorizationBarrierGeneration());
+    assertEquals(enabled.ownerEpoch(), advanced.ownerEpoch());
+    assertEquals(enabled.stateVersion() + 1, advanced.stateVersion());
+    assertThrows(IllegalStateException.class,
+        () -> advanced.advanceAuthorizationBarrier("owner-a", 8, 0));
+    assertThrows(IllegalStateException.class,
+        () -> advanced.advanceAuthorizationBarrier("owner-a", 7, 1));
+
+    var selected = advanced.publish(slot(0, 7, true, 8));
+    var advancedWithSelection = selected.advanceAuthorizationBarrier("owner-a", 8, 1);
+    assertEquals(2, advancedWithSelection.authorizationBarrierGeneration());
+    assertEquals(selected.publication(), advancedWithSelection.publication());
+    assertEquals(selected.publishedSequence(), advancedWithSelection.publishedSequence());
+    assertEquals(selected.publishedRevision(), advancedWithSelection.publishedRevision());
+  }
+
+  @Test
+  void authorizationBarrierRestoreRejectsNegativeAndOverflowDoesNotWrap() {
+    var namespace = ByteKey.copyOf(new byte[16]);
+    assertThrows(IllegalArgumentException.class, () -> CommitState.restore(
+        CommitState.EVENT_REGISTRY_FORMAT_VERSION, FINGERPRINT,
+        Optional.of("owner-a"), 1, 100, 1, 0, 7, 0, 7, Optional.empty(), 0,
+        Optional.of(namespace), Optional.empty(), 1, true, -1));
+
+    var exhausted = CommitState.restore(CommitState.EVENT_REGISTRY_FORMAT_VERSION,
+        FINGERPRINT, Optional.of("owner-a"), 1, 100, 1, 0, 7, 0, 7,
+        Optional.empty(), 0, Optional.of(namespace), Optional.empty(), 1, true, Long.MAX_VALUE);
+    assertThrows(ArithmeticException.class,
+        () -> exhausted.advanceAuthorizationBarrier("owner-a", 1, Long.MAX_VALUE));
+  }
+
+  @Test
   void eventRegistryAttemptsAreDurablyBounded() {
     var state = CommitState.initial(FINGERPRINT, 7).claimOwner("owner-a", 10, 100)
         .upgradeAuxiliaryFormat("owner-a", 1, 11)

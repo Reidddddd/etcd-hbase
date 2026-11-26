@@ -34,10 +34,6 @@ public final class M3RuntimeConfigurationLoader {
         throw new IllegalArgumentException("m4_lease_api_enabled must be a boolean");
       }
       boolean m4LeaseApiEnabled = object.path("m4_lease_api_enabled").booleanValue();
-      if (m4LeaseApiEnabled
-          && activationProfile != M3RuntimeConfiguration.ActivationProfile.PUBLIC_TEST) {
-        throw new M3RuntimeConfiguration.LeaseActivationUnavailable();
-      }
       object.put("activation_profile", (m4LeaseApiEnabled
           ? activationProfile : M3RuntimeConfiguration.ActivationProfile.PRODUCTION).name());
       if (!object.has("lease_min_ttl_seconds")) {

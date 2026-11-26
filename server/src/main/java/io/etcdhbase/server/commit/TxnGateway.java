@@ -12,6 +12,7 @@ import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.kv.RangeCommand;
 import io.etcdhbase.core.kv.TxnCommand;
+import io.etcdhbase.core.kv.TxnEvaluator;
 import io.etcdhbase.core.lease.LeaseFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
@@ -32,11 +33,13 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /** Routes Txn and DeleteRange requests through a fixed view or the authorized mutation owner. */
 public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserver<Rpc.TxnResponse>> {
@@ -198,11 +201,22 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
       if (!command.mayWrite()) {
         requestIdentities.resolve(authToken, scope).thenCompose(requestIdentity -> {
           requestIdentity.releaseAfterPhysicalDrain(scope);
-          return reads.execute(command, requestIdentity.authorizationDigest(),
-              requestIdentity.identity(), scope, account, range == null);
+          ByteKey readAuthorization = requestIdentity.readAuthorizationDigest();
+          return reads.execute(command, readAuthorization,
+              requestIdentity.identity(), scope, account, range == null, () -> {
+                reads.invalidateAuthorization(readAuthorization);
+                requestIdentity.retireUserBackendIdentity();
+              })
+              .thenApply(read -> new AuthorizedRead(read, requestIdentity));
         }).whenComplete((result, failure) -> dispatchResponse(observer, scope, terminal,
             gatewayDrained, result, failure, range == null,
-            value -> TxnResponseEmitter.sendReadOnly(command, value, clusterId, memberId, scope,
+            value -> requestIdentities.revalidate(value.identity(), scope)
+                .whenComplete((ignored, validationFailure) -> {
+                  if (validationFailure != null) {
+                    reads.invalidateAuthorization(value.identity().readAuthorizationDigest());
+                  }
+                }),
+            value -> TxnResponseEmitter.sendReadOnly(command, value.read(), clusterId, memberId, scope,
                 account, countOutput(observer, delete == null && range == null)),
             ignored -> { }));
         return;
@@ -227,11 +241,22 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
               state.ownerEpoch(), remaining, 0, operation);
           return relay.forward(envelope, scope).thenCompose(reply -> resolveReply(reply, invocation,
               digest, requestIdentity.authorizationDigest(), scope, account));
-        });
+        }).thenApply(resolved -> new AuthorizedResolution(resolved, requestIdentity));
       }).whenComplete((resolved, failure) -> dispatchResponse(observer, scope, terminal, gatewayDrained,
-          resolved, failure, true, value -> TxnResponseEmitter.sendResolved(command, value,
+          resolved, failure, true, value -> value.resolution().changed()
+              ? CompletableFuture.completedFuture(null)
+              // A rejected revalidation must also drop the read cache keyed by this authorization,
+              // exactly as the standalone read path does; otherwise a revoked session keeps serving
+              // cached ranges through the same digest.
+              : requestIdentities.revalidate(value.identity(), scope)
+                  .whenComplete((ignored, validationFailure) -> {
+                    if (validationFailure != null) {
+                      reads.invalidateAuthorization(value.identity().readAuthorizationDigest());
+                    }
+                  }),
+          value -> TxnResponseEmitter.sendResolved(command, value.resolution(),
               ResultMessages::decodeTree, clusterId, memberId, scope, account, countOutput(observer, delete == null)),
-          value -> { if (value != null) value.close(); }));
+          value -> { if (value != null) value.resolution().close(); }));
     } catch (RuntimeException failure) {
       gatewayDrained.complete(null);
       signalError(scope, observer, terminal, failure);
@@ -241,6 +266,13 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
       throw fatal;
     }
   }
+
+  private record AuthorizedRead(TxnEvaluator.ValidatedRead read,
+      AuthenticatedRequestIdentityResolver.ResolvedRequestIdentity identity) {}
+
+  /** A durable decision keeps the identity that authorized it so a no-change read result is rechecked. */
+  private record AuthorizedResolution(InvocationResultResolver.ResolvedTransaction resolution,
+      AuthenticatedRequestIdentityResolver.ResolvedRequestIdentity identity) {}
 
   private CompletableFuture<InvocationResultResolver.ResolvedTransaction> resolveReply(
       MutationRelay.Result reply, InvocationId invocation, ByteKey digest,
@@ -283,7 +315,8 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
 
   private <T> void dispatchResponse(StreamObserver<Rpc.TxnResponse> observer, RequestScope scope,
       AtomicBoolean terminal, CompletableFuture<Void> gatewayDrained, T value, Throwable failure,
-      boolean recordTxnMetrics, Consumer<T> send, Consumer<T> discard) {
+      boolean recordTxnMetrics, Function<T, ? extends CompletionStage<Void>> validate,
+      Consumer<T> send, Consumer<T> discard) {
     var responseDrained = new CompletableFuture<Void>();
     if (!scope.startIfOpen(() -> scope.trackPhysicalProducer(responseDrained))) {
       try { discard.accept(value); }
@@ -300,7 +333,8 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
     }
     var dispatchState = new AtomicInteger();
     try {
-      scheduleResponse(observer, scope, terminal, responseDrained, value, failure, recordTxnMetrics, send, discard, dispatchState);
+      scheduleResponse(observer, scope, terminal, responseDrained, value, failure,
+          recordTxnMetrics, validate, send, discard, dispatchState);
     } finally {
       gatewayDrained.complete(null);
     }
@@ -308,11 +342,13 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
 
   private <T> void scheduleResponse(StreamObserver<Rpc.TxnResponse> observer, RequestScope scope,
       AtomicBoolean terminal, CompletableFuture<Void> responseDrained, T value, Throwable failure,
-      boolean recordTxnMetrics, Consumer<T> send, Consumer<T> discard, AtomicInteger dispatchState) {
+      boolean recordTxnMetrics, Function<T, ? extends CompletionStage<Void>> validate,
+      Consumer<T> send, Consumer<T> discard, AtomicInteger dispatchState) {
     try {
       worker.execute(() -> {
         if (dispatchState.compareAndSet(0, 1)) {
-          deliverResponse(observer, scope, terminal, responseDrained, value, failure, recordTxnMetrics, send, discard);
+          validateAndDeliver(observer, scope, terminal, responseDrained, value, failure,
+              recordTxnMetrics, validate, send, discard);
         }
       });
     } catch (RuntimeException rejected) {
@@ -327,12 +363,48 @@ public final class TxnGateway implements BiConsumer<Rpc.TxnRequest, StreamObserv
     }
   }
 
+  private <T> void validateAndDeliver(StreamObserver<Rpc.TxnResponse> observer, RequestScope scope,
+      AtomicBoolean terminal, CompletableFuture<Void> responseDrained, T value, Throwable failure,
+      boolean recordTxnMetrics, Function<T, ? extends CompletionStage<Void>> validate,
+      Consumer<T> send, Consumer<T> discard) {
+    if (failure != null || validate == null) {
+      deliverResponse(observer, scope, terminal, responseDrained, value, failure,
+          recordTxnMetrics, send, discard);
+      return;
+    }
+    if (scope.isClosed() || scope.isDeadlineExceeded()) {
+      try { discard.accept(value); }
+      finally { responseDrained.complete(null); }
+      return;
+    }
+    CompletionStage<Void> validation;
+    try {
+      validation = Objects.requireNonNull(validate.apply(value), "response validation");
+    } catch (RuntimeException | Error problem) {
+      deliverResponse(observer, scope, terminal, responseDrained, value, problem,
+          recordTxnMetrics, send, discard);
+      if (problem instanceof Error fatal) throw fatal;
+      return;
+    }
+    validation.whenComplete((ignored, validationFailure) -> {
+      if (scope.isClosed() || scope.isDeadlineExceeded()) {
+        try { discard.accept(value); }
+        finally { responseDrained.complete(null); }
+      } else {
+        deliverResponse(observer, scope, terminal, responseDrained, value, validationFailure,
+            recordTxnMetrics, send, discard);
+      }
+    });
+  }
+
   private <T> void deliverResponse(StreamObserver<Rpc.TxnResponse> observer, RequestScope scope,
       AtomicBoolean terminal, CompletableFuture<Void> responseDrained, T value, Throwable failure,
       boolean recordTxnMetrics, Consumer<T> send, Consumer<T> discard) {
     try {
-      if (failure != null) signalCompletionError(observer, terminal, failure);
-      else if (terminal.compareAndSet(false, true)) {
+      if (failure != null) {
+        try { signalCompletionError(observer, terminal, failure); }
+        finally { discard.accept(value); }
+      } else if (terminal.compareAndSet(false, true)) {
         long started = System.nanoTime();
         try { send.accept(value); }
         finally { if (recordTxnMetrics) metrics.recordTxnStage(RequestMetrics.TxnStage.RESPONSE, Math.max(0, System.nanoTime() - started)); }

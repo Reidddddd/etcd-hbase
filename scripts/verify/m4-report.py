@@ -257,8 +257,8 @@ J46_JAVA_CLASS_KINDS = {
 J47_VERIFICATION_BOUNDARY = (
     "J47 validates startup readiness after event-index backfill and tailer installation, revokes readiness "
     "when the history worker fails or the tailer closes, and rejects event-history protection from another "
-    "registry before storage reads. Production Lease activation also remains fail-closed until J51 identity "
-    "lifecycle is ready; only trusted test wiring may select the public test profile. J47 then validates "
+    "registry before storage reads. Production Lease activation requires the J51 identity, recovery and "
+    "health capabilities; only trusted test wiring may select the public test profile. J47 then validates "
     "per-watch budget isolation when a transport is not ready, accepted asynchronous "
     "Watch creates across client half-close, Created-to-Canceled compact_revision delivery during "
     "historical replay, and cleanup after request-stream errors, client cancellation, deadline, late "
@@ -336,7 +336,7 @@ J47_CRITICAL_JAVA_TESTS = {
         "readinessRequiresEventPinsAHealthyWorkerAndAnOpenTailer",
     },
     "io.etcdhbase.server.config.M3RuntimeConfigurationTest": {
-        "productionLoaderRejectsM4AndCannotBeOverriddenByJson",
+        "productionLoaderKeepsTheTrustedProfileAndCannotBeOverriddenByJson",
         "publicTestProfileDoesNotChangeOrdinaryM3RuntimeConfiguration",
     },
     "io.etcdhbase.server.commit.J47WatchReplayGcIT": {

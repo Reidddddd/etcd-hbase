@@ -21,18 +21,182 @@ import io.etcdhbase.hbase.connection.HBaseConnectionRouter;
 import io.etcdhbase.hbase.identity.HBaseBackendIdentityProvider;
 import io.etcdhbase.spi.identity.AuthenticationScope;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
+import io.etcdhbase.spi.identity.BackendIdentityBorrow;
 import io.etcdhbase.spi.identity.BackendCredentials;
 import io.etcdhbase.spi.identity.BackendIdentityException;
 import io.etcdhbase.spi.identity.BackendIdentityException.Reason;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.hadoop.hbase.client.AsyncConnection;
 import org.junit.jupiter.api.Test;
 
 class ProviderSessionIdentityManagerTest {
   private static final AuthenticationScope SCOPE = new AuthenticationScope("group", "profile");
+
+  @Test
+  void explicitRetirementStopsNewBorrowsAndWaitsForExistingOnes() throws Exception {
+    var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
+    var provider = provider();
+    var identity = identity("rpc-failure-context");
+    var retirement = new CompletableFuture<Void>();
+    when(provider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(identity));
+    when(provider.retire(identity)).thenReturn(retirement);
+    var manager = new ProviderSessionIdentityManager(() -> provider, router, SCOPE, "provider", 1);
+    try (var credentials = new BackendCredentials("milvus", new char[] {'p'})) {
+      var first = manager.activate(session(), credentials).toCompletableFuture().get();
+      var second = manager.activate(session(), credentials).toCompletableFuture().get();
+      var retired = first.retire().toCompletableFuture();
+      assertFalse(retired.isDone());
+      assertThrows(CompletionException.class,
+          () -> manager.activate(session(), credentials).toCompletableFuture().join());
+      verify(provider, times(1)).retire(identity);
+      first.release().toCompletableFuture().get();
+      second.release().toCompletableFuture().get();
+      verify(provider, never()).close();
+      retirement.complete(null);
+      retired.get();
+      first.retire().toCompletableFuture().get();
+      verify(provider, times(1)).retire(identity);
+      verify(provider).close();
+    } finally {
+      retirement.complete(null);
+      manager.close();
+      router.close();
+    }
+  }
+
+  @Test
+  void rechecksReusedIdentityAndRejectsNewBorrowsAfterPermissionLoss() throws Exception {
+    var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
+    var provider = provider();
+    var identity = identity("acl-recheck-context");
+    var recheck = new CompletableFuture<Void>();
+    var retirement = new CompletableFuture<Void>();
+    when(provider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(identity));
+    when(provider.verifyCurrentAccess(identity)).thenReturn(CompletableFuture.completedFuture(null), recheck);
+    when(provider.retire(identity)).thenReturn(retirement);
+    var manager = new ProviderSessionIdentityManager(() -> provider, router, SCOPE, "provider", 1);
+    try (var credentials = new BackendCredentials("milvus", new char[] {'p'})) {
+      var first = manager.activate(session(), credentials).toCompletableFuture().get();
+      var second = manager.activate(session(), credentials).toCompletableFuture();
+      assertFalse(second.isDone());
+      recheck.completeExceptionally(new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION));
+      var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+          () -> second.get(5, java.util.concurrent.TimeUnit.SECONDS));
+      assertEquals(Reason.INSUFFICIENT_PERMISSION,
+          ((BackendIdentityException) failure.getCause()).reason());
+      assertThrows(CompletionException.class,
+          () -> manager.activate(session(), credentials).toCompletableFuture().join());
+      verify(provider, never()).close();
+      first.release().toCompletableFuture().get();
+      verify(provider, never()).close();
+      retirement.complete(null);
+      verify(provider).close();
+    } finally {
+      retirement.complete(null);
+      manager.close();
+      router.close();
+    }
+  }
+
+  @Test
+  void temporaryRecheckCapacityFailureDoesNotRetireAnotherBorrow() throws Exception {
+    var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
+    var provider = provider();
+    var identity = identity("acl-capacity-context");
+    when(provider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(identity));
+    when(provider.verifyCurrentAccess(identity)).thenReturn(
+        CompletableFuture.completedFuture(null),
+        CompletableFuture.failedFuture(new BackendIdentityException(Reason.RESOURCE_LIMIT)),
+        CompletableFuture.completedFuture(null));
+    var manager = new ProviderSessionIdentityManager(() -> provider, router, SCOPE, "provider", 1);
+    try (var credentials = new BackendCredentials("milvus", new char[] {'p'})) {
+      var first = manager.activate(session(), credentials).toCompletableFuture().get();
+      var failure = assertThrows(CompletionException.class,
+          () -> manager.activate(session(), credentials).toCompletableFuture().join());
+      assertEquals(Reason.RESOURCE_LIMIT, ((BackendIdentityException) failure.getCause()).reason());
+      verify(provider, never()).retire(identity);
+      var next = manager.activate(session(), credentials).toCompletableFuture().get();
+      first.release().toCompletableFuture().get();
+      next.release().toCompletableFuture().get();
+      verify(provider).retire(identity);
+    } finally {
+      manager.close();
+      router.close();
+    }
+  }
+
+  @Test
+  void cancellingARecheckRetainsCapacityUntilItsPhysicalWorkDrains() throws Exception {
+    var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
+    var provider = provider();
+    var identity = identity("acl-cancel-context");
+    var recheck = new CompletableFuture<Void>();
+    var retirement = new CompletableFuture<Void>();
+    when(provider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(identity));
+    when(provider.verifyCurrentAccess(identity)).thenReturn(recheck);
+    when(provider.retire(identity)).thenReturn(retirement);
+    var manager = new ProviderSessionIdentityManager(() -> provider, router, SCOPE, "provider", 1);
+    try (var credentials = new BackendCredentials("milvus", new char[] {'p'})) {
+      var request = manager.activate(session(), credentials).toCompletableFuture();
+      assertTrue(request.cancel(false));
+      assertThrows(CompletionException.class,
+          () -> manager.activate(session(), credentials).toCompletableFuture().join());
+      verify(provider, never()).close();
+      recheck.complete(null);
+      verify(provider, never()).close();
+      retirement.complete(null);
+      verify(provider).close();
+    } finally {
+      recheck.complete(null);
+      retirement.complete(null);
+      manager.close();
+      router.close();
+    }
+  }
+
+  @Test
+  void closedProviderKeepsContainerCapacityUntilAccessCallbacksDrain() throws Exception {
+    var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
+    var firstProvider = provider();
+    var secondProvider = provider();
+    var firstIdentity = identity("acl-callback-first");
+    var secondIdentity = identity("acl-callback-second");
+    var callbackDrain = new CompletableFuture<Void>();
+    when(firstProvider.accessChecksDrained()).thenReturn(callbackDrain);
+    when(firstProvider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(firstIdentity));
+    when(secondProvider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(secondIdentity));
+    var calls = new AtomicInteger();
+    var manager = new ProviderSessionIdentityManager(
+        () -> calls.getAndIncrement() == 0 ? firstProvider : secondProvider,
+        router, SCOPE, "provider", 1);
+    try (var credentials = new BackendCredentials("milvus", new char[] {'p'})) {
+      var first = manager.activate(session(), credentials).toCompletableFuture().get();
+      first.release().toCompletableFuture().get();
+      verify(firstProvider).close();
+      var failure = assertThrows(CompletionException.class,
+          () -> manager.activate(sessionWithSubject((byte) 2), credentials).toCompletableFuture().join());
+      assertEquals(Reason.RESOURCE_LIMIT, ((BackendIdentityException) failure.getCause()).reason());
+      assertEquals(1, calls.get());
+      callbackDrain.complete(null);
+      var second = manager.activate(sessionWithSubject((byte) 2), credentials).toCompletableFuture().get();
+      assertSame(secondIdentity, second.identity());
+      second.release().toCompletableFuture().get();
+    } finally {
+      callbackDrain.complete(null);
+      manager.close();
+      router.close();
+    }
+  }
 
   @Test
   void concurrentBorrowsShareColdActivationAndRetireOnlyAfterTheLastRelease() {
@@ -63,6 +227,66 @@ class ProviderSessionIdentityManagerTest {
       verify(provider, never()).close();
       secondBorrow.release().toCompletableFuture().join();
       verify(provider).close();
+    } finally {
+      manager.close();
+      router.close();
+    }
+  }
+
+  @Test
+  void credentialCopyFailureCompletesSharedWaitersAndReleasesCapacity() throws Exception {
+    var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
+    var failedProvider = provider();
+    var nextProvider = provider();
+    var nextIdentity = identity("after-credential-copy-failure");
+    when(nextProvider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(nextIdentity));
+    var creations = new AtomicInteger();
+    var activationReserved = new java.util.concurrent.CountDownLatch(1);
+    var manager = new ProviderSessionIdentityManager(() -> {
+      if (creations.getAndIncrement() == 0) {
+        activationReserved.countDown();
+        return failedProvider;
+      }
+      return nextProvider;
+    }, router, SCOPE, "provider", 1);
+
+    try (var closedCredentials = new BackendCredentials("milvus", new char[] {'p'});
+         var validCredentials = new BackendCredentials("milvus", new char[] {'p'})) {
+      closedCredentials.close();
+      var first = new CompletableFuture<SessionIdentityLease>();
+      var caller = new Thread(() -> {
+        try {
+          manager.activate(session(), closedCredentials).whenComplete((lease, failure) -> {
+            if (failure == null) first.complete(lease);
+            else first.completeExceptionally(failure);
+          });
+        } catch (RuntimeException failure) {
+          first.completeExceptionally(failure);
+        }
+      });
+      caller.setDaemon(true);
+      CompletableFuture<SessionIdentityLease> shared;
+      synchronized (closedCredentials) {
+        caller.start();
+        assertTrue(activationReserved.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        shared = manager.activate(session(), validCredentials).toCompletableFuture();
+        assertFalse(shared.isDone());
+      }
+      var firstFailure = assertThrows(java.util.concurrent.ExecutionException.class,
+          () -> first.get(5, java.util.concurrent.TimeUnit.SECONDS));
+      var sharedFailure = assertThrows(java.util.concurrent.ExecutionException.class,
+          () -> shared.get(5, java.util.concurrent.TimeUnit.SECONDS));
+      assertTrue(firstFailure.getCause() instanceof IllegalStateException);
+      assertTrue(sharedFailure.getCause() instanceof IllegalStateException);
+      verify(failedProvider, never()).authenticate(any(), eq(SCOPE));
+      verify(failedProvider).close();
+
+      var next = manager.activate(session(), validCredentials).toCompletableFuture()
+          .get(5, java.util.concurrent.TimeUnit.SECONDS);
+      assertSame(nextIdentity, next.identity());
+      assertEquals(2, creations.get());
+      next.release().toCompletableFuture().join();
     } finally {
       manager.close();
       router.close();
@@ -241,26 +465,89 @@ class ProviderSessionIdentityManagerTest {
   }
 
   @Test
-  void failedProviderCloseRemainsOwnedUntilManagerRetriesCleanup() {
+  void failedIdentityRetirementRetainsCapacityUntilBoundedRetry() throws Exception {
     var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
     var provider = provider();
     var identity = identity("context-retry");
-    var connection = mock(AsyncConnection.class);
     when(provider.authenticate(any(), eq(SCOPE)))
         .thenReturn(CompletableFuture.completedFuture(identity));
-    when(provider.connectionFor(identity)).thenReturn(CompletableFuture.completedFuture(connection));
-    org.mockito.Mockito.doThrow(new IllegalStateException("close failed"))
-        .doNothing().when(provider).close();
+    var firstRetirement = new CompletableFuture<Void>();
+    when(provider.retire(identity)).thenReturn(firstRetirement,
+        CompletableFuture.failedFuture(new IllegalStateException("fixture retry failure")),
+        CompletableFuture.completedFuture(null));
     var manager = new ProviderSessionIdentityManager(() -> provider, router, SCOPE, "provider", 1);
     try (var credentials = new BackendCredentials("milvus", new char[] {'p'})) {
       var lease = manager.activate(session(), credentials).toCompletableFuture().join();
-      assertThrows(java.util.concurrent.CompletionException.class,
-          () -> lease.release().toCompletableFuture().join());
+      var release = lease.release().toCompletableFuture();
+      assertFalse(release.isDone());
+      var capacityFailure = assertThrows(CompletionException.class,
+          () -> manager.activate(sessionWithSubject((byte) 1), credentials)
+              .toCompletableFuture().join());
+      assertEquals(Reason.RESOURCE_LIMIT,
+          ((BackendIdentityException) capacityFailure.getCause()).reason());
+
+      firstRetirement.completeExceptionally(new IllegalStateException("fixture cleanup failure"));
+      release.get(5, java.util.concurrent.TimeUnit.SECONDS);
+      verify(provider, times(3)).retire(identity);
+      verify(provider).close();
 
       manager.close();
       router.close();
     }
-    verify(provider, org.mockito.Mockito.times(2)).close();
+  }
+
+  @Test
+  void failedProviderCloseRemainsOwnedUntilManagerRetriesCleanup() throws Exception {
+    var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
+    var provider = provider();
+    var identity = identity("provider-close-retry");
+    when(provider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(identity));
+    org.mockito.Mockito.doThrow(new IllegalStateException("fixture close failure"))
+        .doThrow(new IllegalStateException("fixture close failure"))
+        .doThrow(new IllegalStateException("fixture close failure"))
+        .doNothing().when(provider).close();
+    var manager = new ProviderSessionIdentityManager(() -> provider, router, SCOPE, "provider", 1);
+    try (var credentials = new BackendCredentials("milvus", new char[] {'p'})) {
+      var lease = manager.activate(session(), credentials).toCompletableFuture().get();
+      assertThrows(java.util.concurrent.ExecutionException.class,
+          () -> lease.release().toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS));
+      var capacityFailure = assertThrows(CompletionException.class,
+          () -> manager.activate(sessionWithSubject((byte) 1), credentials)
+              .toCompletableFuture().join());
+      assertEquals(Reason.RESOURCE_LIMIT,
+          ((BackendIdentityException) capacityFailure.getCause()).reason());
+
+      manager.close();
+      verify(provider, times(4)).close();
+    } finally {
+      manager.close();
+      router.close();
+    }
+  }
+
+  @Test
+  void managerCloseRetainsBorrowedContainerForBoundedRetryAfterRelease() {
+    var router = new HBaseConnectionRouter(mock(HBaseConnectionFactory.class));
+    var provider = provider();
+    var identity = identity("context-close-retry");
+    when(provider.authenticate(any(), eq(SCOPE)))
+        .thenReturn(CompletableFuture.completedFuture(identity));
+    when(provider.isFullyDrained()).thenReturn(false, false, false, true);
+    var manager = new ProviderSessionIdentityManager(() -> provider, router, SCOPE, "provider", 1);
+    try (var credentials = new BackendCredentials("milvus", new char[] {'p'})) {
+      var lease = manager.activate(session(), credentials).toCompletableFuture().join();
+
+      assertThrows(IllegalStateException.class, manager::close);
+      verify(provider, times(3)).close();
+
+      lease.release().toCompletableFuture().join();
+      verify(provider).retire(identity);
+      verify(provider, times(4)).close();
+    } finally {
+      manager.close();
+      router.close();
+    }
   }
 
   @Test
@@ -286,7 +573,30 @@ class ProviderSessionIdentityManagerTest {
   private static HBaseBackendIdentityProvider provider() {
     var provider = mock(HBaseBackendIdentityProvider.class);
     when(provider.providerId()).thenReturn("provider");
+    try {
+      when(provider.borrow(any())).thenAnswer(invocation -> borrow(invocation.getArgument(0)));
+    } catch (BackendIdentityException impossible) {
+      throw new AssertionError(impossible);
+    }
+    when(provider.retire(any())).thenReturn(CompletableFuture.completedFuture(null));
+    when(provider.verifyCurrentAccess(any())).thenReturn(CompletableFuture.completedFuture(null));
+    when(provider.accessChecksDrained()).thenReturn(CompletableFuture.completedFuture(null));
+    when(provider.isFullyDrained()).thenReturn(true);
     return provider;
+  }
+
+  private static BackendIdentityBorrow borrow(AuthorizedBackendIdentity identity) {
+    return new BackendIdentityBorrow() {
+      @Override
+      public AuthorizedBackendIdentity identity() {
+        return identity;
+      }
+
+      @Override
+      public CompletionStage<Void> release() {
+        return CompletableFuture.completedFuture(null);
+      }
+    };
   }
 
   private static AuthorizedBackendIdentity identity(String context) {

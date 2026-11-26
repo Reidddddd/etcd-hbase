@@ -101,6 +101,7 @@ final class RangeResultCache implements AutoCloseable {
   private long retainedBytes;
   private int peakEntries;
   private boolean closed;
+  private Object invalidationGeneration = new Object();
 
   RangeResultCache(long maximumBytes, int maximumEntries, int maximumRecords,
       BudgetManager budget, String groupId, RequestScope ownerScope) throws BackendFailure {
@@ -131,6 +132,36 @@ final class RangeResultCache implements AutoCloseable {
   /** Only an exhausted, materialized result is eligible, including a negative result. */
   synchronized boolean put(Key key, List<StoredRecord> result, long count, boolean exhausted) {
     return put(key, result, count, exhausted, Optional.empty());
+  }
+
+  synchronized Object invalidationGeneration() {
+    return invalidationGeneration;
+  }
+
+  synchronized boolean isCurrent(Object generation) {
+    return !closed && ownerLease.isActive() && generation == invalidationGeneration;
+  }
+
+  /** Clears one authorization and fences fills started before this invalidation. */
+  synchronized void invalidateAuthorization(ByteKey authorization) {
+    Objects.requireNonNull(authorization, "authorization");
+    if (authorization.length() != 32) throw new IllegalArgumentException("invalid authorization digest");
+    if (closed) return;
+    invalidationGeneration = new Object();
+    var iterator = entries.entrySet().iterator();
+    while (iterator.hasNext()) {
+      var entry = iterator.next();
+      if (entry.getKey().authorization().equals(authorization)) {
+        retainedBytes -= entry.getValue().bytes();
+        iterator.remove();
+      }
+    }
+  }
+
+  synchronized boolean putIfCurrent(Key key, List<StoredRecord> result, long count,
+      boolean exhausted, Optional<UnchangedRangeProof.Baseline> baseline, Object generation) {
+    if (generation != invalidationGeneration) return false;
+    return put(key, result, count, exhausted, baseline);
   }
 
   private synchronized boolean put(Key key, List<StoredRecord> result, long count, boolean exhausted,
@@ -202,7 +233,7 @@ final class RangeResultCache implements AutoCloseable {
 
   /** Accepts only a standalone result whose original protected read has finished successfully. */
   boolean putValidated(long tableGroupId, ByteKey storageProfile,
-      TxnEvaluator.ValidatedRead validated, RequestScope scope) {
+      TxnEvaluator.ValidatedRead validated, RequestScope scope, Object generation) {
     Objects.requireNonNull(validated, "validated");
     Objects.requireNonNull(scope, "scope");
     if (!validated.belongsTo(scope) || scope.isClosed() || scope.isDeadlineExceeded()) return false;
@@ -212,8 +243,8 @@ final class RangeResultCache implements AutoCloseable {
         || !(root.responses().getFirst() instanceof ResultNode.Range range)) return false;
     var captured = context.orElseThrow();
     Key key = Key.from(tableGroupId, storageProfile, captured.view(), captured.command());
-    return put(key, range.records(), range.count(), !range.more(),
-        Optional.of(UnchangedRangeProof.Baseline.capture(captured.view())));
+    return putIfCurrent(key, range.records(), range.count(), !range.more(),
+        Optional.of(UnchangedRangeProof.Baseline.capture(captured.view())), generation);
   }
 
   /**

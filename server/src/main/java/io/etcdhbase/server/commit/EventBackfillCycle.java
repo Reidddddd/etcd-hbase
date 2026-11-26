@@ -2,6 +2,7 @@ package io.etcdhbase.server.commit;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
 import io.etcdhbase.core.commit.CommitState;
@@ -23,6 +24,7 @@ import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.hbase.storage.HBaseEventRevisionIndexRepository;
+import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
@@ -52,13 +54,15 @@ final class EventBackfillCycle {
   private final InvocationService invocations;
   private final EventBackfillExecutor publisher;
   private final BudgetManager budgets;
+  private final AuthorizedBackendIdentity serviceIdentity;
   private final ByteKey authorization;
   private final Clock clock;
 
   EventBackfillCycle(String tableGroup, SerialMutationQueue ownerLane, TableGroupStores stores,
       EventHistoryPinManager pins,
       InvocationService invocations, EventBackfillPreparation preparation, CommitPublisher publisher,
-      BudgetManager budgets, ByteKey authorization, Clock clock) {
+      BudgetManager budgets, AuthorizedBackendIdentity serviceIdentity,
+      ByteKey authorization, Clock clock) {
     this.tableGroup = Objects.requireNonNull(tableGroup, "tableGroup");
     this.ownerLane = Objects.requireNonNull(ownerLane, "ownerLane");
     this.stores = Objects.requireNonNull(stores, "stores");
@@ -67,8 +71,11 @@ final class EventBackfillCycle {
     this.clock = Objects.requireNonNull(clock, "clock");
     this.publisher = new EventBackfillExecutor(stores.control(), preparation, publisher, clock);
     this.budgets = Objects.requireNonNull(budgets, "budgets");
+    this.serviceIdentity = Objects.requireNonNull(serviceIdentity, "serviceIdentity");
     this.authorization = Objects.requireNonNull(authorization, "authorization");
-    if (tableGroup.isBlank() || authorization.length() != 32 || pins.namespace().isEmpty()) {
+    if (tableGroup.isBlank() || authorization.length() != 32 || pins.namespace().isEmpty()
+        || !tableGroup.equals(serviceIdentity.scope().tableGroupId())
+        || !serviceIdentity.allowedTableGroupIds().contains(tableGroup)) {
       throw new IllegalArgumentException("invalid event backfill identity or selected registry");
     }
   }
@@ -189,9 +196,12 @@ final class EventBackfillCycle {
         return readPublicationBase(owner, checkpoint, protectedCheckpoint, initialCapture, laneScope)
             .thenCompose(state -> {
               PublicationPlan plan = publicationPlan(owner, checkpoint, state, authorization);
+              CommitAuthorizationProof publicationProof =
+                  ServiceAuthorizationContextReference.publicationProof(
+                      serviceIdentity, authorization, state.authorizationBarrierGeneration());
               return invocations.bindOrJoin(plan.invocation(), laneScope)
                   .thenCompose(invocation -> publishOnLane(invocation, owner, plan.checkpoint(),
-                      protectedCheckpoint, laneScope, initialCapture));
+                      protectedCheckpoint, publicationProof, laneScope, initialCapture));
             });
       });
     } catch (RuntimeException | Error failure) {
@@ -217,6 +227,7 @@ final class EventBackfillCycle {
           () -> new IllegalStateException("backfill control row is missing")).state();
       long minimumFinalizedSequence = initialCapture ? checkpoint.upperSequence() : protectedCheckpoint.sequence();
       if (!state.supportsEventRevisionIndex()
+          || !state.supportsAuthorizationBarrier()
           || !pins.namespace().equals(state.eventRegistryNamespace())
           || !checkpoint.registryIdentity().equals(pins.registryIdentity())
           || state.ownerEpoch() != owner.epoch()
@@ -251,7 +262,7 @@ final class EventBackfillCycle {
   private CompletableFuture<CommitOutcomeResolver.Resolution> publishOnLane(
       InvocationBinding invocation, CommitOwnerService.OwnerToken owner,
       EventIndexBackfillCheckpoint checkpoint, EventIndexBackfillCheckpoint protectedCheckpoint,
-      RequestScope scope, boolean initialCapture) {
+      CommitAuthorizationProof publicationProof, RequestScope scope, boolean initialCapture) {
     BudgetManager.Account account;
     try {
       account = budgets.admitReserved(tableGroup, scope, RESERVATION, READ_LIMITS);
@@ -268,7 +279,7 @@ final class EventBackfillCycle {
       CompletableFuture<CommitOutcomeResolver.Resolution> publication;
       try {
         publication = publisher.publish(invocation, owner, checkpoint, protectedWindow,
-            scope, account, budget);
+            publicationProof, scope, account, budget);
       } catch (RuntimeException | Error failure) {
         protectedWindow.close();
         return awaitWindowRelease(protectedWindow, CompletableFuture.failedFuture(failure));

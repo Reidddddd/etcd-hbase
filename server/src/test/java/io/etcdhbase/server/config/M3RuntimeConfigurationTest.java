@@ -50,11 +50,11 @@ class M3RuntimeConfigurationTest {
   }
 
   @Test
-  void productionLoaderRejectsM4AndCannotBeOverriddenByJson() throws Exception {
+  void productionLoaderKeepsTheTrustedProfileAndCannotBeOverriddenByJson() throws Exception {
     Path example = Path.of("..", "config", "examples", "m4", "activation.json");
     String enabled = Files.readString(example);
-    assertThrows(M3RuntimeConfiguration.LeaseActivationUnavailable.class,
-        () -> load(enabled));
+    assertEquals(M3RuntimeConfiguration.ActivationProfile.PRODUCTION, load(enabled).activationProfile());
+    assertTrue(load(enabled).m4LeaseApiEnabled());
     String selfDeclaredProfile = enabled.replace("\"m4_lease_api_enabled\": true,",
         "\"activation_profile\": \"PUBLIC_TEST\",\n  \"m4_lease_api_enabled\": true,");
     assertThrows(IllegalArgumentException.class, () -> load(selfDeclaredProfile));

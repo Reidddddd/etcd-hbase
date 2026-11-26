@@ -36,6 +36,9 @@ public final class CommitControlMessages {
     state.pendingEventRegistryNamespace().ifPresent(value ->
         builder.setPendingEventRegistryNamespace(ByteString.copyFrom(value.bytes())));
     if (state.eventRegistryAttempts() > 0) builder.setEventRegistryAttempts(state.eventRegistryAttempts());
+    if (state.supportsAuthorizationBarrier()) {
+      builder.setAuthorizationBarrierGeneration(state.authorizationBarrierGeneration());
+    }
     byte[] encoded = builder.build().toByteArray();
     requireLength(encoded.length);
     return encoded;
@@ -57,6 +60,8 @@ public final class CommitControlMessages {
           || !message.hasOwnerLeaseDeadlineEpochMillis() || !message.hasStateVersion()
           || !message.hasPublishedSequence() || !message.hasPublishedRevision()
           || !message.hasFinalizedSequence() || !message.hasFinalizedRevision()
+          || message.hasAuthorizationBarrierGeneration()
+              && message.getAuthorizationBarrierGeneration() < 0
           || !message.hasCompactRevision()) {
         throw invalid();
       }
@@ -77,7 +82,10 @@ public final class CommitControlMessages {
           message.getOwnerLeaseDeadlineEpochMillis(), message.getStateVersion(),
           message.getPublishedSequence(), message.getPublishedRevision(),
           message.getFinalizedSequence(), message.getFinalizedRevision(), publication,
-          message.getCompactRevision(), registryNamespace, pendingNamespace, message.getEventRegistryAttempts());
+          message.getCompactRevision(), registryNamespace, pendingNamespace,
+          message.getEventRegistryAttempts(), message.hasAuthorizationBarrierGeneration(),
+          message.hasAuthorizationBarrierGeneration()
+              ? message.getAuthorizationBarrierGeneration() : 0);
     } catch (InvalidProtocolBufferException | IllegalArgumentException failure) {
       throw new IllegalArgumentException("invalid persisted commit control state", failure);
     }

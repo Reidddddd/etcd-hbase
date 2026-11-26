@@ -13,7 +13,6 @@ import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.core.scan.ScanScheduler;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
-import io.etcdhbase.hbase.storage.HBaseRecordStore;
 import io.etcdhbase.hbase.storage.StorageTableBinding;
 import io.etcdhbase.server.observability.RequestMetrics;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
@@ -72,17 +71,19 @@ public final class TxnReadExecutor {
   public CompletableFuture<TxnEvaluator.ValidatedRead> execute(TxnCommand command,
       ByteKey authorizationDigest, AuthorizedBackendIdentity identity,
       RequestScope scope, BudgetManager.Account account) {
-    return execute(command, authorizationDigest, identity, scope, account, true);
+    return execute(command, authorizationDigest, identity, scope, account, true, () -> { });
   }
 
   CompletableFuture<TxnEvaluator.ValidatedRead> execute(TxnCommand command,
       ByteKey authorizationDigest, AuthorizedBackendIdentity identity,
-      RequestScope scope, BudgetManager.Account account, boolean recordTxnMetrics) {
+      RequestScope scope, BudgetManager.Account account, boolean recordTxnMetrics,
+      Runnable onUserBackendRejection) {
     Objects.requireNonNull(command, "command");
     Objects.requireNonNull(authorizationDigest, "authorizationDigest");
     Objects.requireNonNull(identity, "identity");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
+    Objects.requireNonNull(onUserBackendRejection, "onUserBackendRejection");
     if (command.mayWrite() || authorizationDigest.length() != 32 || !account.belongsTo(scope)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("invalid read-only transaction"));
     }
@@ -103,7 +104,9 @@ public final class TxnReadExecutor {
     CompletableFuture<TxnEvaluator.ValidatedRead> operation;
     try {
       long started = System.nanoTime();
-      operation = HBaseRecordStore.open(connections, identity, primary, scope, backendWorker)
+      var cacheGeneration = readCache.map(RangeReadCache::beginRead);
+      operation = UserIdentityRecordStore.open(
+              connections, identity, primary, scope, backendWorker, onUserBackendRejection)
           .thenCompose(physical -> TxnReadSession.open(views, List.of(), authorizationDigest,
               physical, manifests, primary.codec()::bucket, buckets, scope))
           .thenCompose(session -> {
@@ -114,7 +117,8 @@ public final class TxnReadExecutor {
                 new TxnEvaluator.Limits(limits.pointBytes(), limits.resultBytes(), limits.workingBytes()),
                 primary.codec()::bucket);
             return readCache.isPresent()
-                ? readCache.orElseThrow().read(command, session, evaluator, account, scope)
+                ? readCache.orElseThrow().read(command, session, evaluator, account, scope,
+                    cacheGeneration.orElseThrow())
                 : evaluator.evaluate(command, Optional.empty()).thenCompose(TxnEvaluator.Evaluation::finishReadOnly);
           })
           .whenComplete((ignored, failure) -> {
@@ -130,6 +134,10 @@ public final class TxnReadExecutor {
     }
     operation.whenComplete((ignored, failure) -> drained.complete(null));
     return operation.copy();
+  }
+
+  void invalidateAuthorization(ByteKey authorization) {
+    readCache.ifPresent(cache -> cache.invalidateAuthorization(authorization));
   }
 
   private static BackendFailure inactive(RequestScope scope) {

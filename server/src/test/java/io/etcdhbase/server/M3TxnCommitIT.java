@@ -64,6 +64,7 @@ import io.etcdhbase.server.commit.TableGroupStores;
 import io.etcdhbase.server.commit.TxnCommitPreparation;
 import io.etcdhbase.server.commit.TxnExecutionLimits;
 import io.etcdhbase.server.commit.TxnMutationExecutor;
+import io.etcdhbase.server.commit.CommitAuthorizationProofTestSupport;
 import io.etcdhbase.server.commit.TxnOwnerProcessor;
 import io.etcdhbase.server.commit.TxnReadExecutor;
 import io.etcdhbase.server.commit.TxnGateway;
@@ -376,8 +377,10 @@ class M3TxnCommitIT {
             environment.primary(), environment.current(),
             new SnapshotPinConfiguration(2, 16, Duration.ofSeconds(60)), scope).join();
         long now = System.currentTimeMillis();
-        owner = new CommitOwnerService(stores.control()).claim("m3-txn-test-owner", now,
+        var claimed = new CommitOwnerService(stores.control()).claim("m3-txn-test-owner", now,
             now + Duration.ofHours(1).toMillis(), scope).join().orElseThrow();
+        owner = new io.etcdhbase.core.commit.AuthorizationBarrierUpgrade(stores.control())
+            .enable(claimed, now, scope).join();
       }
       invocations = new InvocationService(stores.invocations());
       preparation = new TxnCommitPreparation(new ResultPreparation(stores.resultRepository()),
@@ -423,7 +426,9 @@ class M3TxnCommitIT {
         var evaluated = evaluator.evaluate(command, Optional.of(binding)).join();
         var ready = preparation.prepare(evaluated, binding, scope, account).join();
         if (ready instanceof TxnCommitPreparation.Sealed sealed) {
-          var outcome = publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope).join();
+          var outcome = publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope,
+              CommitAuthorizationProofTestSupport.serviceProof(
+                  environment.identity(), AUTHORIZATION, control.authorizationBarrierGeneration())).join();
           assertEquals(CommitOutcomeResolver.State.SELECTED_FINALIZED, outcome.state());
           return new Receipt(id, requestDigest, outcome.decision().orElseThrow().revision(), true);
         }
@@ -487,7 +492,9 @@ class M3TxnCommitIT {
             new CommitPlanVerifier(stores.manifests(), stores.materialization(), stores.results()),
             stores.invocations(), handoff, finalizer);
         assertThrows(CompletionException.class,
-            () -> interruptedPublisher.publish(sealed.invocation(), owner, sealed.manifest(), scope).join());
+            () -> interruptedPublisher.publish(sealed.invocation(), owner, sealed.manifest(), scope,
+                CommitAuthorizationProofTestSupport.serviceProof(environment.identity(), AUTHORIZATION,
+                    control.authorizationBarrierGeneration())).join());
         assertEquals(2, interrupted.applied.get());
         var pending = stores.outcomes().resolve(sealed.invocation(), scope).join();
         assertEquals(CommitOutcomeResolver.State.SELECTED_PENDING, pending.state());
@@ -666,7 +673,9 @@ class M3TxnCommitIT {
         var evaluated = evaluator(recovery, account, underlying).evaluate(command, Optional.of(replacement)).join();
         var prepared = assertInstanceOf(TxnCommitPreparation.Sealed.class,
             preparation.prepare(evaluated, replacement, recovery, account).join());
-        var published = publisher.publish(prepared.invocation(), nextOwner, prepared.manifest(), recovery).join();
+        var published = publisher.publish(prepared.invocation(), nextOwner, prepared.manifest(), recovery,
+            CommitAuthorizationProofTestSupport.serviceProof(
+                environment.identity(), AUTHORIZATION, control.authorizationBarrierGeneration())).join();
         assertEquals(CommitOutcomeResolver.State.SELECTED_FINALIZED, published.state());
         assertEquals(4, published.decision().orElseThrow().revision());
       } finally {
@@ -753,7 +762,10 @@ class M3TxnCommitIT {
         var proposed = InvocationBinding.begin(id, requestDigest, AUTHORIZATION, TransactionId.create(),
             owner.epoch(), control.publishedSequence(), control.publishedRevision());
         var binding = invocations.bindOrJoin(proposed, scope).join();
-        assertEquals(id, mutations.executeNew(command, binding, owner, environment.identity(), scope, account).join());
+        assertEquals(id, mutations.executeNew(command, binding, owner, environment.identity(),
+            CommitAuthorizationProofTestSupport.serviceProof(
+                environment.identity(), AUTHORIZATION, control.authorizationBarrierGeneration()),
+            scope, account).join());
         var durable = stores.invocations().read(id, scope).join().orElseThrow();
         if (durable.state() == InvocationBinding.State.NO_CHANGES) {
           return new Receipt(id, requestDigest, binding.baseRevision(), false);
@@ -777,7 +789,10 @@ class M3TxnCommitIT {
         try (var held = account.tryAcquire(new BudgetManager.Work(0, 4, 0, 4, 0)).orElseThrow()) {
           var command = new TxnCommand(List.of(), List.of(put("blocked", "x")), List.of());
           var failure = assertThrows(java.util.concurrent.CompletionException.class,
-              () -> mutations.executeNew(command, binding, owner, environment.identity(), scope, account).join());
+              () -> mutations.executeNew(command, binding, owner, environment.identity(),
+                  CommitAuthorizationProofTestSupport.serviceProof(
+                      environment.identity(), AUTHORIZATION, control.authorizationBarrierGeneration()),
+                  scope, account).join());
           assertEquals(BackendFailure.Category.RESOURCE_LIMIT,
               assertInstanceOf(BackendFailure.class, failure.getCause()).category());
           assertEquals(InvocationBinding.State.PREPARING,
@@ -805,12 +820,14 @@ class M3TxnCommitIT {
             Duration.ofMinutes(1).toNanos(), 1, operation);
         var binding = invocations.bindOrJoin(InvocationBinding.begin(id, requestDigest, AUTHORIZATION,
             TransactionId.create(), owner.epoch(), state.publishedSequence(), state.publishedRevision()), scope).join();
+        var authorization = CommitAuthorizationProofTestSupport.verified(
+            environment.identity(), AUTHORIZATION, state.authorizationBarrierGeneration());
         var response = assertInstanceOf(OwnerForwarding.Completed.class,
-            processor.process(request, binding, environment.identity(), scope).join());
+            processor.process(request, binding, authorization, scope).join());
         assertArrayEquals(id.bytes(), response.operationResult());
         var persisted = stores.invocations().read(id, scope).join().orElseThrow();
         var replay = assertInstanceOf(OwnerForwarding.Completed.class,
-            processor.process(request, persisted, environment.identity(), scope).join());
+            processor.process(request, persisted, authorization, scope).join());
         assertArrayEquals(id.bytes(), replay.operationResult());
       } finally {
         closeScope(scope);
@@ -944,9 +961,11 @@ class M3TxnCommitIT {
       var ownerProcessor = new TxnOwnerProcessor(environment.system().tableGroupId(), token, budgets,
           reservation(), mutations, stores.outcomes(), 1_572_864);
       return new MutationForwardReceiver(stores.control(), invocations,
-          (peer, request, scope) -> peer.equals("fixture-peer")
+          (peer, request, barrierGeneration, scope) -> peer.equals("fixture-peer")
               ? CompletableFuture.completedFuture(new MutationForwardReceiver.VerifiedAuthorization(
-                  environment.identity(), AUTHORIZATION))
+                  environment.identity(), AUTHORIZATION,
+                  CommitAuthorizationProofTestSupport.serviceProof(
+                      environment.identity(), AUTHORIZATION, barrierGeneration)))
               : CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.PERMISSION)), ownerProcessor);
     }
 

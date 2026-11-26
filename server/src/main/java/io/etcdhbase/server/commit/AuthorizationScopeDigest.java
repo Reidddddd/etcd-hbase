@@ -1,6 +1,7 @@
 package io.etcdhbase.server.commit;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.auth.AuthSession;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -35,6 +36,33 @@ final class AuthorizationScopeDigest {
       return ByteKey.copyOf(MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()));
     } catch (IOException | NoSuchAlgorithmException failure) {
       throw new IllegalStateException("cannot derive the authorization scope digest", failure);
+    }
+  }
+
+  /** Binds read views and their cache proofs to the durable session authorization generation. */
+  static ByteKey fromSessionRead(AuthorizedBackendIdentity identity, AuthSession session) {
+    Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(session, "session");
+    if (session.status() != AuthSession.Status.ACTIVE
+        || !identity.providerId().equals(session.providerId())
+        || !identity.scope().equals(session.scope())
+        || identity.credentialGeneration() != session.credentialGeneration()) {
+      throw new IllegalArgumentException("read identity does not match the active session");
+    }
+    try {
+      var bytes = new ByteArrayOutputStream();
+      try (var output = new DataOutputStream(bytes)) {
+        output.writeUTF("etcd-hbase/session-read-authorization/v1");
+        output.write(fromIdentity(identity).bytes());
+        output.writeUTF(session.trustDomain());
+        output.write(session.datasetDigest().bytes());
+        output.write(session.subjectDigest().bytes());
+        output.writeLong(session.credentialGeneration());
+        output.writeLong(session.authorizationGeneration());
+      }
+      return ByteKey.copyOf(MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()));
+    } catch (IOException | NoSuchAlgorithmException failure) {
+      throw new IllegalStateException("cannot derive the read authorization scope digest", failure);
     }
   }
 }

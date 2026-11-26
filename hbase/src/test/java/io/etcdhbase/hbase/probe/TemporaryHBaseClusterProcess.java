@@ -9,10 +9,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import javax.security.auth.login.AppConfigurationEntry;
+import javax.security.auth.login.LoginContext;
+import javax.security.auth.login.LoginException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.client.AsyncConnection;
@@ -115,10 +119,11 @@ public final class TemporaryHBaseClusterProcess implements AutoCloseable {
         Configuration client = cluster.clientConfiguration();
         System.setProperty(
             "java.security.krb5.conf", client.get(TemporaryKerberosSecurity.PREFIX + "krb5"));
+        String adminPrincipal = "admin@" + client.get(TemporaryKerberosSecurity.PREFIX + "realm");
+        Path adminKeytab = Path.of(client.get(TemporaryKerberosSecurity.PREFIX + "admin.keytab"));
+        refreshKerberosConfiguration(adminPrincipal, adminKeytab);
         try (var user =
-            KerberosUserContext.fromKeytab(
-                "admin@" + client.get(TemporaryKerberosSecurity.PREFIX + "realm"),
-                Path.of(client.get(TemporaryKerberosSecurity.PREFIX + "admin.keytab")))) {
+            KerberosUserContext.fromKeytab(adminPrincipal, adminKeytab)) {
           cluster.waitForClientReadiness(user);
         }
       } else {
@@ -138,6 +143,23 @@ public final class TemporaryHBaseClusterProcess implements AutoCloseable {
           "temporary HBase cluster did not become ready to clients; server log is " + logFile,
           readinessFailure);
     }
+  }
+
+  private static void refreshKerberosConfiguration(String principal, Path keytab)
+      throws LoginException {
+    // The JDK caches krb5.conf across sequential test clusters in this JVM.
+    var entry = new AppConfigurationEntry("com.sun.security.auth.module.Krb5LoginModule",
+        AppConfigurationEntry.LoginModuleControlFlag.REQUIRED,
+        Map.of("principal", principal, "useKeyTab", "true", "keyTab", keytab.toString(),
+            "doNotPrompt", "true", "refreshKrb5Config", "true"));
+    var configuration = new javax.security.auth.login.Configuration() {
+      @Override public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
+        return new AppConfigurationEntry[] {entry};
+      }
+    };
+    var login = new LoginContext("temporary-hbase-configuration", null, null, configuration);
+    login.login();
+    login.logout();
   }
 
   public Configuration clientConfiguration() {

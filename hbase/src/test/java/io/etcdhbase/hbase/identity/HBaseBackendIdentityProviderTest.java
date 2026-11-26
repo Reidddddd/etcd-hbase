@@ -30,6 +30,7 @@ import io.etcdhbase.spi.identity.BackendIdentityException.Reason;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Set;
+import java.util.OptionalLong;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -49,6 +50,115 @@ import org.junit.jupiter.api.Test;
 class HBaseBackendIdentityProviderTest {
   private static final AuthenticationScope SCOPE = new AuthenticationScope("group", "backend");
   private static final Duration TIMEOUT = Duration.ofSeconds(5);
+
+  @Test
+  void reportsOnlyTheGenerationAttestedByTheAuthenticatedContext() throws Exception {
+    var connection = mock(AsyncConnection.class);
+    var context = context("alice");
+    when(context.credentialGeneration()).thenReturn(OptionalLong.of(12));
+    try (var provider = provider((credentials, scope) -> context,
+        (backend, scope) -> CompletableFuture.completedFuture(null),
+        (configuration, user) -> CompletableFuture.completedFuture(connection), TIMEOUT)) {
+      var identity = authenticate(provider).get(5, TimeUnit.SECONDS);
+      assertTrue(identity.hasKnownCredentialGeneration());
+      assertEquals(12, identity.credentialGeneration());
+    }
+  }
+
+  @Test
+  void missingGenerationIsExplicitlyUnknown() throws Exception {
+    var context = context("alice");
+    when(context.credentialGeneration()).thenReturn(OptionalLong.empty());
+    try (var provider = provider((credentials, scope) -> context,
+        (backend, scope) -> CompletableFuture.completedFuture(null),
+        (configuration, user) -> CompletableFuture.completedFuture(mock(AsyncConnection.class)), TIMEOUT)) {
+      var identity = authenticate(provider).get(5, TimeUnit.SECONDS);
+      assertFalse(identity.hasKnownCredentialGeneration());
+      assertTrue(identity.toString().contains("unknown"));
+    }
+  }
+
+  @Test
+  void accessRecheckUsesTheRealConnectionAndRetiresOnPermissionLoss() throws Exception {
+    var context = context("alice");
+    var connection = mock(AsyncConnection.class);
+    var calls = new AtomicInteger();
+    try (var provider = provider(
+        (credentials, scope) -> context,
+        (backend, scope) -> {
+          assertSame(connection, backend);
+          return calls.getAndIncrement() == 0 ? CompletableFuture.completedFuture(null)
+              : CompletableFuture.failedFuture(new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION));
+        },
+        (configuration, user) -> CompletableFuture.completedFuture(connection), TIMEOUT)) {
+      AuthorizedBackendIdentity identity = authenticate(provider).get(5, TimeUnit.SECONDS);
+      var existing = provider.borrow(identity);
+      assertReason(Reason.INSUFFICIENT_PERMISSION,
+          provider.verifyCurrentAccess(identity).toCompletableFuture());
+      assertThrows(BackendIdentityException.class, () -> provider.borrow(identity));
+      verify(connection, never()).close();
+      existing.release().toCompletableFuture().get(5, TimeUnit.SECONDS);
+      provider.retire(identity).toCompletableFuture().get(5, TimeUnit.SECONDS);
+      verify(connection).close();
+      verify(context).close();
+    }
+  }
+
+  @Test
+  void timedOutAccessRecheckKeepsConnectionUntilActualVerifierWorkDrains() throws Exception {
+    var context = context("alice");
+    var connection = mock(AsyncConnection.class);
+    var pending = new CompletableFuture<Void>();
+    var calls = new AtomicInteger();
+    try (var provider = provider(
+        (credentials, scope) -> context,
+        (backend, scope) -> calls.getAndIncrement() == 0
+            ? CompletableFuture.completedFuture(null) : pending,
+        (configuration, user) -> CompletableFuture.completedFuture(connection), Duration.ofSeconds(1))) {
+      AuthorizedBackendIdentity identity = authenticate(provider).get(5, TimeUnit.SECONDS);
+      assertReason(Reason.TIMEOUT, provider.verifyCurrentAccess(identity).toCompletableFuture());
+      assertThrows(BackendIdentityException.class, () -> provider.borrow(identity));
+      verify(connection, never()).close();
+      var retirement = provider.retire(identity).toCompletableFuture();
+      assertFalse(retirement.isDone());
+      pending.complete(null);
+      retirement.get(5, TimeUnit.SECONDS);
+      verify(connection).close();
+      verify(context).close();
+    } finally {
+      pending.complete(null);
+    }
+  }
+
+  @Test
+  void accessRecheckKeepsCapacityWhileItsResultCallbackIsBlocked() throws Exception {
+    var pending = new CompletableFuture<Void>();
+    var callbackEntered = new CountDownLatch(1);
+    var releaseCallback = new CountDownLatch(1);
+    var calls = new AtomicInteger();
+    try (var provider = provider(
+        (credentials, scope) -> context("alice"),
+        (backend, scope) -> calls.getAndIncrement() == 0
+            ? CompletableFuture.completedFuture(null) : pending,
+        (configuration, user) -> CompletableFuture.completedFuture(mock(AsyncConnection.class)),
+        TIMEOUT, 1)) {
+      AuthorizedBackendIdentity identity = authenticate(provider).get(5, TimeUnit.SECONDS);
+      var first = provider.verifyCurrentAccess(identity).toCompletableFuture();
+      var callback = first.thenRun(() -> blockCallback(callbackEntered, releaseCallback));
+      pending.complete(null);
+      assertTrue(callbackEntered.await(5, TimeUnit.SECONDS));
+      assertReason(Reason.RESOURCE_LIMIT, provider.verifyCurrentAccess(identity).toCompletableFuture());
+      var notificationDrain = provider.accessChecksDrained().toCompletableFuture();
+      assertFalse(notificationDrain.isDone());
+      provider.retire(identity).toCompletableFuture().get(5, TimeUnit.SECONDS);
+      releaseCallback.countDown();
+      callback.get(5, TimeUnit.SECONDS);
+      notificationDrain.get(5, TimeUnit.SECONDS);
+    } finally {
+      pending.complete(null);
+      releaseCallback.countDown();
+    }
+  }
 
   @Test
   void verifiesBackendBeforePublicationAndReusesOnlyTheIssuedIdentity() throws Exception {
@@ -193,6 +303,155 @@ class HBaseBackendIdentityProviderTest {
 
       AuthorizedBackendIdentity third = authenticateAfterCleanup(provider, "carol");
       assertNotEquals(first.contextRef(), third.contextRef());
+    }
+  }
+
+  @Test
+  void retirementStopsNewBorrowsAndWaitsForExistingBorrowToDrain() throws Exception {
+    var context = context("alice");
+    var connection = mock(AsyncConnection.class);
+    try (var provider = provider(
+        (credentials, scope) -> context,
+        (backend, scope) -> CompletableFuture.completedFuture(null),
+        (configuration, user) -> CompletableFuture.completedFuture(connection),
+        TIMEOUT)) {
+      AuthorizedBackendIdentity identity = authenticate(provider).get(5, TimeUnit.SECONDS);
+      var borrow = provider.borrow(identity);
+      var retirement = provider.retire(identity).toCompletableFuture();
+
+      assertFalse(retirement.isDone(), "retirement waits until request work releases its borrow");
+      assertThrows(BackendIdentityException.class, () -> provider.borrow(identity));
+      assertReason(Reason.INSUFFICIENT_PERMISSION, provider.connectionFor(identity).toCompletableFuture());
+
+      borrow.release().toCompletableFuture().get(5, TimeUnit.SECONDS);
+      borrow.release().toCompletableFuture().get(5, TimeUnit.SECONDS);
+      retirement.get(5, TimeUnit.SECONDS);
+
+      var order = inOrder(connection, context);
+      order.verify(connection).close();
+      order.verify(context).close();
+    }
+  }
+
+  @Test
+  void identityCleanupFailureKeepsCapacityAndCanBeRetried() throws Exception {
+    var context = context("alice");
+    var connection = mock(AsyncConnection.class);
+    doThrow(new IOException("fixture-private-close-diagnostic")).doNothing()
+        .when(connection).close();
+    try (var provider = provider(
+        (credentials, scope) -> context,
+        (backend, scope) -> CompletableFuture.completedFuture(null),
+        (configuration, user) -> CompletableFuture.completedFuture(connection),
+        TIMEOUT,
+        1)) {
+      AuthorizedBackendIdentity identity = authenticate(provider).get(5, TimeUnit.SECONDS);
+
+      var failure = assertThrows(ExecutionException.class,
+          () -> provider.retire(identity).toCompletableFuture().get(5, TimeUnit.SECONDS));
+      assertFalse(failure.getCause().getMessage().contains("fixture-private"));
+      verify(context, never()).close();
+      assertReason(Reason.RESOURCE_LIMIT, authenticate(provider));
+
+      provider.retire(identity).toCompletableFuture().get(5, TimeUnit.SECONDS);
+      verify(connection, times(2)).close();
+      verify(context).close();
+      // Resource retirement can complete before the authentication notification releases capacity.
+      awaitFullyDrained(provider);
+      authenticate(provider).get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
+  void closeRetainsBorrowedIdentityUntilReleaseAndCleanupRetry() throws Exception {
+    var context = context("alice");
+    var connection = mock(AsyncConnection.class);
+    doThrow(new IOException("fixture-private-close-diagnostic")).doNothing()
+        .when(connection).close();
+    try (var provider = provider(
+        (credentials, scope) -> context,
+        (backend, scope) -> CompletableFuture.completedFuture(null),
+        (configuration, user) -> CompletableFuture.completedFuture(connection),
+        TIMEOUT)) {
+      AuthorizedBackendIdentity identity = authenticate(provider).get(5, TimeUnit.SECONDS);
+      var borrow = provider.borrow(identity);
+
+      provider.close();
+      assertFalse(provider.isFullyDrained());
+      verify(connection, never()).close();
+
+      borrow.release().toCompletableFuture().get(5, TimeUnit.SECONDS);
+      verify(connection).close();
+      verify(context, never()).close();
+
+      provider.close();
+      verify(connection, times(2)).close();
+      verify(context).close();
+      assertTrue(provider.isFullyDrained());
+    }
+  }
+
+  @Test
+  void closedProviderRetriesCleanupForLateConnection() throws Exception {
+    var context = context("alice");
+    var rawConnection = new CompletableFuture<AsyncConnection>();
+    var opened = new CountDownLatch(1);
+    var retryStarted = new CountDownLatch(1);
+    var allowRetryClose = new CountDownLatch(1);
+    var retryClosed = new CountDownLatch(1);
+    var closeAttempts = new AtomicInteger();
+    var connection = mock(AsyncConnection.class);
+    doAnswer(invocation -> {
+      if (closeAttempts.incrementAndGet() == 1) {
+        throw new IOException("fixture close failure");
+      }
+      retryStarted.countDown();
+      if (!allowRetryClose.await(5, TimeUnit.SECONDS)) {
+        throw new IOException("fixture retry was not released");
+      }
+      retryClosed.countDown();
+      return null;
+    }).when(connection).close();
+    try (var provider = provider(
+        (credentials, scope) -> context,
+        (backend, scope) -> CompletableFuture.completedFuture(null),
+        (configuration, user) -> {
+          opened.countDown();
+          return rawConnection;
+        },
+        TIMEOUT)) {
+      var result = authenticate(provider);
+      assertTrue(opened.await(5, TimeUnit.SECONDS));
+
+      provider.close();
+      assertFalse(provider.isFullyDrained());
+      assertFalse(rawConnection.isCancelled());
+
+      rawConnection.complete(connection);
+      assertReason(Reason.CANCELLED, result);
+      try {
+        assertTrue(retryStarted.await(5, TimeUnit.SECONDS));
+        assertEquals(2, closeAttempts.get());
+        assertFalse(provider.isFullyDrained(), "failed cleanup must retain provider ownership");
+        verify(context, never()).close();
+      } finally {
+        allowRetryClose.countDown();
+      }
+      assertTrue(retryClosed.await(5, TimeUnit.SECONDS));
+      verify(connection, times(2)).close();
+      verify(context).close();
+      awaitFullyDrained(provider);
+    }
+  }
+
+  /** Resource cleanup and notification completion must both drain before capacity is reusable. */
+  private static void awaitFullyDrained(HBaseBackendIdentityProvider provider) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (!provider.isFullyDrained()) {
+      if (System.nanoTime() > deadline) {
+        throw new AssertionError("provider did not drain every accepted attempt");
+      }
+      Thread.sleep(5);
     }
   }
 
@@ -1033,6 +1292,7 @@ class HBaseBackendIdentityProviderTest {
   private static HBaseUserContext context(String name) {
     var context = mock(HBaseUserContext.class);
     when(context.user()).thenReturn(User.create(UserGroupInformation.createRemoteUser(name)));
+    when(context.credentialGeneration()).thenReturn(OptionalLong.of(0));
     return context;
   }
 

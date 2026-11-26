@@ -59,6 +59,9 @@ public record M3AuthenticationConfiguration(
     requireSecretDirectoryForReferences(secretDirectory, authControl.identity().credentialReference(),
         credentialKeyRing.keys().stream().map(KeyReference::secretReference).toList(),
         backgroundIdentities.stream().map(value -> value.identity().credentialReference()).toList());
+    requireSecretDirectoryForReferences(secretDirectory, clientProfiles.stream()
+        .flatMap(profile -> profile.credentialVersions().stream())
+        .map(CredentialVersion::credentialReference).toArray(String[]::new));
   }
 
   /** Unique auth-control storage; the administrator used for fresh table creation is separate. */
@@ -87,7 +90,19 @@ public record M3AuthenticationConfiguration(
       String hbaseProfileId,
       String authenticatorId,
       @JsonProperty(required = false) String clusterId,
-      String hbaseSiteFile) {
+      String hbaseSiteFile,
+      @JsonProperty(required = false) List<CredentialVersion> credentialVersions,
+      @JsonProperty(required = false) String backendIdentityDomain) {
+    public ClientProfile(String id, String hbaseProfileId, String authenticatorId,
+        String clusterId, String hbaseSiteFile) {
+      this(id, hbaseProfileId, authenticatorId, clusterId, hbaseSiteFile, List.of(), null);
+    }
+
+    public ClientProfile(String id, String hbaseProfileId, String authenticatorId,
+        String clusterId, String hbaseSiteFile, List<CredentialVersion> credentialVersions) {
+      this(id, hbaseProfileId, authenticatorId, clusterId, hbaseSiteFile, credentialVersions, null);
+    }
+
     public ClientProfile {
       id = requireIdentifier(id, "client profile ID");
       hbaseProfileId = requireIdentifier(hbaseProfileId, "clientProfile.hbaseProfileId");
@@ -100,6 +115,26 @@ public record M3AuthenticationConfiguration(
         throw new IllegalArgumentException("secure HBase client configuration must be an absolute file path");
       }
       hbaseSiteFile = Path.of(hbaseSiteFile).normalize().toString();
+      credentialVersions = credentialVersions == null ? List.of() : List.copyOf(credentialVersions);
+      if (credentialVersions.size() > 1_024) {
+        throw new IllegalArgumentException("credential version bindings exceed their limit");
+      }
+      requireUnique(credentialVersions.stream().map(CredentialVersion::principal).toList(),
+          "credential version principals");
+      if (backendIdentityDomain != null) {
+        backendIdentityDomain = requireIdentifier(backendIdentityDomain, "clientProfile.backendIdentityDomain");
+      }
+    }
+  }
+
+  /** Operator-managed binding of an exact credential to its monotonically increasing generation. */
+  public record CredentialVersion(String principal, long generation, String credentialReference) {
+    public CredentialVersion {
+      if (principal == null || principal.isBlank() || principal.length() > 256
+          || principal.codePoints().anyMatch(Character::isISOControl) || generation < 1) {
+        throw new IllegalArgumentException("credential version binding is invalid");
+      }
+      credentialReference = requireCredentialReference(credentialReference);
     }
   }
 

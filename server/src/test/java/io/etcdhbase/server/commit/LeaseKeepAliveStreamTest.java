@@ -3,6 +3,11 @@ package io.etcdhbase.server.commit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import etcdserverpb.Rpc;
 import io.etcdhbase.core.error.BackendFailure;
@@ -13,11 +18,13 @@ import io.etcdhbase.core.lease.LeaseTimeObservation;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.server.observability.RequestMetrics;
 import io.grpc.stub.ServerCallStreamObserver;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -90,6 +97,151 @@ class LeaseKeepAliveStreamTest {
       assertEquals(2, releases.get(), "cancellation releases a response waiting for transport readiness");
       assertEquals(1, observer.responses.size());
       assertTrue(scope.isCancelled());
+    }
+  }
+
+  @Test
+  void sendsZeroTtlOnlyAfterIdentityRevalidationSucceeds() {
+    var observer = new RecordingObserver();
+    observer.ready = false;
+    var validation = new CompletableFuture<Void>();
+    var validationCalls = new AtomicInteger();
+    var releases = new AtomicInteger();
+    try (var scope = RequestScope.withoutDeadline(); var timers = timers()) {
+      var stream = new LeaseKeepAliveStream(observer, scope, Runnable::run, timers,
+          request -> CompletableFuture.completedFuture(new LeaseKeepAliveStream.Delivery(
+              Rpc.LeaseKeepAliveResponse.newBuilder().setID(request.getID()).setTTL(0).build(),
+              releases::incrementAndGet, () -> {
+                validationCalls.incrementAndGet();
+                return validation;
+              })), new RequestMetrics());
+      stream.onNext(Rpc.LeaseKeepAliveRequest.newBuilder().setID(23).build());
+      assertEquals(0, validationCalls.get());
+      assertTrue(observer.responses.isEmpty());
+
+      observer.ready = true;
+      observer.readyHandler.run();
+      assertEquals(1, validationCalls.get());
+      assertTrue(observer.responses.isEmpty());
+      assertEquals(0, releases.get());
+
+      validation.complete(null);
+      assertEquals(1, observer.responses.size());
+      assertEquals(23, observer.responses.getFirst().getID());
+      assertEquals(0, observer.responses.getFirst().getTTL());
+      assertEquals(1, releases.get());
+      stream.onCompleted();
+      assertTrue(observer.completed);
+      assertEquals(1, releases.get());
+    }
+  }
+
+  @Test
+  void successfulAuthorizationHandsOffWriterWithoutRequeueingResponse() {
+    var work = new ArrayDeque<Runnable>();
+    var observer = new RecordingObserver();
+    var validation = new CompletableFuture<Void>();
+    var releases = new AtomicInteger();
+    try (var scope = RequestScope.withoutDeadline(); var timers = timers()) {
+      var stream = new LeaseKeepAliveStream(observer, scope, work::addLast, timers,
+          request -> CompletableFuture.completedFuture(new LeaseKeepAliveStream.Delivery(
+              Rpc.LeaseKeepAliveResponse.newBuilder().setID(request.getID()).setTTL(10).build(),
+              releases::incrementAndGet, () -> validation)), new RequestMetrics());
+      stream.onNext(Rpc.LeaseKeepAliveRequest.newBuilder().setID(26).build());
+      while (!work.isEmpty()) work.removeFirst().run();
+      assertTrue(observer.responses.isEmpty());
+      assertEquals(0, releases.get());
+
+      validation.complete(null);
+
+      assertEquals(1, observer.responses.size(),
+          "fresh authorization and delivery must not be separated by another worker queue");
+      assertEquals(1, releases.get());
+      assertEquals(2, observer.requests);
+      stream.onCompleted();
+      while (!work.isEmpty()) work.removeFirst().run();
+      assertTrue(observer.completed);
+    }
+  }
+
+  @Test
+  void timeoutDuringAuthorizationTerminatesWithoutFakingProducerDrain() {
+    var observer = new RecordingObserver();
+    var validation = new CompletableFuture<Void>();
+    var timeout = new AtomicReference<Runnable>();
+    var releases = new AtomicInteger();
+    var timers = mock(ScheduledThreadPoolExecutor.class);
+    when(timers.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.NANOSECONDS)))
+        .thenAnswer(invocation -> {
+          timeout.set(invocation.getArgument(0));
+          return mock(ScheduledFuture.class);
+        });
+    try (var scope = RequestScope.withoutDeadline()) {
+      assertTrue(scope.startIfOpen(() -> scope.trackPhysicalProducer(validation)));
+      var stream = new LeaseKeepAliveStream(observer, scope, Runnable::run, timers,
+          request -> CompletableFuture.completedFuture(new LeaseKeepAliveStream.Delivery(
+              Rpc.LeaseKeepAliveResponse.newBuilder().setID(request.getID()).setTTL(10).build(),
+              releases::incrementAndGet, () -> validation)), new RequestMetrics());
+      stream.onNext(Rpc.LeaseKeepAliveRequest.newBuilder().setID(27).build());
+      assertTrue(observer.responses.isEmpty());
+      assertEquals(0, releases.get());
+
+      timeout.get().run();
+
+      assertEquals(0, observer.failed.getCount());
+      assertEquals(io.grpc.Status.Code.RESOURCE_EXHAUSTED,
+          io.grpc.Status.fromThrowable(observer.failure).getCode());
+      assertEquals(1, releases.get());
+      assertTrue(scope.isCancelled());
+      assertFalse(scope.physicalProducersCompletion().toCompletableFuture().isDone(),
+          "terminal stream delivery is not proof that the backend producer has drained");
+
+      validation.complete(null);
+
+      assertTrue(scope.physicalProducersCompletion().toCompletableFuture().isDone());
+      assertTrue(observer.responses.isEmpty(), "late authorization cannot resurrect the response");
+      assertEquals(1, releases.get());
+      observer.cancel();
+      assertEquals(1, releases.get());
+    }
+  }
+
+  @Test
+  void rejectsZeroTtlWhenIdentityRevalidationFails() throws Exception {
+    var observer = new RecordingObserver();
+    observer.ready = false;
+    var validation = new CompletableFuture<Void>();
+    var validationCalls = new AtomicInteger();
+    var releases = new AtomicInteger();
+    try (var scope = RequestScope.withoutDeadline(); var timers = timers()) {
+      var stream = new LeaseKeepAliveStream(observer, scope, Runnable::run, timers,
+          request -> CompletableFuture.completedFuture(new LeaseKeepAliveStream.Delivery(
+              Rpc.LeaseKeepAliveResponse.newBuilder().setID(request.getID()).setTTL(0).build(),
+              releases::incrementAndGet, () -> {
+                validationCalls.incrementAndGet();
+                return validation;
+              })), new RequestMetrics());
+      stream.onNext(Rpc.LeaseKeepAliveRequest.newBuilder().setID(24).build());
+      assertEquals(0, validationCalls.get());
+      assertTrue(observer.responses.isEmpty());
+
+      observer.ready = true;
+      observer.readyHandler.run();
+      assertEquals(1, validationCalls.get());
+      assertTrue(observer.responses.isEmpty());
+      assertEquals(0, releases.get());
+
+      validation.completeExceptionally(new BackendFailure(BackendFailure.Category.INVALID_AUTH_TOKEN));
+      assertTrue(observer.failed.await(2, TimeUnit.SECONDS));
+      assertTrue(observer.responses.isEmpty());
+      assertEquals(io.grpc.Status.Code.UNAUTHENTICATED,
+          ((io.grpc.StatusRuntimeException) observer.failure).getStatus().getCode());
+      assertTrue(scope.isCancelled());
+      assertEquals(1, releases.get());
+      stream.onNext(Rpc.LeaseKeepAliveRequest.newBuilder().setID(25).build());
+      observer.cancel();
+      assertEquals(1, releases.get());
+      assertTrue(observer.responses.isEmpty());
     }
   }
 

@@ -1,6 +1,7 @@
 package io.etcdhbase.server;
 
 import io.etcdhbase.server.config.M3RuntimeConfigurationLoader;
+import io.etcdhbase.server.config.M3RuntimeConfiguration.ActivationProfile;
 import io.etcdhbase.server.config.RuntimeConfigurationLoader;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -15,8 +16,8 @@ public final class M5AuthenticateGatewayRuntimeProcess {
   private M5AuthenticateGatewayRuntimeProcess() {}
 
   public static void main(String[] arguments) throws Exception {
-    if (arguments.length != 4) {
-      throw new IllegalArgumentException("expected runtime, activation, HBase site, and Kerberos config");
+    if (arguments.length != 4 && (arguments.length != 5 || !arguments[4].equals("PUBLIC_TEST"))) {
+      throw new IllegalArgumentException("expected runtime, activation, HBase site, Kerberos config, and optional test profile");
     }
     Path runtimeFile = Path.of(arguments[0]);
     Path activationFile = Path.of(arguments[1]);
@@ -28,7 +29,9 @@ public final class M5AuthenticateGatewayRuntimeProcess {
     UserGroupInformation.setConfiguration(hbaseConfiguration);
 
     var runtimeLoader = new RuntimeConfigurationLoader();
-    var activationLoader = new M3RuntimeConfigurationLoader();
+    var activationLoader = arguments.length == 5
+        ? new M3RuntimeConfigurationLoader(ActivationProfile.PUBLIC_TEST)
+        : new M3RuntimeConfigurationLoader();
     io.etcdhbase.server.config.RuntimeConfiguration runtimeConfiguration;
     io.etcdhbase.server.config.M3RuntimeConfiguration activation;
     try (var input = Files.newInputStream(runtimeFile)) {

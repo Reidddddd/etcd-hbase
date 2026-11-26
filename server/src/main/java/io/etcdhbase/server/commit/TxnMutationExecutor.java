@@ -3,6 +3,7 @@ package io.etcdhbase.server.commit;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
 import io.etcdhbase.core.commit.CommitState;
@@ -23,7 +24,6 @@ import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.core.scan.ScanScheduler;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.PhysicalRowLimitException;
-import io.etcdhbase.hbase.storage.HBaseRecordStore;
 import io.etcdhbase.hbase.storage.StorageTableBinding;
 import io.etcdhbase.server.observability.RequestMetrics;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
@@ -133,13 +133,22 @@ public final class TxnMutationExecutor {
   /** Caller serializes new attempts, verifies forwarding authorization and closes the service scope. */
   public CompletableFuture<InvocationId> executeNew(TxnCommand command, InvocationBinding binding,
       CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
-      RequestScope scope, BudgetManager.Account account) {
+      CommitAuthorizationProof publicationProof, RequestScope scope, BudgetManager.Account account) {
+    return executeNew(command, binding, owner, identity, publicationProof, scope, account, () -> { });
+  }
+
+  CompletableFuture<InvocationId> executeNew(TxnCommand command, InvocationBinding binding,
+      CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
+      CommitAuthorizationProof publicationProof, RequestScope scope, BudgetManager.Account account,
+      Runnable retireUserIdentity) {
     Objects.requireNonNull(command, "command");
     Objects.requireNonNull(binding, "binding");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
+    Objects.requireNonNull(retireUserIdentity, "retireUserIdentity");
     if (!command.mayWrite() || binding.state() != InvocationBinding.State.PREPARING
         || binding.preparedOwnerEpoch() != owner.epoch() || !account.belongsTo(scope)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("invalid new transaction attempt"));
@@ -168,7 +177,8 @@ public final class TxnMutationExecutor {
       operation = control.read(scope).thenCompose(observed -> {
         requireCurrentBase(observed.orElseThrow(() ->
             new IllegalStateException("authoritative commit control state is missing")).state(), binding, owner);
-        return HBaseRecordStore.open(connections, identity, primary, scope, backendWorker);
+        return UserIdentityRecordStore.open(
+            connections, identity, primary, scope, backendWorker, retireUserIdentity);
       }).thenCompose(physical -> leaseBindings == null
           ? TxnReadSession.open(views, List.of(), binding.authorizationScopeDigest(),
               physical, manifests, primary.codec()::bucket, buckets, scope)
@@ -196,7 +206,7 @@ public final class TxnMutationExecutor {
           })
           .whenComplete((ignored, failure) -> metrics.recordTxnStage(
               RequestMetrics.TxnStage.COMPARE_AND_PREPARE, Math.max(0, System.nanoTime() - started)))
-          .thenCompose(ready -> finish(binding, owner, ready, scope));
+          .thenCompose(ready -> finish(binding, owner, ready, publicationProof, scope));
     } catch (BackendFailure | RuntimeException failure) {
       drained.complete(null);
       return CompletableFuture.failedFuture(failure);
@@ -209,7 +219,8 @@ public final class TxnMutationExecutor {
   }
 
   private CompletableFuture<InvocationId> finish(InvocationBinding binding,
-      CommitOwnerService.OwnerToken owner, TxnCommitPreparation.Prepared ready, RequestScope scope) {
+      CommitOwnerService.OwnerToken owner, TxnCommitPreparation.Prepared ready,
+      CommitAuthorizationProof publicationProof, RequestScope scope) {
     if (ready instanceof TxnCommitPreparation.NoChanges) {
       return CompletableFuture.completedFuture(binding.invocationId());
     }
@@ -218,7 +229,7 @@ public final class TxnMutationExecutor {
     return control.read(scope).thenCompose(observed -> {
       requireCurrentBase(observed.orElseThrow(() ->
           new IllegalStateException("authoritative commit control state is missing")).state(), binding, owner);
-      return publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope);
+      return publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope, publicationProof);
     }).thenCompose(outcome -> outcome.state() == CommitOutcomeResolver.State.SELECTED_FINALIZED
         ? CompletableFuture.completedFuture(binding.invocationId())
         : CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN)))

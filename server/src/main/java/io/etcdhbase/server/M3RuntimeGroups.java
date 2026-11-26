@@ -10,7 +10,11 @@ import io.etcdhbase.admin.config.HBaseQuorum;
 import io.etcdhbase.admin.config.InitializationConfiguration.AuthenticationMode;
 import io.etcdhbase.admin.config.InitializationConfiguration.HBaseProfile;
 import io.etcdhbase.core.auth.CredentialEnvelopeProtector;
+import io.etcdhbase.core.auth.TargetAuthorizationBarriers;
+import io.etcdhbase.core.auth.TargetConfigurationBarriers;
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.AuthorizationBarrierInstaller;
+import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.lease.LeaseTimeSource;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
@@ -33,6 +37,9 @@ import io.etcdhbase.server.commit.M3TableGroupRuntime;
 import io.etcdhbase.server.commit.OwnerForwardingRuntime;
 import io.etcdhbase.server.auth.AesGcmCredentialEnvelopeProtector;
 import io.etcdhbase.server.auth.AuthSessionService;
+import io.etcdhbase.server.auth.AuthDeploymentRecoveryWorker;
+import io.etcdhbase.server.auth.AuthConfigurationFingerprint;
+import io.etcdhbase.server.auth.VersionedHBaseAuthenticator;
 import io.etcdhbase.server.auth.CredentialKeyProvider;
 import io.etcdhbase.server.auth.CredentialReferenceResolver;
 import io.etcdhbase.server.auth.FileCredentialKeyProvider;
@@ -79,6 +86,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongFunction;
+import java.util.function.Function;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.ClusterMetrics;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -119,6 +127,7 @@ final class M3RuntimeGroups implements AutoCloseable {
   private static M3RuntimeGroups openInternal(RuntimeConfiguration configuration,
       M3RuntimeConfiguration activation,
       Optional<LongFunction<LeaseTimeSource>> leaseTimeSourceFactory) throws IOException {
+    requireProductionLeaseCapabilities(configuration, activation);
     OwnerForwardingRuntime.RequestLimits ownerRequestLimits = activation.ownerForwarding() == null ? null
         : OwnerForwardingRuntime.requestLimits(activation.memoryBytes(), activation.maxEtcdRequestBytes(),
             configuration.resources().maxConcurrentRequests());
@@ -144,12 +153,20 @@ final class M3RuntimeGroups implements AutoCloseable {
         try {
           opened.put(group, managed);
         } catch (RuntimeException | Error failure) {
+          managed.resources().stopRecovery();
           try { managed.runtime().close(); }
           catch (RuntimeException | Error cleanup) { if (cleanup != failure) failure.addSuppressed(cleanup); }
           awaitCleanup(closeAfter(managed.runtime().drained(), managed.resources()),
               activation.shutdownTimeoutMs(), failure);
           throw failure;
         }
+      }
+      var authRecovery = CompletableFuture.allOf(opened.values().stream()
+          .map(value -> value.resources().initialRecoveryReadiness())
+          .toArray(CompletableFuture[]::new));
+      authRecovery.get(activation.startupTimeoutMs(), TimeUnit.MILLISECONDS);
+      if (opened.values().stream().anyMatch(value -> !value.resources().recoveryReady())) {
+        throw new IllegalStateException("authentication recovery lost readiness during startup");
       }
       if (ownerForwarding != null) ownerForwarding.start();
       return new M3RuntimeGroups(opened, scans, ownerForwarding, leaseTimers);
@@ -162,6 +179,31 @@ final class M3RuntimeGroups implements AutoCloseable {
       if (failure instanceof RuntimeException invalid) throw invalid;
       if (failure instanceof IOException io) throw io;
       throw new IOException("M3 table-group activation failed", failure);
+    }
+  }
+
+  /** Check static prerequisites before opening any production Lease resources. */
+  static void requireProductionLeaseCapabilities(RuntimeConfiguration configuration,
+      M3RuntimeConfiguration activation) {
+    if (!activation.m4LeaseApiEnabled()
+        || activation.activationProfile() != M3RuntimeConfiguration.ActivationProfile.PRODUCTION) return;
+    var auth = configuration.authentication();
+    if (auth == null) throw new M3RuntimeConfiguration.LeaseActivationUnavailable();
+    M3AuthenticationConfiguration.validateAgainst(auth, configuration);
+    for (var listener : configuration.listeners()) {
+      var endpoint = auth.endpointBindings().stream()
+          .filter(candidate -> candidate.tableGroupId().equals(listener.tableGroupId()))
+          .findFirst().orElseThrow(M3RuntimeConfiguration.LeaseActivationUnavailable::new);
+      var client = clientProfile(auth, endpoint.clientProfileId());
+      if (client.backendIdentityDomain() == null || client.credentialVersions().isEmpty()) {
+        throw new M3RuntimeConfiguration.LeaseActivationUnavailable();
+      }
+      var background = auth.backgroundIdentities().stream()
+          .filter(candidate -> candidate.tableGroupId().equals(listener.tableGroupId()))
+          .findFirst().orElseThrow(M3RuntimeConfiguration.LeaseActivationUnavailable::new);
+      if (!background.allowedTableGroupIds().equals(List.of(listener.tableGroupId()))) {
+        throw new M3RuntimeConfiguration.LeaseActivationUnavailable();
+      }
     }
   }
 
@@ -188,6 +230,7 @@ final class M3RuntimeGroups implements AutoCloseable {
         throw fatal;
       }
       try {
+        resources.startRecovery(activation.startupTimeoutMs());
         return new ManagedGroup(runtime, resources);
       } catch (RuntimeException | Error failure) {
         providerCloseDeferred = true;
@@ -218,15 +261,40 @@ final class M3RuntimeGroups implements AutoCloseable {
     if (auth == null) throw new IllegalArgumentException("secure identity activation is not configured");
     SecureBusinessIdentity business = activateSecureBusinessIdentity(
         plan, configuration, activation, auth, resources);
+    var endpoint = auth.endpointBindings().stream()
+        .filter(binding -> binding.tableGroupId().equals(source.tableGroupId())).findFirst().orElseThrow();
+    String identityDomain = clientProfile(auth, endpoint.clientProfileId()).backendIdentityDomain();
+    if (identityDomain == null) {
+      throw new IllegalArgumentException("secure endpoint backend identity domain is required");
+    }
     HBaseAuthSessionStore store = openAuthControlStore(configuration, activation, auth, startup,
         resources);
     CredentialEnvelopeProtector protector = createCredentialProtector(auth, resources);
-    LongFunction<AuthSessionService> sessionFactory = clusterId -> new AuthSessionService(
-        store, protector, business.identities(), auth.trustDomain(), business.endpointProviderId(),
-        business.scope(), datasetDigest(source.fingerprint(), auth.trustDomain(), clusterId),
-        Duration.ofMillis(auth.sessionTtlMillis()), auth.sessionSlots(), Clock.systemUTC(),
-        new SecureRandom());
+    M3TableGroupRuntime.AuthSessionFactory sessionFactory = (clusterId, commitControl) -> {
+      ByteKey dataset = datasetDigest(source.fingerprint(), auth.trustDomain(), clusterId);
+      return createAuthSessions(store, protector, business.identities(), auth, business.scope(),
+          business.endpointProviderId(), identityDomain, dataset, commitControl, resources);
+    };
     return new IdentityActivation(business.router(), business.serviceIdentity(), sessionFactory);
+  }
+
+  static AuthSessionService createAuthSessions(HBaseAuthSessionStore store,
+      CredentialEnvelopeProtector protector, io.etcdhbase.server.auth.SessionIdentityManager identities,
+      M3AuthenticationConfiguration auth, AuthenticationScope scope, String providerId,
+      String identityDomain, ByteKey dataset, CommitControlStore commitControl, GroupResources resources) {
+    ByteKey fingerprint = AuthConfigurationFingerprint.compute(auth, scope, dataset);
+    var installer = new AuthorizationBarrierInstaller(commitControl);
+    var group = scope.tableGroupId();
+    var revocationBarriers = new TargetAuthorizationBarriers(store, auth.trustDomain(), Map.of(group,
+        new TargetAuthorizationBarriers.Group(providerId, scope, dataset, installer)));
+    var configurationBarriers = new TargetConfigurationBarriers(Map.of(group,
+        new TargetConfigurationBarriers.Group(dataset, installer)));
+    var sessions = new AuthSessionService(store, protector, identities, auth.trustDomain(), providerId,
+        scope, dataset, Duration.ofMillis(auth.sessionTtlMillis()), auth.sessionSlots(), Clock.systemUTC(),
+        new SecureRandom(), store, revocationBarriers, identityDomain, fingerprint, Set.of(group),
+        configurationBarriers);
+    resources.configureRecovery(sessions::resumePendingDeploymentRevocation);
+    return sessions;
   }
 
   private static SecureBusinessIdentity activateSecureBusinessIdentity(M3TableGroupPlan plan,
@@ -258,14 +326,14 @@ final class M3RuntimeGroups implements AutoCloseable {
     ClientProfile endpointClient = clientProfile(auth, endpoint.clientProfileId());
     ProviderSessionIdentityManager identities = new ProviderSessionIdentityManager(
         () -> createSecureProvider(configuration, endpointClient, endpoint.providerId(),
-            scope, dataAccess, activation), router, scope, endpoint.providerId(),
+            scope, dataAccess, activation, true, auth.secretDirectory()), router, scope, endpoint.providerId(),
         auth.maximumIdentityContainers());
     resources.sessionIdentities = identities;
     return new SecureBusinessIdentity(router, serviceIdentity, identities, scope,
         endpoint.providerId());
   }
 
-  private static HBaseAuthSessionStore openAuthControlStore(RuntimeConfiguration configuration,
+  static HBaseAuthSessionStore openAuthControlStore(RuntimeConfiguration configuration,
       M3RuntimeConfiguration activation, M3AuthenticationConfiguration auth, RequestScope startup,
       GroupResources resources) throws Exception {
     AuthControl configuredControl = auth.authControl();
@@ -340,7 +408,7 @@ final class M3RuntimeGroups implements AutoCloseable {
       AuthorizedBackendIdentity identity, RequestScope startup,
       Optional<LongFunction<LeaseTimeSource>> leaseTimeSourceFactory,
       OwnerForwardingRuntime ownerForwarding, ScheduledThreadPoolExecutor leaseTimers,
-      LongFunction<AuthSessionService> authSessionFactory) throws Exception {
+      M3TableGroupRuntime.AuthSessionFactory authSessionFactory) throws Exception {
     if (authSessionFactory != null) {
       if (leaseTimeSourceFactory.isPresent()) {
         throw new IllegalArgumentException("authenticated M4 test clock activation is not configured");
@@ -362,12 +430,23 @@ final class M3RuntimeGroups implements AutoCloseable {
       RuntimeConfiguration runtime, ClientProfile client, String providerId,
       AuthenticationScope scope, List<HBaseAccessVerifiers.TableAccess> access,
       M3RuntimeConfiguration activation) {
+    return createSecureProvider(runtime, client, providerId, scope, access, activation, false, null);
+  }
+
+  private static HBaseBackendIdentityProvider createSecureProvider(
+      RuntimeConfiguration runtime, ClientProfile client, String providerId,
+      AuthenticationScope scope, List<HBaseAccessVerifiers.TableAccess> access,
+      M3RuntimeConfiguration activation, boolean userCredentials, String secretDirectory) {
     HBaseProfile profile = hbaseProfile(runtime, client.hbaseProfileId());
     if (profile.authenticationMode() != AuthenticationMode.CREDENTIAL_REFERENCE) {
       throw new IllegalArgumentException("secure client profile does not select a credentialed backend");
     }
     Configuration configuration = secureHBaseConfiguration(profile, client);
     HBaseCredentialAuthenticator authenticator = authenticator(client);
+    if (userCredentials && !client.credentialVersions().isEmpty()) {
+      authenticator = new VersionedHBaseAuthenticator(authenticator,
+          client.credentialVersions(), secretDirectory, System.getenv());
+    }
     HBaseAccessVerifier permissions = HBaseAccessVerifiers.tablePermissions(access);
     HBaseAccessVerifier verifiedAccess = (connection, requestedScope) ->
         permissions.verify(connection, requestedScope).thenCompose(ignored -> {
@@ -466,7 +545,7 @@ final class M3RuntimeGroups implements AutoCloseable {
         .orElseThrow(() -> new IllegalArgumentException("configured secure client profile is missing"));
   }
 
-  private static ByteKey datasetDigest(String planFingerprint, String trustDomain,
+  static ByteKey datasetDigest(String planFingerprint, String trustDomain,
       long clusterId) {
     try {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -506,6 +585,7 @@ final class M3RuntimeGroups implements AutoCloseable {
 
   private static void closeRuntimeAfterDrain(M3TableGroupRuntime runtime,
       GroupResources resources, int timeoutMs, Throwable failure) {
+    resources.stopRecovery();
     try { runtime.close(); }
     catch (RuntimeException | Error cleanup) { if (cleanup != failure) failure.addSuppressed(cleanup); }
     awaitCleanup(closeAfter(runtime.drained(), resources), timeoutMs, failure);
@@ -553,7 +633,8 @@ final class M3RuntimeGroups implements AutoCloseable {
   }
 
   boolean isReady() {
-    return !closing.get() && !groups.isEmpty() && groups.values().stream().allMatch(value -> value.runtime().isReady());
+    return !closing.get() && !groups.isEmpty() && groups.values().stream()
+        .allMatch(value -> value.runtime().isReady() && value.resources().recoveryReady());
   }
 
   CompletableFuture<Void> drained() { return drained.copy(); }
@@ -565,6 +646,7 @@ final class M3RuntimeGroups implements AutoCloseable {
     if (!closing.compareAndSet(false, true)) return;
     List<CompletableFuture<Void>> cleanup = new ArrayList<>();
     for (ManagedGroup group : groups.values()) {
+      group.resources().stopRecovery();
       try {
         group.runtime().close();
       } catch (RuntimeException | Error failure) {
@@ -586,7 +668,9 @@ final class M3RuntimeGroups implements AutoCloseable {
           () -> closeLeaseTimers(leaseTimers)));
     }
     for (ManagedGroup group : groups.values()) {
-      cleanup.add(closeWhenDrained(group.runtime().drained(), scansDrained, requestsDrained,
+      var workDrained = CompletableFuture.allOf(requestsDrained.toCompletableFuture(),
+          group.resources().recoveryDrained());
+      cleanup.add(closeWhenDrained(group.runtime().drained(), scansDrained, workDrained,
           group.resources()::close));
     }
     CompletableFuture.allOf(cleanup.toArray(CompletableFuture[]::new)).whenComplete((ignored, failure) -> {
@@ -615,7 +699,8 @@ final class M3RuntimeGroups implements AutoCloseable {
 
   private static CompletableFuture<Void> closeAfter(CompletionStage<Void> completion,
       GroupResources resources) {
-    return completion.toCompletableFuture().thenRunAsync(resources::close, CLEANUP);
+    return CompletableFuture.allOf(completion.toCompletableFuture(), resources.recoveryDrained())
+        .thenRunAsync(resources::close, CLEANUP);
   }
 
   private static void awaitCleanup(CompletableFuture<Void> cleanup, int timeoutMs, Throwable primary) {
@@ -631,23 +716,54 @@ final class M3RuntimeGroups implements AutoCloseable {
 
   private record IdentityActivation(HBaseConnectionFactory connections,
       AuthorizedBackendIdentity identity,
-      LongFunction<AuthSessionService> sessionFactory) {}
+      M3TableGroupRuntime.AuthSessionFactory sessionFactory) {}
 
   private record SecureBusinessIdentity(HBaseConnectionRouter router,
       AuthorizedBackendIdentity serviceIdentity, ProviderSessionIdentityManager identities,
       AuthenticationScope scope, String endpointProviderId) {}
 
-  private static final class GroupResources implements AutoCloseable {
+  static final class GroupResources implements AutoCloseable {
     private HBaseBackendIdentityProvider backendProvider;
     private HBaseBackendIdentityProvider authControlProvider;
     private ProviderSessionIdentityManager sessionIdentities;
     private HBaseConnectionRouter router;
     private CredentialKeyProvider credentialKeys;
+    private Function<RequestScope, CompletionStage<Void>> recoveryCycle;
+    private AuthDeploymentRecoveryWorker recovery;
     private boolean closed;
+
+    void configureRecovery(Function<RequestScope, CompletionStage<Void>> cycle) {
+      if (recoveryCycle != null || recovery != null) throw new IllegalStateException("auth recovery already configured");
+      recoveryCycle = Objects.requireNonNull(cycle, "cycle");
+    }
+
+    void startRecovery(int timeoutMs) {
+      if (recoveryCycle == null) return;
+      if (recovery != null) throw new IllegalStateException("auth recovery already started");
+      recovery = new AuthDeploymentRecoveryWorker(recoveryCycle,
+          Duration.ofMillis(timeoutMs), Duration.ofSeconds(1));
+      recovery.start();
+    }
+
+    void stopRecovery() { if (recovery != null) recovery.stop(); }
+
+    boolean recoveryReady() { return recoveryCycle == null || recovery != null && recovery.isReady(); }
+
+    CompletableFuture<Void> recoveryDrained() {
+      return recovery == null ? CompletableFuture.completedFuture(null) : recovery.drained();
+    }
+
+    CompletableFuture<Void> initialRecoveryReadiness() {
+      return recovery == null ? CompletableFuture.completedFuture(null) : recovery.initialReadiness();
+    }
 
     @Override
     public synchronized void close() {
       if (closed) return;
+      if (recovery != null && !recovery.drained().isDone()) {
+        throw new IllegalStateException("auth recovery must drain before resources close");
+      }
+      if (recovery != null) recovery.drained().join();
       Throwable first = null;
       first = closeComponent(first, sessionIdentities == null ? null : sessionIdentities::close);
       first = closeComponent(first, router == null ? null : router::close);

@@ -6,6 +6,7 @@ import io.etcdhbase.hbase.connection.HBaseConnectionRouter;
 import io.etcdhbase.hbase.identity.HBaseBackendIdentityProvider;
 import io.etcdhbase.spi.identity.AuthenticationScope;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
+import io.etcdhbase.spi.identity.BackendIdentityBorrow;
 import io.etcdhbase.spi.identity.BackendCredentials;
 import io.etcdhbase.spi.identity.BackendIdentityException;
 import io.etcdhbase.spi.identity.BackendIdentityException.Reason;
@@ -28,6 +29,8 @@ import java.util.function.Supplier;
 public final class ProviderSessionIdentityManager implements SessionIdentityManager {
   private static final long NEGATIVE_CACHE_TTL_NANOS = TimeUnit.SECONDS.toNanos(1);
   private static final int MAX_NEGATIVE_CACHE_ENTRIES = 1024;
+  private static final int MAX_CLEANUP_ATTEMPTS = 3;
+  private static final long CLEANUP_RETRY_DELAY_MILLIS = 25;
 
   private final Object gate = new Object();
   private final Supplier<HBaseBackendIdentityProvider> providerFactory;
@@ -87,7 +90,9 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
       BackendIdentityException rejection = null;
       synchronized (gate) {
         if (closed) rejection = new BackendIdentityException(Reason.CANCELLED);
-        else if (!validIdentity(identity)
+        else if (identity != null && !identity.hasKnownCredentialGeneration()) {
+          rejection = new BackendIdentityException(Reason.BACKEND_UNAVAILABLE);
+        } else if (!validIdentity(identity)
             || unpublished.containsKey(identity.contextRef())
             || active.containsKey(identity.contextRef())) {
           rejection = new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION);
@@ -117,11 +122,15 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
     return authentication.handle((restored, failure) -> {
       if (failure != null) return closeAfterFailure(provider, unwrap(failure))
           .thenCompose(ignored -> CompletableFuture.<Void>failedFuture(unwrap(failure)));
-      if (restored == null || !sameAuthorization(authenticatedIdentity, restored)) {
-        return closeProvider(provider).thenCompose(ignored -> CompletableFuture.<Void>failedFuture(
-            new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION)));
+      if (restored == null) {
+        return closeProviderWithRetry(provider).thenCompose(ignored ->
+            CompletableFuture.<Void>failedFuture(
+                new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION)));
       }
-      return closeProvider(provider);
+      CompletionStage<Void> cleanup = retireAndCloseWithRetry(new OwnedIdentity(restored, provider));
+      if (sameAuthorization(authenticatedIdentity, restored)) return cleanup;
+      return cleanup.thenCompose(ignored -> CompletableFuture.<Void>failedFuture(
+          new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION)));
     }).thenCompose(stage -> stage);
   }
 
@@ -180,7 +189,7 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
         return rejected(Reason.INSUFFICIENT_PERMISSION);
       }
     }
-    return closeProvider(owned.provider()).thenRun(() -> {
+    return retireAndCloseWithRetry(owned).thenRun(() -> {
       synchronized (gate) {
         unpublished.remove(identity.contextRef(), owned);
       }
@@ -211,7 +220,7 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
     for (HBaseBackendIdentityProvider provider : snapshot) {
       boolean providerClosed = false;
       try {
-        closeProvider(provider).toCompletableFuture().join();
+        closeProviderWithRetry(provider).toCompletableFuture().join();
         providerClosed = true;
       } catch (RuntimeException | Error failure) {
         first = appendFailure(first, unwrap(failure));
@@ -258,7 +267,16 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
   }
 
   private void startActivation(ActivationEntry entry, BackendCredentials credentials) {
-    BackendCredentials ownedCredentials = copyCredentials(credentials);
+    BackendCredentials ownedCredentials;
+    try {
+      ownedCredentials = copyCredentials(credentials);
+    } catch (RuntimeException failure) {
+      failActivation(entry, failure);
+      return;
+    } catch (Error fatal) {
+      failActivation(entry, fatal);
+      throw fatal;
+    }
     CompletionStage<AuthorizedBackendIdentity> authentication;
     try {
       authentication = Objects.requireNonNull(
@@ -299,16 +317,19 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
       } else if (entry.pendingBorrowers == 0) {
         entry.state = ActivationState.RETIRING;
         abandon = true;
+      } else if (identity != null && !identity.hasKnownCredentialGeneration()) {
+        rejection = new BackendIdentityException(Reason.BACKEND_UNAVAILABLE);
       } else if (!validIdentity(identity)
           || active.containsKey(identity.contextRef())
           || unpublished.containsKey(identity.contextRef())) {
         rejection = new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION);
       } else {
         try {
+          OwnedIdentity candidate = new OwnedIdentity(identity, entry.provider);
+          entry.owned = candidate;
           connections.register(identity, entry.provider);
-          owned = new OwnedIdentity(identity, entry.provider);
+          owned = candidate;
           active.put(identity.contextRef(), owned);
-          entry.owned = owned;
           entry.state = ActivationState.ACTIVE;
         } catch (RuntimeException | Error registrationFailure) {
           rejection = registrationFailure;
@@ -320,15 +341,20 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
       return;
     }
     if (rejection == null && abandon) {
-      finishUnusedActivation(entry, new BackendIdentityException(Reason.CANCELLED));
+      finishUnusedActivation(entry, identity, new BackendIdentityException(Reason.CANCELLED));
       return;
     }
     failActivation(entry, rejection == null
         ? new BackendIdentityException(Reason.BACKEND_UNAVAILABLE) : rejection);
   }
 
-  private void finishUnusedActivation(ActivationEntry entry, Throwable failure) {
-    closeProvider(entry.provider).whenComplete((ignored, closeFailure) -> {
+  private void finishUnusedActivation(ActivationEntry entry, AuthorizedBackendIdentity identity,
+      Throwable failure) {
+    CompletionStage<Void> cleanup = identity == null
+        ? closeProviderWithRetry(entry.provider)
+        : retireAndCloseWithRetry(new OwnedIdentity(identity, entry.provider));
+    cleanup
+        .whenComplete((ignored, closeFailure) -> {
       if (closeFailure != null) failure.addSuppressed(unwrap(closeFailure));
       synchronized (gate) {
         entry.state = closeFailure == null ? ActivationState.CLOSED : ActivationState.CLOSE_FAILED;
@@ -339,11 +365,15 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
   }
 
   private void failActivation(ActivationEntry entry, Throwable failure) {
+    OwnedIdentity owned;
     synchronized (gate) {
       if (entry.state != ActivationState.LOADING) return;
       entry.state = ActivationState.RETIRING;
+      owned = entry.owned;
     }
-    closeProvider(entry.provider).whenComplete((ignored, closeFailure) -> {
+    CompletionStage<Void> cleanup = owned == null
+        ? closeProviderWithRetry(entry.provider) : retireAndCloseWithRetry(owned);
+    cleanup.whenComplete((ignored, closeFailure) -> {
       if (closeFailure != null && closeFailure != failure) {
         failure.addSuppressed(unwrap(closeFailure));
       }
@@ -361,13 +391,28 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
     ActivationEntry entry = borrow.entry;
     Throwable failure = loadFailure == null ? null : unwrap(loadFailure);
     SessionIdentityLease lease = null;
+    BackendIdentityBorrow providerBorrow = null;
     boolean retire = false;
     synchronized (gate) {
       entry.pendingBorrowers--;
       if (failure == null && entry.state == ActivationState.ACTIVE && !closed) {
-        entry.borrowers++;
         OwnedIdentity selected = owned;
-        lease = new SessionIdentityLease(selected.identity(), () -> releaseBorrow(entry, selected));
+        try {
+          providerBorrow = Objects.requireNonNull(
+              selected.provider().borrow(selected.identity()), "identity provider borrow");
+          if (providerBorrow.identity() != selected.identity()) {
+            failure = new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION);
+          }
+        } catch (BackendIdentityException | RuntimeException borrowFailure) {
+          failure = borrowFailure;
+        }
+        if (failure == null) {
+          entry.borrowers++;
+          BackendIdentityBorrow selectedBorrow = providerBorrow;
+          lease = new SessionIdentityLease(selected.identity(),
+              () -> releaseBorrow(entry, selected, selectedBorrow),
+              () -> retireBorrowedIdentity(entry, selected));
+        }
       } else if (failure == null) {
         failure = new BackendIdentityException(Reason.CANCELLED);
       }
@@ -377,9 +422,47 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
         retire = true;
       }
     }
-    if (lease == null) borrow.result.completeExceptionally(Objects.requireNonNull(failure));
-    else if (!borrow.result.complete(lease)) lease.release();
+    if (lease == null) {
+      if (providerBorrow != null) providerBorrow.release();
+      borrow.result.completeExceptionally(Objects.requireNonNull(failure));
+    }
+    else verifyBorrow(borrow, owned, lease);
     if (retire) retireEntry(entry);
+  }
+
+  private void verifyBorrow(BorrowRequest borrow, OwnedIdentity owned, SessionIdentityLease lease) {
+    borrow.result.whenComplete((ignored, failure) -> {
+      if (borrow.result.isCancelled()) lease.release();
+    });
+    CompletionStage<Void> verification;
+    try {
+      verification = Objects.requireNonNull(
+          owned.provider().verifyCurrentAccess(owned.identity()), "backend access verification stage");
+    } catch (RuntimeException failure) {
+      verification = CompletableFuture.failedFuture(failure);
+    }
+    verification.whenComplete((ignored, verificationFailure) -> {
+      Throwable failure = verificationFailure == null ? null : unwrap(verificationFailure);
+      boolean retire = false;
+      synchronized (gate) {
+        if (failure == null && (closed || borrow.entry.state != ActivationState.ACTIVE)) {
+          failure = new BackendIdentityException(Reason.CANCELLED);
+        }
+        if (failure != null && !(failure instanceof BackendIdentityException backend
+            && backend.reason() == Reason.RESOURCE_LIMIT)
+            && borrow.entry.state == ActivationState.ACTIVE) {
+          borrow.entry.state = ActivationState.RETIRING;
+          retire = true;
+        }
+      }
+      if (retire) retireEntry(borrow.entry);
+      if (failure != null) {
+        lease.release();
+        borrow.result.completeExceptionally(failure);
+      } else if (!borrow.result.complete(lease)) {
+        lease.release();
+      }
+    });
   }
 
   private void cancelBorrow(BorrowRequest borrow) {
@@ -397,7 +480,30 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
     if (retire) retireEntry(entry);
   }
 
-  private CompletionStage<Void> releaseBorrow(ActivationEntry entry, OwnedIdentity owned) {
+  private CompletionStage<Void> releaseBorrow(ActivationEntry entry, OwnedIdentity owned,
+      BackendIdentityBorrow providerBorrow) {
+    CompletionStage<Void> providerRelease;
+    try {
+      providerRelease = Objects.requireNonNull(providerBorrow.release(), "identity borrow release");
+    } catch (RuntimeException | Error failure) {
+      return CompletableFuture.failedFuture(failure);
+    }
+    return providerRelease.thenCompose(ignored -> releaseManagedBorrow(entry, owned));
+  }
+
+  private CompletionStage<Void> retireBorrowedIdentity(ActivationEntry entry, OwnedIdentity owned) {
+    synchronized (gate) {
+      if (entry.owned != owned) return rejected(Reason.INSUFFICIENT_PERMISSION);
+      if (entry.state == ActivationState.CLOSED) return CompletableFuture.completedFuture(null);
+      if (entry.state == ActivationState.ACTIVE) entry.state = ActivationState.RETIRING;
+      if (entry.state != ActivationState.RETIRING && entry.state != ActivationState.CLOSE_FAILED) {
+        return rejected(Reason.CANCELLED);
+      }
+    }
+    return retireEntry(entry);
+  }
+
+  private CompletionStage<Void> releaseManagedBorrow(ActivationEntry entry, OwnedIdentity owned) {
     boolean retire = false;
     synchronized (gate) {
       if (entry.state == ActivationState.CLOSED) return CompletableFuture.completedFuture(null);
@@ -409,6 +515,10 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
           && entry.pendingBorrowers == 0 && entry.borrowers == 0) {
         entry.state = ActivationState.RETIRING;
         retire = true;
+      } else if (closed && entry.state == ActivationState.CLOSE_FAILED
+          && entry.pendingBorrowers == 0 && entry.borrowers == 0) {
+        entry.state = ActivationState.RETIRING;
+        retire = true;
       }
     }
     return retire ? retireEntry(entry) : CompletableFuture.completedFuture(null);
@@ -417,16 +527,16 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
   private CompletionStage<Void> retireEntry(ActivationEntry entry) {
     OwnedIdentity owned = entry.owned;
     if (owned == null) return CompletableFuture.completedFuture(null);
-    CompletionStage<Void> retirement;
-    try {
-      retirement = connections.unregister(owned.identity(), owned.provider())
-          .thenCompose(ignored -> closeProvider(owned.provider()));
-    } catch (RuntimeException | Error failure) {
-      retirement = CompletableFuture.failedFuture(failure);
+    CompletableFuture<Void> retirement;
+    synchronized (gate) {
+      if (entry.retirement != null) return entry.retirement.minimalCompletionStage();
+      retirement = new CompletableFuture<>();
+      entry.retirement = retirement;
     }
-    return retirement.whenComplete((ignored, failure) -> {
+    retireAndCloseWithRetry(owned).whenComplete((ignored, failure) -> {
+      Throwable cause = failure == null ? null : unwrap(failure);
       synchronized (gate) {
-        if (failure == null) {
+        if (cause == null) {
           active.remove(owned.identity().contextRef(), owned);
           activations.remove(entry.key, entry);
           entry.state = ActivationState.CLOSED;
@@ -434,7 +544,10 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
           entry.state = ActivationState.CLOSE_FAILED;
         }
       }
+      if (cause == null) retirement.complete(null);
+      else retirement.completeExceptionally(cause);
     });
+    return retirement.minimalCompletionStage();
   }
 
   private NegativeActivation negativeActivationLocked(ActivationKey key, long nowNanos) {
@@ -477,14 +590,23 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
     Throwable closeFailure = null;
     try {
       provider.close();
+      if (!provider.isFullyDrained()) {
+        throw new IllegalStateException("identity provider cleanup remains outstanding");
+      }
     } catch (RuntimeException | Error failure) {
       closeFailure = failure;
     }
     if (closeFailure == null) {
-      synchronized (gate) {
-        containers.remove(provider);
-        unpublished.values().removeIf(value -> value.provider() == provider);
-      }
+      // Closing the backend must not wait on a caller's callback. Keep the container reservation
+      // until that callback and the physical access check have both drained, however.
+      provider.accessChecksDrained().whenComplete((ignored, failure) -> {
+        if (failure == null) {
+          synchronized (gate) {
+            containers.remove(provider);
+            unpublished.values().removeIf(value -> value.provider() == provider);
+          }
+        }
+      });
     }
     if (closeFailure == null) closing.complete(null);
     else closing.completeExceptionally(closeFailure);
@@ -494,9 +616,48 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
     return closing.minimalCompletionStage();
   }
 
+  private CompletionStage<Void> retireAndCloseWithRetry(OwnedIdentity owned) {
+    return retryCleanup(() -> connections.unregister(owned.identity(), owned.provider())
+        .thenCompose(ignored -> owned.provider().retire(owned.identity()))
+        .thenCompose(ignored -> closeProvider(owned.provider())), 1);
+  }
+
+  private CompletionStage<Void> closeProviderWithRetry(HBaseBackendIdentityProvider provider) {
+    return retryCleanup(() -> closeProvider(provider), 1);
+  }
+
+  private CompletionStage<Void> retryCleanup(
+      Supplier<? extends CompletionStage<Void>> cleanup, int attempt) {
+    CompletableFuture<Void> result = new CompletableFuture<>();
+    CompletionStage<Void> stage;
+    try {
+      stage = Objects.requireNonNull(cleanup.get(), "identity cleanup stage");
+    } catch (RuntimeException | Error failure) {
+      stage = CompletableFuture.failedFuture(failure);
+    }
+    stage.whenComplete((ignored, failure) -> {
+      if (failure == null) {
+        result.complete(null);
+        return;
+      }
+      Throwable cause = unwrap(failure);
+      if (attempt >= MAX_CLEANUP_ATTEMPTS || cause instanceof Error) {
+        result.completeExceptionally(cause);
+        return;
+      }
+      CompletableFuture.delayedExecutor(
+          CLEANUP_RETRY_DELAY_MILLIS * attempt, TimeUnit.MILLISECONDS).execute(() ->
+              retryCleanup(cleanup, attempt + 1).whenComplete((retried, retryFailure) -> {
+                if (retryFailure == null) result.complete(null);
+                else result.completeExceptionally(unwrap(retryFailure));
+              }));
+    });
+    return result.minimalCompletionStage();
+  }
+
   private CompletionStage<Void> closeAfterFailure(
       HBaseBackendIdentityProvider provider, Throwable failure) {
-    return closeProvider(provider).handle((ignored, closeFailure) -> {
+    return closeProviderWithRetry(provider).handle((ignored, closeFailure) -> {
       if (closeFailure != null && closeFailure != failure) failure.addSuppressed(unwrap(closeFailure));
       return null;
     });
@@ -504,7 +665,7 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
 
   private <T> CompletionStage<T> closeThenFail(
       HBaseBackendIdentityProvider provider, BackendIdentityException failure) {
-    CompletionStage<Void> cleanup = closeProvider(provider).handle((ignored, closeFailure) -> {
+    CompletionStage<Void> cleanup = closeProviderWithRetry(provider).handle((ignored, closeFailure) -> {
       if (closeFailure != null) failure.addSuppressed(unwrap(closeFailure));
       return null;
     });
@@ -519,7 +680,8 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
 
   private static boolean sameAuthorization(AuthorizedBackendIdentity expected,
       AuthorizedBackendIdentity actual) {
-    return expected.providerId().equals(actual.providerId())
+    return expected.hasKnownCredentialGeneration() && actual.hasKnownCredentialGeneration()
+        && expected.providerId().equals(actual.providerId())
         && expected.subject().equals(actual.subject())
         && expected.scope().equals(actual.scope())
         && expected.allowedTableGroupIds().equals(actual.allowedTableGroupIds())
@@ -527,7 +689,8 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
   }
 
   private boolean validIdentity(AuthorizedBackendIdentity identity) {
-    return identity != null && identity.providerId().equals(providerId)
+    return identity != null && identity.hasKnownCredentialGeneration()
+        && identity.providerId().equals(providerId)
         && identity.scope().equals(scope)
         && identity.allowedTableGroupIds().contains(scope.tableGroupId());
   }
@@ -560,6 +723,7 @@ public final class ProviderSessionIdentityManager implements SessionIdentityMana
     private int pendingBorrowers;
     private int borrowers;
     private OwnedIdentity owned;
+    private CompletableFuture<Void> retirement;
 
     private ActivationEntry(ActivationKey key, HBaseBackendIdentityProvider provider) {
       this.key = key;

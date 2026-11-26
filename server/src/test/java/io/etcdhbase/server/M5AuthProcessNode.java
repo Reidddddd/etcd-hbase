@@ -1,6 +1,8 @@
 package io.etcdhbase.server;
 
 import io.etcdhbase.core.auth.AuthSessionException;
+import io.etcdhbase.core.auth.TargetAuthorizationBarriers;
+import io.etcdhbase.core.commit.AuthorizationBarrierInstaller;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.hbase.api.HBaseCredentialAuthenticator;
@@ -13,6 +15,7 @@ import io.etcdhbase.hbase.identity.KerberosUserContext;
 import io.etcdhbase.hbase.probe.auth.PasswordDigestSaslClientFixture;
 import io.etcdhbase.hbase.storage.AuthControlBinding;
 import io.etcdhbase.hbase.storage.HBaseAuthSessionStore;
+import io.etcdhbase.hbase.storage.HBaseCommitControlStore;
 import io.etcdhbase.server.auth.AesGcmCredentialEnvelopeProtector;
 import io.etcdhbase.server.auth.AuthSessionService;
 import io.etcdhbase.server.auth.CredentialKeyProvider;
@@ -57,8 +60,8 @@ import org.apache.hadoop.hbase.client.AsyncConnection;
 /** Test subprocess owning an independent J50 auth session store and provider identity pool. */
 public final class M5AuthProcessNode implements AutoCloseable {
   private static final String CONTROL_PROVIDER_ID = "m5-control-process";
-  private static final String USER_PROVIDER_ID = "m5-user-process";
-  private static final String TRUST_DOMAIN = "m5-process-test";
+  private static final String USER_PROVIDER_ID = M5AuthProcessControl.USER_PROVIDER_ID;
+  private static final String TRUST_DOMAIN = M5AuthProcessControl.TRUST_DOMAIN;
   private static final String KEY_QUALIFIER = "v";
   private static final String KEY_FAMILY = "d";
   private static final byte[] PAYLOAD = "m5-process-value".getBytes(StandardCharsets.UTF_8);
@@ -66,19 +69,24 @@ public final class M5AuthProcessNode implements AutoCloseable {
   private final AuthenticationScope scope;
   private final TableName dataTable;
   private final TableName controlTable;
+  private final TableName systemTable;
   private final AuthSessionService sessions;
   private final ProviderSessionIdentityManager identities;
   private final HBaseConnectionRouter connections;
   private final HBaseBackendIdentityProvider controlProvider;
   private final CredentialKeyProvider keys;
+  private AuthSessionService.ResolvedIdentity heldIdentity;
+  private RequestScope heldScope;
+  private AsyncConnection heldConnection;
 
   private M5AuthProcessNode(AuthenticationScope scope, TableName dataTable,
-      TableName controlTable, AuthSessionService sessions,
+      TableName controlTable, TableName systemTable, AuthSessionService sessions,
       ProviderSessionIdentityManager identities, HBaseConnectionRouter connections,
       HBaseBackendIdentityProvider controlProvider, CredentialKeyProvider keys) {
     this.scope = scope;
     this.dataTable = dataTable;
     this.controlTable = controlTable;
+    this.systemTable = systemTable;
     this.sessions = sessions;
     this.identities = identities;
     this.connections = connections;
@@ -97,18 +105,18 @@ public final class M5AuthProcessNode implements AutoCloseable {
     String keyId = arguments[5];
     Path keyFile = Path.of(arguments[6]);
     ByteKey datasetDigest = ByteKey.copyOf(HexFormat.of().parseHex(arguments[7]));
-    String adminPrincipal = arguments[8];
+    String servicePrincipal = arguments[8];
     String userAdapter = arguments[9];
     String clusterId = arguments[10];
-    String adminKeytab = configuration.get("etcdhbase.test.security.admin.keytab");
+    String serviceKeytab = configuration.get("etcdhbase.test.security.user.keytab");
     String krb5 = configuration.get("etcdhbase.test.security.krb5");
-    if (adminKeytab == null || krb5 == null) {
+    if (serviceKeytab == null || krb5 == null) {
       throw new IllegalStateException("secure process fixture material is unavailable");
     }
     System.setProperty("java.security.krb5.conf", krb5);
 
     try (M5AuthProcessNode node = open(configuration, scope, dataTable, controlTable,
-        keyId, keyFile, datasetDigest, adminPrincipal, Path.of(adminKeytab), userAdapter,
+        keyId, keyFile, datasetDigest, servicePrincipal, Path.of(serviceKeytab), userAdapter,
         clusterId);
         var input = new DataInputStream(new BufferedInputStream(System.in));
         var output = new DataOutputStream(new BufferedOutputStream(System.out))) {
@@ -120,15 +128,21 @@ public final class M5AuthProcessNode implements AutoCloseable {
 
   private static M5AuthProcessNode open(Configuration configuration, AuthenticationScope scope,
       TableName dataTable, TableName controlTable, String keyId, Path keyFile,
-      ByteKey datasetDigest, String adminPrincipal, Path adminKeytab, String userAdapter,
+      ByteKey datasetDigest, String servicePrincipal, Path serviceKeytab, String userAdapter,
       String clusterId) throws Exception {
+    var system = M5AuthProcessControl.binding(TableName.valueOf(configuration.get(
+        M5AuthProcessControl.SYSTEM_TABLE_PROPERTY)));
     var controlScope = new AuthenticationScope("auth-control", scope.connectionProfileId());
     var controlProvider = new HBaseBackendIdentityProvider(CONTROL_PROVIDER_ID, controlScope,
         configuration, HBaseAuthenticators.kerberosPassword(),
-        (connection, ignored) -> connection.getAdmin().listNamespaces().thenApply(names -> null),
+        HBaseAccessVerifiers.tablePermissions(List.of(
+            new HBaseAccessVerifiers.TableAccess(controlTable,
+                Set.of(Action.READ, Action.WRITE, Action.EXEC, Action.CREATE)),
+            new HBaseAccessVerifiers.TableAccess(system.table(),
+                Set.of(Action.READ, Action.WRITE, Action.EXEC, Action.CREATE)))),
         2, 1, Duration.ofSeconds(30));
     var controlIdentity = controlProvider.activateTrusted(() ->
-        KerberosUserContext.fromKeytab(adminPrincipal, adminKeytab))
+        KerberosUserContext.fromKeytab(servicePrincipal, serviceKeytab))
         .toCompletableFuture().get(30, TimeUnit.SECONDS);
     var connections = new HBaseConnectionRouter(controlProvider);
     var profile = new SaltProfile(HashSaltStrategy.STRATEGY_ID, 1, 4, 2);
@@ -146,11 +160,21 @@ public final class M5AuthProcessNode implements AutoCloseable {
     try {
       var store = HBaseAuthSessionStore.open(controlProvider, controlIdentity, binding, openScope)
           .get(30, TimeUnit.SECONDS);
+      var control = HBaseCommitControlStore.open(controlProvider, controlIdentity, system, openScope)
+          .get(30, TimeUnit.SECONDS);
+      var registry = store.readRegistry(openScope).toCompletableFuture().get(30, TimeUnit.SECONDS).orElseThrow();
+      // A deliberately mismatched endpoint may reject tokens, but must never adopt another group's fence.
+      var groups = registry.groups().stream().anyMatch(group -> group.tableGroupId().equals(scope.tableGroupId()))
+          ? Map.of(scope.tableGroupId(), new TargetAuthorizationBarriers.Group(USER_PROVIDER_ID, scope,
+              datasetDigest, new AuthorizationBarrierInstaller(control)))
+          : Map.<String, TargetAuthorizationBarriers.Group>of();
+      var barriers = new TargetAuthorizationBarriers(store, TRUST_DOMAIN, groups);
       var protector = new AesGcmCredentialEnvelopeProtector(keys, new SecureRandom());
       var sessions = new AuthSessionService(store, protector, identityManager, TRUST_DOMAIN,
           USER_PROVIDER_ID, scope, datasetDigest, Duration.ofMinutes(15), 16,
-          Clock.systemUTC(), new SecureRandom());
-      return new M5AuthProcessNode(scope, dataTable, controlTable, sessions,
+          Clock.systemUTC(), new SecureRandom(), store, barriers, M5AuthProcessControl.IDENTITY_DOMAIN,
+          system.profileFingerprint());
+      return new M5AuthProcessNode(scope, dataTable, controlTable, system.table(), sessions,
           identityManager, connections, controlProvider, keys);
     } catch (Exception | Error failure) {
       try { identityManager.close(); } catch (RuntimeException | Error cleanup) {
@@ -171,11 +195,26 @@ public final class M5AuthProcessNode implements AutoCloseable {
   }
 
   private static HBaseCredentialAuthenticator userAuthenticator(String adapter, String clusterId) {
-    return switch (adapter) {
+    HBaseCredentialAuthenticator delegate = switch (adapter) {
       case "kerberos-password" -> HBaseAuthenticators.kerberosPassword();
       case "delegation-token" -> HBaseAuthenticators.delegationToken(clusterId);
       case "password-sasl" -> passwordSaslAuthenticator(clusterId);
       default -> throw new IllegalArgumentException("unsupported test authentication adapter");
+    };
+    // This fixture holds a single immutable credential generation for each test principal.
+    return new HBaseCredentialAuthenticator() {
+      @Override public void validateConfiguration(Configuration configuration) {
+        delegate.validateConfiguration(configuration);
+      }
+      @Override public HBaseUserContext authenticate(BackendCredentials credentials,
+          AuthenticationScope requestedScope) throws Exception {
+        HBaseUserContext context = delegate.authenticate(credentials, requestedScope);
+        return new HBaseUserContext() {
+          @Override public org.apache.hadoop.hbase.security.User user() { return context.user(); }
+          @Override public java.util.OptionalLong credentialGeneration() { return java.util.OptionalLong.of(1); }
+          @Override public void close() throws java.io.IOException { context.close(); }
+        };
+      }
     };
   }
 
@@ -206,6 +245,10 @@ public final class M5AuthProcessNode implements AutoCloseable {
         switch (command) {
           case "AUTH" -> authenticate(input, output);
           case "RESOLVE" -> resolve(input, output);
+          case "HOLD" -> hold(input, output);
+          case "HELD_OPEN" -> output.writeUTF(heldIdentity != null && !heldConnection.isClosed()
+              ? "OPEN" : "CLOSED");
+          case "RELEASE" -> releaseHeld(output);
           default -> writeError(output, "INVALID_COMMAND");
         }
       } catch (Exception failure) {
@@ -213,6 +256,43 @@ public final class M5AuthProcessNode implements AutoCloseable {
       }
       output.flush();
     }
+  }
+
+  private void hold(DataInputStream input, DataOutputStream output) throws Exception {
+    String token = input.readUTF();
+    if (heldIdentity != null) throw new IllegalStateException("identity already held");
+    RequestScope request = RequestScope.withTimeout(Duration.ofMinutes(5));
+    AuthSessionService.ResolvedIdentity resolved = null;
+    try {
+      resolved = sessions.resolve(token, request).toCompletableFuture().get(60, TimeUnit.SECONDS);
+      AsyncConnection connection = connections.connectionFor(resolved.identity())
+          .toCompletableFuture().get(30, TimeUnit.SECONDS);
+      heldIdentity = resolved;
+      heldScope = request;
+      heldConnection = connection;
+      output.writeUTF("HELD");
+    } catch (Exception | Error failure) {
+      if (heldIdentity == null && resolved != null) {
+        try { resolved.release().toCompletableFuture().join(); }
+        catch (RuntimeException | Error cleanup) { failure.addSuppressed(cleanup); }
+      }
+      request.close();
+      throw failure;
+    }
+  }
+
+  private void releaseHeld(DataOutputStream output) throws Exception {
+    if (heldIdentity == null) throw new IllegalStateException("no held identity");
+    try {
+      heldIdentity.release().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      if (!heldConnection.isClosed()) throw new IllegalStateException("retired connection did not close");
+    } finally {
+      heldScope.close();
+      heldIdentity = null;
+      heldScope = null;
+      heldConnection = null;
+    }
+    output.writeUTF("RELEASED");
   }
 
   private void authenticate(DataInputStream input, DataOutputStream output) throws Exception {
@@ -254,7 +334,8 @@ public final class M5AuthProcessNode implements AutoCloseable {
         boolean userValueRoundTrips = Arrays.equals(PAYLOAD,
             result.getValue(KEY_FAMILY.getBytes(StandardCharsets.UTF_8),
                 KEY_QUALIFIER.getBytes(StandardCharsets.UTF_8)));
-        boolean controlTableDenied = assertControlTableDenied(connection);
+        boolean controlTableDenied = controlTableDenied(connection, controlTable)
+            && controlTableDenied(connection, systemTable);
         output.writeUTF("IDENTITY\t" + whoAmI.getUsername() + "\t"
             + whoAmI.getAuthMethod() + "\t" + userValueRoundTrips + "\t" + controlTableDenied);
       } finally {
@@ -263,9 +344,9 @@ public final class M5AuthProcessNode implements AutoCloseable {
     }
   }
 
-  private boolean assertControlTableDenied(AsyncConnection connection) throws Exception {
+  private boolean controlTableDenied(AsyncConnection connection, TableName table) throws Exception {
     try {
-      connection.getTable(controlTable).get(new Get("blocked".getBytes(StandardCharsets.UTF_8)))
+      connection.getTable(table).get(new Get("blocked".getBytes(StandardCharsets.UTF_8)))
           .get(30, TimeUnit.SECONDS);
       return false;
     } catch (Exception failure) {
@@ -297,7 +378,20 @@ public final class M5AuthProcessNode implements AutoCloseable {
   @Override
   public void close() {
     Throwable failure = null;
-    try { identities.close(); } catch (RuntimeException | Error closeFailure) { failure = closeFailure; }
+    if (heldIdentity != null) {
+      try { heldIdentity.release().toCompletableFuture().join(); }
+      catch (RuntimeException | Error closeFailure) { failure = closeFailure; }
+      finally {
+        heldScope.close();
+        heldIdentity = null;
+        heldScope = null;
+        heldConnection = null;
+      }
+    }
+    try { identities.close(); } catch (RuntimeException | Error closeFailure) {
+      if (failure == null) failure = closeFailure;
+      else failure.addSuppressed(closeFailure);
+    }
     try { connections.close(); } catch (RuntimeException | Error closeFailure) {
       if (failure == null) failure = closeFailure;
       else failure.addSuppressed(closeFailure);

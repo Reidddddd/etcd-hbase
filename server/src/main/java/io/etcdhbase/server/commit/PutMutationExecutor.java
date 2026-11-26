@@ -3,6 +3,7 @@ package io.etcdhbase.server.commit;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitControlStore;
 import io.etcdhbase.core.commit.CommitOutcomeResolver;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
 import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitPublisher;
 import io.etcdhbase.core.commit.CommitState;
@@ -25,7 +26,6 @@ import io.etcdhbase.core.scan.PointResult;
 import io.etcdhbase.core.storage.ReadProjection;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.PhysicalRowLimitException;
-import io.etcdhbase.hbase.storage.HBaseRecordStore;
 import io.etcdhbase.hbase.storage.StorageTableBinding;
 import io.etcdhbase.server.observability.RequestMetrics;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
@@ -134,13 +134,22 @@ public final class PutMutationExecutor {
    */
   public CompletableFuture<InvocationId> executeNew(PutCommand command, InvocationBinding binding,
       CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
-      RequestScope scope, BudgetManager.Account account) {
+      CommitAuthorizationProof publicationProof, RequestScope scope, BudgetManager.Account account) {
+    return executeNew(command, binding, owner, identity, publicationProof, scope, account, () -> { });
+  }
+
+  CompletableFuture<InvocationId> executeNew(PutCommand command, InvocationBinding binding,
+      CommitOwnerService.OwnerToken owner, AuthorizedBackendIdentity identity,
+      CommitAuthorizationProof publicationProof, RequestScope scope, BudgetManager.Account account,
+      Runnable retireUserIdentity) {
     Objects.requireNonNull(command, "command");
     Objects.requireNonNull(binding, "binding");
     Objects.requireNonNull(owner, "owner");
     Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(publicationProof, "publicationProof");
     Objects.requireNonNull(scope, "scope");
     Objects.requireNonNull(account, "account");
+    Objects.requireNonNull(retireUserIdentity, "retireUserIdentity");
     if (binding.state() != InvocationBinding.State.PREPARING
         || binding.preparedOwnerEpoch() != owner.epoch() || !account.belongsTo(scope)) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("invalid new Put attempt"));
@@ -169,8 +178,8 @@ public final class PutMutationExecutor {
         CommitState state = observed.orElseThrow(() ->
             new IllegalStateException("authoritative commit control state is missing")).state();
         requireCurrentBase(state, binding, owner);
-        return readAndPrepare(command, binding, identity, scope, account);
-      }).thenCompose(sealed -> publish(binding, owner, sealed, scope));
+        return readAndPrepare(command, binding, identity, scope, account, retireUserIdentity);
+      }).thenCompose(sealed -> publish(binding, owner, sealed, publicationProof, scope));
     } catch (BackendFailure | RuntimeException failure) {
       executionDrained.complete(null);
       return CompletableFuture.failedFuture(failure);
@@ -184,7 +193,7 @@ public final class PutMutationExecutor {
 
   private CompletableFuture<PutCommitPreparation.Sealed> readAndPrepare(PutCommand command,
       InvocationBinding binding, AuthorizedBackendIdentity identity,
-      RequestScope scope, BudgetManager.Account account) {
+      RequestScope scope, BudgetManager.Account account, Runnable retireUserIdentity) {
     long started = System.nanoTime();
     var readView = leaseBindings == null
         ? views.open(OptionalLong.empty(), binding.authorizationScopeDigest(), scope)
@@ -196,9 +205,10 @@ public final class PutMutationExecutor {
               || pinned.view().selectedDecision().isPresent()) {
             return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
           }
-          return HBaseRecordStore.open(connections, identity, primary, scope, backendWorker)
-              .thenCompose(physical -> {
-                var view = new ReadViewRecordStore(pinned, physical, manifests, primary.codec()::bucket,
+          return UserIdentityRecordStore.open(
+              connections, identity, primary, scope, backendWorker, retireUserIdentity)
+              .thenCompose(userPhysical -> {
+                var view = new ReadViewRecordStore(pinned, userPhysical, manifests, primary.codec()::bucket,
                     primary.codec().saltProfile().bucketCount(), scope);
                 var reader = new DirectRecordReader(view, account, maximumPointBytes);
                 return reader.readForPreparation(command.key(), binding.baseRevision(), ReadProjection.FULL)
@@ -242,7 +252,8 @@ public final class PutMutationExecutor {
   }
 
   private CompletableFuture<InvocationId> publish(InvocationBinding binding,
-      CommitOwnerService.OwnerToken owner, PutCommitPreparation.Sealed sealed, RequestScope scope) {
+      CommitOwnerService.OwnerToken owner, PutCommitPreparation.Sealed sealed,
+      CommitAuthorizationProof publicationProof, RequestScope scope) {
     long encoded = sealed.manifest().resultReference().orElseThrow().totalBytes();
     if (ResponseBudget.forEncodedResult(encoded) > maximumResponseBytes) {
       return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
@@ -252,7 +263,7 @@ public final class PutMutationExecutor {
       CommitState state = observed.orElseThrow(() ->
           new IllegalStateException("authoritative commit control state is missing")).state();
       requireCurrentBase(state, binding, owner);
-      return publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope);
+      return publisher.publish(sealed.invocation(), owner, sealed.manifest(), scope, publicationProof);
     }).thenCompose(outcome -> outcome.state() == CommitOutcomeResolver.State.SELECTED_FINALIZED
         ? CompletableFuture.completedFuture(binding.invocationId())
         : CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNKNOWN)))

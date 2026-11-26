@@ -195,6 +195,8 @@ class M2CostBenchmarkIT {
         long now = System.currentTimeMillis();
         var owner = await(ownerService.claim("j29-minicluster-" + suffix, now,
             now + Duration.ofHours(1).toMillis(), openScope)).orElseThrow();
+        owner = await(new io.etcdhbase.core.commit.AuthorizationBarrierUpgrade(control)
+            .enable(owner, now, openScope));
         Profile profile = new Profile(environment, layout, primary, system, metrics, records,
             control, invocations, manifests, decisions, materialization, owner);
         return profile;
@@ -303,7 +305,9 @@ class M2CostBenchmarkIT {
         prepareNanos = System.nanoTime() - prepareStarted;
         long publishStarted = System.nanoTime();
         CommitOutcomeResolver.Resolution result = await(publisher.publish(sealed,
-            owner, root, scope));
+            owner, root, scope, io.etcdhbase.core.commit.CommitAuthorizationProof.capture(
+                AUTHORIZATION_DIGEST, state.authorizationBarrierGeneration(),
+                (identity, generation, request) -> CompletableFuture.completedFuture(null))));
         publishNanos = System.nanoTime() - publishStarted;
         assertEquals(CommitOutcomeResolver.State.SELECTED_FINALIZED, result.state());
         CommitState advanced = await(control.read(scope)).orElseThrow().state();

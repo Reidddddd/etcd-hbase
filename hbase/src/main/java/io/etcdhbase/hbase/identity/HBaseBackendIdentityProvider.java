@@ -7,6 +7,7 @@ import io.etcdhbase.hbase.api.HBaseUserContext;
 import io.etcdhbase.hbase.error.HBaseFailures;
 import io.etcdhbase.spi.identity.AuthenticationScope;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
+import io.etcdhbase.spi.identity.BackendIdentityBorrow;
 import io.etcdhbase.spi.identity.BackendCredentials;
 import io.etcdhbase.spi.identity.BackendIdentityException;
 import io.etcdhbase.spi.identity.BackendIdentityException.Reason;
@@ -16,6 +17,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -25,10 +27,12 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.AsyncConnection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
@@ -39,8 +43,8 @@ import org.apache.hadoop.hbase.security.User;
  *
  * <p>Credential conversion, connection creation, and backend permission verification must all
  * succeed before publication. The verified connection is then reused by that identity. No etcd
- * sessions or tokens are created here. Contexts remain bounded until provider close; per-session
- * retirement and renewal belong to the session/lifecycle layer.
+ * sessions or tokens are created here. Contexts remain counted until identity retirement and
+ * provider-owned connection/subject cleanup both complete.
  *
  * <p>At most {@code authenticationWorkers} accepted attempts may await result delivery. Each
  * reserves an independent notification worker until synchronous caller callbacks return; other
@@ -49,6 +53,9 @@ import org.apache.hadoop.hbase.security.User;
  */
 public final class HBaseBackendIdentityProvider
     implements BackendIdentityProvider, HBaseConnectionFactory {
+  private static final int MAX_CLOSED_CLEANUP_RETRIES = 3;
+  private static final long CLEANUP_RETRY_DELAY_MILLIS = 25;
+
   @FunctionalInterface
   interface ConnectionOpener {
     CompletionStage<AsyncConnection> open(Configuration configuration, User user);
@@ -65,11 +72,16 @@ public final class HBaseBackendIdentityProvider
   private final int maximumNotifications;
   private final Duration timeout;
   private final Map<String, Attempt> contexts = new HashMap<>();
+  private final LinkedHashMap<String, AuthorizedBackendIdentity> retiredIdentities =
+      new LinkedHashMap<>();
   private final ThreadPoolExecutor workers;
   private final ThreadPoolExecutor completions;
   private final ThreadPoolExecutor notifications;
+  private final ThreadPoolExecutor accessNotifications;
   private final ScheduledThreadPoolExecutor deadlines;
   private int pendingNotifications;
+  private int pendingAccessChecks;
+  private CompletableFuture<Void> accessChecksDrained = CompletableFuture.completedFuture(null);
   private volatile boolean closed;
 
   public HBaseBackendIdentityProvider(
@@ -133,6 +145,8 @@ public final class HBaseBackendIdentityProvider
     // not occupy the thread reserved for another accepted attempt's result or deadline.
     notifications =
         pool(authenticationWorkers, authenticationWorkers, "hbase-auth-notification-");
+    accessNotifications =
+        pool(authenticationWorkers, authenticationWorkers, "hbase-access-notification-");
     deadlines =
         new ScheduledThreadPoolExecutor(
             1, Thread.ofPlatform().daemon().name("hbase-auth-deadline-", 0).factory());
@@ -143,6 +157,20 @@ public final class HBaseBackendIdentityProvider
   @Override
   public String providerId() {
     return providerId;
+  }
+
+  /** True only after every accepted identity attempt has drained and released its resources. */
+  public boolean isFullyDrained() {
+    synchronized (gate) {
+      return contexts.isEmpty();
+    }
+  }
+
+  /** Completes after accepted access checks and their result callbacks have both drained. */
+  public CompletionStage<Void> accessChecksDrained() {
+    synchronized (gate) {
+      return accessChecksDrained.minimalCompletionStage();
+    }
   }
 
   @Override
@@ -228,28 +256,71 @@ public final class HBaseBackendIdentityProvider
     }
   }
 
-  /** Releases a provider-owned identity that has not been handed to a business request. */
-  public CompletionStage<Void> discardUnpublished(AuthorizedBackendIdentity identity) {
+  @Override
+  public BackendIdentityBorrow borrow(AuthorizedBackendIdentity identity)
+      throws BackendIdentityException {
     Objects.requireNonNull(identity, "identity");
-    Attempt attempt;
+    synchronized (gate) {
+      if (closed) throw new BackendIdentityException(Reason.BACKEND_UNAVAILABLE);
+      Attempt attempt = contexts.get(identity.contextRef());
+      if (attempt == null) throw new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION);
+      synchronized (attempt) {
+        if (attempt.identity != identity || attempt.stopped || attempt.retirementRequested
+            || attempt.resourcesClosed || attempt.connection == null) {
+          throw new BackendIdentityException(Reason.INSUFFICIENT_PERMISSION);
+        }
+        attempt.borrowers++;
+      }
+      return new IdentityBorrow(attempt, identity);
+    }
+  }
+
+  /** Rechecks the configured permissions on this identity's actual backend connection. */
+  public CompletionStage<Void> verifyCurrentAccess(AuthorizedBackendIdentity identity) {
+    Objects.requireNonNull(identity, "identity");
     synchronized (gate) {
       if (closed) return rejected(Reason.BACKEND_UNAVAILABLE);
-      attempt = contexts.get(identity.contextRef());
+      if (pendingAccessChecks >= maximumNotifications) return rejected(Reason.RESOURCE_LIMIT);
+      Attempt attempt = contexts.get(identity.contextRef());
+      if (attempt == null) return rejected(Reason.INSUFFICIENT_PERMISSION);
+      final BackendIdentityBorrow held;
+      try {
+        held = borrow(identity);
+      } catch (BackendIdentityException failure) {
+        return CompletableFuture.failedFuture(failure);
+      }
+      if (pendingAccessChecks++ == 0) accessChecksDrained = new CompletableFuture<>();
+      return new AccessRecheck(attempt, identity, held, attempt.connection).start();
     }
-    if (attempt == null) return CompletableFuture.completedFuture(null);
-    return attempt.discardUnpublished(identity);
+  }
+
+  @Override
+  public CompletionStage<Void> retire(AuthorizedBackendIdentity identity) {
+    return retireIdentity(identity);
+  }
+
+  /** Releases a provider-owned identity that has not been handed to a business request. */
+  public CompletionStage<Void> discardUnpublished(AuthorizedBackendIdentity identity) {
+    return retireIdentity(identity);
   }
 
   /** Releases one published identity without closing this provider or other identity contexts. */
   public CompletionStage<Void> release(AuthorizedBackendIdentity identity) {
+    return retireIdentity(identity);
+  }
+
+  private CompletionStage<Void> retireIdentity(AuthorizedBackendIdentity identity) {
     Objects.requireNonNull(identity, "identity");
     Attempt attempt;
     synchronized (gate) {
-      if (closed) return rejected(Reason.BACKEND_UNAVAILABLE);
       attempt = contexts.get(identity.contextRef());
+      if (attempt == null) {
+        return retiredIdentities.get(identity.contextRef()) == identity
+            ? CompletableFuture.completedFuture(null)
+            : rejected(Reason.INSUFFICIENT_PERMISSION);
+      }
     }
-    if (attempt == null) return CompletableFuture.completedFuture(null);
-    return attempt.release(identity);
+    return attempt.retire(identity);
   }
 
   @Override
@@ -276,9 +347,16 @@ public final class HBaseBackendIdentityProvider
     }
   }
 
-  private void retire(Attempt attempt) {
+  private void retire(Attempt attempt, AuthorizedBackendIdentity identity) {
     synchronized (gate) {
       contexts.remove(attempt.reference, attempt);
+      if (identity != null) {
+        retiredIdentities.put(identity.contextRef(), identity);
+        while (retiredIdentities.size() > maximumContexts) {
+          String eldest = retiredIdentities.keySet().iterator().next();
+          retiredIdentities.remove(eldest);
+        }
+      }
     }
     shutdownWhenEmpty();
   }
@@ -296,6 +374,7 @@ public final class HBaseBackendIdentityProvider
         completions.shutdown();
         deadlines.shutdown();
         notifications.shutdown();
+        accessNotifications.shutdown();
       }
     }
   }
@@ -318,6 +397,145 @@ public final class HBaseBackendIdentityProvider
     return CompletableFuture.failedFuture(new BackendIdentityException(reason));
   }
 
+  /** Owns the verification borrow until the original backend operation physically completes. */
+  private final class AccessRecheck {
+    private final Attempt attempt;
+    private final AuthorizedBackendIdentity identity;
+    private final BackendIdentityBorrow held;
+    private final AsyncConnection connection;
+    private final CompletableFuture<Void> result = new CompletableFuture<>();
+    private ScheduledFuture<?> deadline;
+    private boolean settled;
+    private boolean drained;
+    private boolean notified;
+
+    private AccessRecheck(Attempt attempt, AuthorizedBackendIdentity identity,
+        BackendIdentityBorrow held, AsyncConnection connection) {
+      this.attempt = attempt;
+      this.identity = identity;
+      this.held = held;
+      this.connection = connection;
+    }
+
+    private CompletionStage<Void> start() {
+      try {
+        deadline = deadlines.schedule(() -> settle(Reason.TIMEOUT),
+            timeout.toNanos(), TimeUnit.NANOSECONDS);
+        CompletableFuture.supplyAsync(
+            () -> Objects.requireNonNull(verifier.verify(connection, scope), "access verification stage"),
+            completions).thenCompose(stage -> stage).whenComplete(this::finish);
+      } catch (RuntimeException failure) {
+        finish(null, failure);
+      }
+      return result.minimalCompletionStage();
+    }
+
+    private void finish(Void ignored, Throwable failure) {
+      if (deadline != null) deadline.cancel(false);
+      Reason reason = failure == null ? null : switch (HBaseFailures.classify(failure).category()) {
+        case AUTHENTICATION -> Reason.INVALID_CREDENTIALS;
+        case PERMISSION -> Reason.INSUFFICIENT_PERMISSION;
+        case RESOURCE_LIMIT -> Reason.RESOURCE_LIMIT;
+        case TIMEOUT -> Reason.TIMEOUT;
+        case CANCELLED -> Reason.CANCELLED;
+        default -> Reason.BACKEND_UNAVAILABLE;
+      };
+      settle(reason);
+      held.release().whenComplete((released, releaseFailure) -> markDrained());
+    }
+
+    private void settle(Reason failure) {
+      synchronized (this) {
+        if (settled) return;
+        synchronized (attempt) {
+          if (failure == null && (attempt.stopped || attempt.identity != identity)) {
+            failure = Reason.CANCELLED;
+          }
+        }
+        settled = true;
+        if (failure != null && failure != Reason.RESOURCE_LIMIT) attempt.retire(identity);
+        Reason selected = failure;
+        // Submit while the verification borrow still prevents the executor from being shut down.
+        accessNotifications.execute(() -> {
+          try {
+            if (selected == null) result.complete(null);
+            else result.completeExceptionally(new BackendIdentityException(selected));
+          } finally {
+            markNotified();
+          }
+        });
+      }
+    }
+
+    private void markDrained() {
+      boolean release;
+      synchronized (this) {
+        drained = true;
+        release = notified;
+      }
+      if (release) releaseCapacity();
+    }
+
+    private void markNotified() {
+      boolean release;
+      synchronized (this) {
+        notified = true;
+        release = drained;
+      }
+      if (release) releaseCapacity();
+    }
+
+    private void releaseCapacity() {
+      CompletableFuture<Void> drainedChecks = null;
+      synchronized (gate) {
+        pendingAccessChecks--;
+        if (pendingAccessChecks == 0) drainedChecks = accessChecksDrained;
+      }
+      if (drainedChecks != null) drainedChecks.complete(null);
+    }
+  }
+
+  private final class IdentityBorrow implements BackendIdentityBorrow {
+    private final Attempt attempt;
+    private final AuthorizedBackendIdentity identity;
+    private final AtomicReference<CompletableFuture<Void>> release = new AtomicReference<>();
+
+    private IdentityBorrow(Attempt attempt, AuthorizedBackendIdentity identity) {
+      this.attempt = attempt;
+      this.identity = identity;
+    }
+
+    @Override
+    public AuthorizedBackendIdentity identity() {
+      return identity;
+    }
+
+    @Override
+    public CompletionStage<Void> release() {
+      CompletableFuture<Void> completion = release.get();
+      if (completion == null) {
+        CompletableFuture<Void> created = new CompletableFuture<>();
+        if (release.compareAndSet(null, created)) {
+          completion = created;
+          try {
+            attempt.releaseBorrow().whenComplete((ignored, failure) -> {
+              if (failure == null) created.complete(null);
+              else created.completeExceptionally(failure);
+            });
+          } catch (RuntimeException failure) {
+            created.completeExceptionally(failure);
+          } catch (Error fatal) {
+            created.completeExceptionally(fatal);
+            throw fatal;
+          }
+        } else {
+          completion = release.get();
+        }
+      }
+      return completion.minimalCompletionStage();
+    }
+  }
+
   private final class Attempt {
     final String reference = UUID.randomUUID().toString();
     final BackendCredentials credentials;
@@ -334,7 +552,12 @@ public final class HBaseBackendIdentityProvider
     boolean resourcesClosed;
     boolean notificationScheduled;
     boolean notificationFinished;
-    final CompletableFuture<Void> resourcesReleased = new CompletableFuture<>();
+    boolean retirementRequested;
+    boolean retirementFinalized;
+    boolean cleanupRetryScheduled;
+    int cleanupRetryCount;
+    int borrowers;
+    CompletableFuture<Void> retirementCompletion = new CompletableFuture<>();
 
     Attempt(BackendCredentials credentials, Callable<? extends HBaseUserContext> userSource) {
       this.credentials = credentials;
@@ -415,14 +638,14 @@ public final class HBaseBackendIdentityProvider
         }
         if (!stopped) {
           try {
-            published =
-                new AuthorizedBackendIdentity(
-                    providerId,
-                    user.user().getName(),
-                    reference,
-                    scope,
-                    Set.of(scope.tableGroupId()),
-                    0);
+            var generation = Objects.requireNonNull(user.credentialGeneration(),
+                "credential generation attestation");
+            String subject = user.user().getName();
+            published = generation.isPresent()
+                ? new AuthorizedBackendIdentity(providerId, subject, reference, scope,
+                    Set.of(scope.tableGroupId()), generation.getAsLong())
+                : AuthorizedBackendIdentity.withUnknownCredentialGeneration(providerId, subject,
+                    reference, scope, Set.of(scope.tableGroupId()));
             identity = published;
           } catch (RuntimeException invalidContext) {
             stopped = true;
@@ -458,6 +681,7 @@ public final class HBaseBackendIdentityProvider
           return;
         }
         stopped = true;
+        retirementRequested = true;
         if (loginWorker != null) {
           loginWorker.interrupt();
         }
@@ -498,69 +722,135 @@ public final class HBaseBackendIdentityProvider
     }
 
     private void retireWhenFinished() {
+      AuthorizedBackendIdentity retiredIdentity;
       synchronized (this) {
-        if (!resourcesClosed || !notificationFinished) {
-          return;
-        }
+        if (!resourcesClosed || !notificationFinished || borrowers != 0 || retirementFinalized) return;
+        retirementFinalized = true;
+        retiredIdentity = identity;
       }
-      HBaseBackendIdentityProvider.this.retire(this);
-    }
-
-    CompletionStage<Void> discardUnpublished(AuthorizedBackendIdentity expected) {
-      return retire(expected);
-    }
-
-    CompletionStage<Void> release(AuthorizedBackendIdentity expected) {
-      return retire(expected);
+      HBaseBackendIdentityProvider.this.retire(this, retiredIdentity);
     }
 
     private CompletionStage<Void> retire(AuthorizedBackendIdentity expected) {
+      CompletableFuture<Void> retirement;
       synchronized (this) {
         if (identity != expected) {
           return HBaseBackendIdentityProvider.rejected(Reason.INSUFFICIENT_PERMISSION);
         }
         if (resourcesClosed) return CompletableFuture.completedFuture(null);
+        if (retirementCompletion.isCompletedExceptionally()) {
+          retirementCompletion = new CompletableFuture<>();
+        }
+        retirementRequested = true;
         stopped = true;
+        retirement = retirementCompletion;
       }
       notifyResult(null, Reason.CANCELLED);
       cleanup();
-      return resourcesReleased.minimalCompletionStage();
+      return retirement.minimalCompletionStage();
     }
 
-    /** Retains capacity and credentials if a connection could not be closed; close() retries it. */
+    private CompletionStage<Void> releaseBorrow() {
+      boolean cleanupRequired;
+      synchronized (this) {
+        if (borrowers <= 0) {
+          return CompletableFuture.failedFuture(
+              new IllegalStateException("backend identity borrow accounting underflow"));
+        }
+        borrowers--;
+        cleanupRequired = stopped && borrowers == 0;
+      }
+      if (cleanupRequired) cleanup();
+      return CompletableFuture.completedFuture(null);
+    }
+
+    /** Retains capacity after failed cleanup and retries on a bounded schedule. */
     boolean cleanup() {
       synchronized (this) {
-        if (!stopped || !workFinished || cleaning) {
+        if (!stopped || !workFinished || cleaning || borrowers != 0 || resourcesClosed) {
           return true;
         }
         cleaning = true;
       }
-      boolean success = false;
+      Throwable cleanupFailure = null;
       try {
         if (connection != null) {
-          connection.close();
-          connection = null;
+          AsyncConnection selectedConnection = connection;
+          try {
+            selectedConnection.close();
+            connection = null;
+          } catch (IOException | RuntimeException failure) {
+            cleanupFailure = failure;
+          }
         }
-        if (user != null) {
-          user.close();
-          user = null;
+        if (cleanupFailure == null && user != null) {
+          HBaseUserContext selectedUser = user;
+          try {
+            selectedUser.close();
+            user = null;
+          } catch (IOException | RuntimeException failure) {
+            cleanupFailure = failure;
+          }
         }
-        success = true;
-      } catch (IOException | RuntimeException failure) {
-        // Keep the owned resources available for a later close retry, without publishing details.
-      } finally {
+      } catch (Error fatal) {
         synchronized (this) {
-          resourcesClosed = success;
           cleaning = false;
         }
-        if (success) resourcesReleased.complete(null);
-        else resourcesReleased.completeExceptionally(
-            new IllegalStateException("backend identity resource cleanup failed"));
+        throw fatal;
+      }
+      boolean success;
+      CompletableFuture<Void> completedRetirement;
+      synchronized (this) {
+        success = connection == null && user == null;
+        resourcesClosed = success;
+        cleaning = false;
+        completedRetirement = success && retirementRequested ? retirementCompletion : null;
+        if (!success && retirementRequested && !retirementCompletion.isDone()) {
+          retirementCompletion.completeExceptionally(
+              new IllegalStateException("backend identity resource cleanup failed"));
+        }
       }
       if (success) {
+        // Resource cleanup may finish while a caller's result callback is still running. Do not
+        // make that callback wait for itself; its notification capacity stays reserved separately.
+        if (completedRetirement != null) completedRetirement.complete(null);
         retireWhenFinished();
+      } else {
+        scheduleClosedCleanupRetry();
       }
       return success;
+    }
+
+    private void scheduleClosedCleanupRetry() {
+      int retry;
+      synchronized (this) {
+        if (!closed || !stopped || !workFinished || borrowers != 0 || resourcesClosed
+            || cleanupRetryScheduled || cleanupRetryCount >= MAX_CLOSED_CLEANUP_RETRIES) {
+          return;
+        }
+        retry = ++cleanupRetryCount;
+        cleanupRetryScheduled = true;
+      }
+      try {
+        deadlines.schedule(() -> {
+          try {
+            completions.execute(() -> {
+              synchronized (Attempt.this) {
+                cleanupRetryScheduled = false;
+              }
+              if (!cleanup()) scheduleClosedCleanupRetry();
+            });
+          } catch (RejectedExecutionException rejected) {
+            synchronized (Attempt.this) {
+              cleanupRetryScheduled = false;
+            }
+          }
+        }, CLEANUP_RETRY_DELAY_MILLIS * retry, TimeUnit.MILLISECONDS);
+      } catch (RejectedExecutionException rejected) {
+        synchronized (this) {
+          cleanupRetryScheduled = false;
+        }
+      }
     }
   }
 }

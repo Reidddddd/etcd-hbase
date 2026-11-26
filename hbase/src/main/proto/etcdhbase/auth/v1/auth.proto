@@ -67,10 +67,87 @@ message SubjectAuthorityRecord {
   optional int64 credential_generation = 7;
   optional int64 authorization_generation = 8;
   optional SubjectAuthorityStatus status = 9;
+  repeated SubjectAuthorityRevocationTarget revocation_targets = 10;
+  optional bytes revocation_operation_id = 11;
+  optional int64 revocation_operation_sequence = 12;
+  optional int64 revocation_configuration_generation = 13;
+}
+
+message SubjectAuthorityRevocationTarget {
+  optional string table_group_id = 1;
+  optional int64 barrier_generation = 2;
+  optional bool installed = 3;
 }
 
 enum SubjectAuthorityStatus {
   SUBJECT_AUTHORITY_STATUS_UNSPECIFIED = 0;
   SUBJECT_AUTHORITY_ACTIVE = 1;
   SUBJECT_AUTHORITY_REVOKED = 2;
+  SUBJECT_AUTHORITY_REVOKING = 3;
+}
+
+message AuthorizationRevocationRecord {
+  optional uint32 format_version = 1;
+  optional bytes operation_id = 2;
+  optional bytes subject_family_digest = 3;
+  optional int64 configuration_generation = 4;
+  optional int64 revision = 5;
+  optional uint32 state = 6;
+  repeated AuthorizationRevocationTarget targets = 7;
+  optional string provider_id = 8;
+  optional string backend_identity_domain = 9;
+  optional int64 credential_generation = 10;
+  optional int64 operation_sequence = 11;
+}
+
+message AuthorizationRevocationTarget {
+  optional string table_group_id = 1;
+  optional bytes dataset_digest = 2;
+  optional bytes authority_digest = 3;
+  optional int64 barrier_generation = 4;
+  optional bool installed = 5;
+  optional bool released = 6;
+}
+
+message AuthorizationRevocationEnvelope {
+  optional bytes content = 1;
+  optional bytes sha256 = 2;
+}
+
+message AuthDeploymentRegistryRecord {
+  optional uint32 format_version = 1;
+  optional string trust_domain = 2;
+  optional int64 configuration_generation = 3;
+  optional int64 revision = 4;
+  repeated AuthDeploymentGroup groups = 5;
+  optional bytes revocation = 6;
+  optional AuthConfigurationUpdate configuration_update = 7;
+}
+
+message AuthConfigurationUpdate {
+  optional int64 operation_sequence = 1;
+  repeated AuthDeploymentGroup replacement = 2;
+  repeated AuthConfigurationBarrierTarget targets = 3;
+}
+
+message AuthConfigurationBarrierTarget {
+  optional string table_group_id = 1;
+  optional bytes dataset_digest = 2;
+  optional int64 barrier_generation = 3;
+  optional bool installed = 4;
+}
+
+message AuthDeploymentGroup {
+  optional string table_group_id = 1;
+  optional string provider_id = 2;
+  optional string connection_profile_id = 3;
+  optional bytes dataset_digest = 4;
+  optional bytes configuration_digest = 5;
+  optional bool enabled = 6;
+  optional string backend_identity_domain = 7;
+}
+
+message AuthDeploymentRegistryEnvelope {
+  optional bytes content = 1;
+  optional bytes sha256 = 2;
 }

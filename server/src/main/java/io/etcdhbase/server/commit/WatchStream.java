@@ -29,6 +29,8 @@ import java.util.function.Consumer;
 /** One stream-scoped watch registry and single writer for control responses and event batches. */
 final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseable {
   private static final long DEFAULT_PROGRESS_NOTIFY_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(10);
+  private static final long DEFAULT_AUTHORIZATION_RECHECK_INTERVAL_MILLIS = TimeUnit.SECONDS.toMillis(5);
+  private static final long AUTHORIZATION_RECHECK_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(5);
   private static final int MAX_FILTERED_REVISIONS_PER_DRAIN = 128;
   private static final long REJECTED_CREATE_RESPONSE_WATCH_ID = -1;
   private static final String HISTORICAL_REPLAY_UNSUPPORTED_REASON =
@@ -41,8 +43,15 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     long completedRevision();
     default long completedSequence() { return completedRevision(); }
     CompletionStage<Long> currentRevision();
+    default boolean authorizationRevalidationRequired() { return false; }
+    /** Rechecks the durable session and currently effective backend authorization. */
+    default CompletionStage<Void> revalidateAuthorization() {
+      return java.util.concurrent.CompletableFuture.completedFuture(null);
+    }
     CompletionStage<OpenedWatch> subscribe(KeyRange range, Rpc.WatchCreateRequest request)
         throws BackendFailure;
+    /** Stops session-owned resources and waits until their physical cleanup has drained. */
+    default void close() {}
   }
 
   record OpenedWatch(long revision, long barrierSequence, long compactRevision,
@@ -115,7 +124,9 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     }
   }
 
-  private enum DrainKind { STOP, SEND_FAILURE, SEND_RESPONSE, PROCESS_REQUEST, PUMP }
+  private enum DrainKind {
+    STOP, SEND_FAILURE, AUTHORIZE_RESPONSE, SEND_RESPONSE, PROCESS_REQUEST, PUMP
+  }
 
   private record DrainAction(
       DrainKind kind, PendingResponse response, Rpc.WatchRequest request, Throwable failure) {}
@@ -160,7 +171,7 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     }
   }
 
-  private enum PumpResult { RESPONSE_SENT, ADVANCED, IDLE }
+  private enum PumpResult { ADVANCED, IDLE }
 
   private final Object lock = new Object();
   private final StreamObserver<Rpc.WatchResponse> responseObserver;
@@ -175,15 +186,18 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
   private final WatchEventBatchEncoder eventBatchEncoder;
   private final int maximumResponseBytes;
   private final long progressNotifyIntervalMillis;
+  private final long authorizationRecheckIntervalMillis;
   private final ArrayDeque<PendingResponse> responses = new ArrayDeque<>();
   private final AtomicBoolean draining = new AtomicBoolean();
   private final AtomicBoolean drainRequested = new AtomicBoolean();
+  private final AtomicBoolean sessionCloseStarted = new AtomicBoolean();
 
   private CompletionStage<Session> sessionFuture;
   private Session session;
   private Rpc.WatchRequest pendingRequest;
   private ScheduledFuture<?> drainYieldTask;
   private ScheduledFuture<?> progressNotifyTask;
+  private ScheduledFuture<?> authorizationRecheckTask;
   private int nextWatchIndex;
   private int pendingTerminationResponses;
   private boolean processingRequest;
@@ -192,6 +206,11 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
   private boolean terminal;
   private boolean peerCancelled;
   private boolean progressNotifyInFlight;
+  private boolean outboundAuthorizationCheckInFlight;
+  private boolean periodicAuthorizationCheckInFlight;
+  private boolean outboundAuthorizationReady;
+  private long readinessGeneration;
+  private boolean sendingResponse;
   private ActiveFragment activeFragment;
   private Throwable terminalFailure;
   private ProgressBarrier pendingProgress;
@@ -223,13 +242,23 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       Executor worker, ScheduledExecutorService timers, SessionProvider sessions,
       long clusterId, long memberId, int maximumResponseBytes,
       CompactedWatchIdBudget compactedWatchIdBudget, long progressNotifyIntervalMillis) {
+    this(responseObserver, streamScope, worker, timers, sessions, clusterId, memberId,
+        maximumResponseBytes, compactedWatchIdBudget, progressNotifyIntervalMillis,
+        DEFAULT_AUTHORIZATION_RECHECK_INTERVAL_MILLIS);
+  }
+
+  WatchStream(StreamObserver<Rpc.WatchResponse> responseObserver, RequestScope streamScope,
+      Executor worker, ScheduledExecutorService timers, SessionProvider sessions,
+      long clusterId, long memberId, int maximumResponseBytes,
+      CompactedWatchIdBudget compactedWatchIdBudget, long progressNotifyIntervalMillis,
+      long authorizationRecheckIntervalMillis) {
     this.responseObserver = Objects.requireNonNull(responseObserver, "responseObserver");
     this.streamScope = Objects.requireNonNull(streamScope, "streamScope");
     this.worker = Objects.requireNonNull(worker, "worker");
     this.timers = Objects.requireNonNull(timers, "timers");
     this.sessions = Objects.requireNonNull(sessions, "sessions");
     if (clusterId == 0 || memberId == 0 || maximumResponseBytes < 1
-        || progressNotifyIntervalMillis < 1) {
+        || progressNotifyIntervalMillis < 1 || authorizationRecheckIntervalMillis < 1) {
       throw new IllegalArgumentException("invalid Watch stream identity or response budget");
     }
     this.clusterId = clusterId;
@@ -239,13 +268,14 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     this.eventBatchEncoder = new WatchEventBatchEncoder(clusterId, memberId, maximumResponseBytes);
     this.maximumResponseBytes = maximumResponseBytes;
     this.progressNotifyIntervalMillis = progressNotifyIntervalMillis;
+    this.authorizationRecheckIntervalMillis = authorizationRecheckIntervalMillis;
     if (responseObserver instanceof ServerCallStreamObserver<?> serverCall) {
       @SuppressWarnings("unchecked")
       ServerCallStreamObserver<Rpc.WatchResponse> typed =
           (ServerCallStreamObserver<Rpc.WatchResponse>) serverCall;
       serverObserver = typed;
       serverObserver.disableAutoInboundFlowControl();
-      serverObserver.setOnReadyHandler(this::scheduleDrain);
+      serverObserver.setOnReadyHandler(this::onTransportReady);
       serverObserver.setOnCancelHandler(this::cancelFromPeer);
     } else {
       serverObserver = null;
@@ -295,18 +325,7 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     drainRequested.set(true);
     if (!draining.compareAndSet(false, true)) return;
     try {
-      worker.execute(() -> {
-        try {
-          drainRequested.getAndSet(false);
-          drainLoop();
-        } catch (RuntimeException | Error failure) {
-          fail(failure);
-          if (failure instanceof Error fatal) throw fatal;
-        } finally {
-          draining.set(false);
-          if (drainRequested.get() || hasRunnableWork()) scheduleDrain();
-        }
-      });
+      worker.execute(this::runOwnedDrain);
     } catch (RejectedExecutionException rejected) {
       drainAfterRejectedExecution(rejected);
     } catch (Error fatal) {
@@ -319,6 +338,23 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
         drainRequested.set(false);
       }
       throw fatal;
+    }
+  }
+
+  /** Runs only while this caller owns the stream writer, including an authorization handoff. */
+  private void runOwnedDrain() {
+    boolean handedOff = false;
+    try {
+      drainRequested.getAndSet(false);
+      handedOff = drainLoop();
+    } catch (RuntimeException | Error failure) {
+      fail(failure);
+      if (failure instanceof Error fatal) throw fatal;
+    } finally {
+      if (!handedOff) {
+        draining.set(false);
+        if (drainRequested.get() || hasRunnableWork()) scheduleDrain();
+      }
     }
   }
 
@@ -344,7 +380,8 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     if (cleanupFailure instanceof RuntimeException failure) throw failure;
   }
 
-  private void drainLoop() {
+  /** Returns true only when an authorization completion now owns the writer. */
+  private boolean drainLoop() {
     int filteredRevisions = 0;
     for (;;) {
       ActiveFragment cancelledFragment = null;
@@ -360,15 +397,19 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
         catch (RuntimeException | Error failure) {
           fail(failure);
           if (failure instanceof Error fatal) throw fatal;
-          return;
+          return false;
         }
       }
       DrainAction action = nextDrainAction();
       switch (action.kind()) {
-        case STOP -> { return; }
+        case STOP -> { return false; }
         case SEND_FAILURE -> {
           sendTerminalFailure(action.failure());
-          return;
+          return false;
+        }
+        case AUTHORIZE_RESPONSE -> {
+          if (startOutboundAuthorizationCheck()) return true;
+          continue;
         }
         case SEND_RESPONSE -> {
           sendResponse(action.response());
@@ -382,22 +423,17 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       }
 
       PumpResult pumpResult = pumpOneWatcher();
-      if (pumpResult == PumpResult.RESPONSE_SENT) {
-        filteredRevisions = 0;
-        requestNext();
-        continue;
-      }
       if (pumpResult == PumpResult.ADVANCED) {
         requestNext();
         if (++filteredRevisions >= MAX_FILTERED_REVISIONS_PER_DRAIN) {
           scheduleDrainYield();
-          return;
+          return false;
         }
         continue;
       }
       if (enqueuePendingProgress()) continue;
       requestNext();
-      return;
+      return false;
     }
   }
 
@@ -411,6 +447,9 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       }
       if (terminal) return new DrainAction(DrainKind.STOP, null, null, null);
       if (pendingTerminationResponses > 0) return new DrainAction(DrainKind.STOP, null, null, null);
+      if (outboundAuthorizationCheckInFlight || periodicAuthorizationCheckInFlight) {
+        return new DrainAction(DrainKind.STOP, null, null, null);
+      }
       if (activeFragment != null && isCancelRequest(pendingRequest) && !processingRequest) {
         Rpc.WatchRequest request = pendingRequest;
         pendingRequest = null;
@@ -419,6 +458,12 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       }
       if (activeFragment != null) {
         if (!isReady()) return new DrainAction(DrainKind.STOP, null, null, null);
+        if (authorizationRevalidationRequiredLocked() && !outboundAuthorizationReady) {
+          outboundAuthorizationCheckInFlight = true;
+          return new DrainAction(DrainKind.AUTHORIZE_RESPONSE, null, null, null);
+        }
+        outboundAuthorizationReady = false;
+        sendingResponse = true;
         ActiveFragment fragments = activeFragment;
         FragmentResponse next = fragments.next();
         return new DrainAction(DrainKind.SEND_RESPONSE, new PendingResponse(next.response(),
@@ -426,6 +471,12 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       }
       if (!responses.isEmpty()) {
         if (!isReady()) return new DrainAction(DrainKind.STOP, null, null, null);
+        if (authorizationRevalidationRequiredLocked() && !outboundAuthorizationReady) {
+          outboundAuthorizationCheckInFlight = true;
+          return new DrainAction(DrainKind.AUTHORIZE_RESPONSE, null, null, null);
+        }
+        outboundAuthorizationReady = false;
+        sendingResponse = true;
         return new DrainAction(DrainKind.SEND_RESPONSE, responses.removeFirst(), null, null);
       }
       if (pendingRequest != null && !processingRequest) {
@@ -456,7 +507,89 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     } catch (RuntimeException | Error failure) {
       fail(failure);
       if (failure instanceof Error fatal) throw fatal;
+    } finally {
+      synchronized (lock) { sendingResponse = false; }
+      refreshAuthorizationRecheckSchedule();
     }
+  }
+
+  private void onTransportReady() {
+    synchronized (lock) {
+      readinessGeneration++;
+      outboundAuthorizationReady = false;
+    }
+    scheduleDrain();
+  }
+
+  private boolean startOutboundAuthorizationCheck() {
+    final long startedAtReadinessGeneration;
+    synchronized (lock) { startedAtReadinessGeneration = readinessGeneration; }
+    return OutboundAuthorizationHandoff.start(this::requestAuthorizationCheck, failure -> {
+      synchronized (lock) {
+        outboundAuthorizationCheckInFlight = false;
+        outboundAuthorizationReady = failure == null && !terminal && !peerCancelled
+            && readinessGeneration == startedAtReadinessGeneration && isReady();
+      }
+      if (failure != null) fail(unwrap(failure));
+    }, this::runOwnedDrain);
+  }
+
+  private void startPeriodicAuthorizationCheck() {
+    requestAuthorizationCheck(failure -> executeCompletion(() -> {
+      synchronized (lock) {
+        periodicAuthorizationCheckInFlight = false;
+        outboundAuthorizationReady = false;
+      }
+      if (failure != null) {
+        fail(unwrap(failure));
+      } else {
+        refreshAuthorizationRecheckSchedule();
+        scheduleDrain();
+      }
+    }, schedulingFailure -> {
+      synchronized (lock) { periodicAuthorizationCheckInFlight = false; }
+    }));
+  }
+
+  private void requestAuthorizationCheck(Consumer<Throwable> completed) {
+    var settled = new AtomicBoolean();
+    final ScheduledFuture<?> timeout;
+    try {
+      timeout = timers.schedule(() -> completeAuthorizationRequest(settled, completed,
+          new BackendFailure(BackendFailure.Category.TIMEOUT), null),
+          AUTHORIZATION_RECHECK_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+    } catch (RejectedExecutionException rejected) {
+      completeAuthorizationRequest(settled, completed, rejected, null);
+      return;
+    } catch (Error fatal) {
+      completeAuthorizationRequest(settled, completed, fatal, null);
+      throw fatal;
+    }
+
+    session().whenComplete((openedSession, sessionFailure) -> {
+      if (sessionFailure != null) {
+        completeAuthorizationRequest(settled, completed, unwrap(sessionFailure), timeout);
+        return;
+      }
+      CompletionStage<Void> authorization;
+      try {
+        authorization = Objects.requireNonNull(openedSession.revalidateAuthorization(),
+            "Watch authorization revalidation future");
+      } catch (RuntimeException | Error failure) {
+        completeAuthorizationRequest(settled, completed, failure, timeout);
+        if (failure instanceof Error fatal) throw fatal;
+        return;
+      }
+      authorization.whenComplete((ignored, failure) -> completeAuthorizationRequest(settled,
+          completed, failure == null ? null : unwrap(failure), timeout));
+    });
+  }
+
+  private static void completeAuthorizationRequest(AtomicBoolean settled,
+      Consumer<Throwable> completed, Throwable failure, ScheduledFuture<?> timeout) {
+    if (!settled.compareAndSet(false, true)) return;
+    if (timeout != null) timeout.cancel(false);
+    completed.accept(failure);
   }
 
   private void processRequest(Rpc.WatchRequest request) {
@@ -674,6 +807,7 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
           enqueueResponse(createdResponse(registration.watchId(), opened.revision()), () -> {
             watcher.markCreatedSent();
             refreshProgressNotifySchedule();
+            refreshAuthorizationRecheckSchedule();
             requestNext();
           });
         }
@@ -786,6 +920,7 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       if (watcher == null) processingRequest = false;
     }
     refreshProgressNotifySchedule();
+    refreshAuthorizationRecheckSchedule();
     if (watcher == null && !compactedTombstone) {
       requestNext();
       return;
@@ -881,20 +1016,7 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       WatchEventBatchEncoder.Output output = poll.output();
       if (output != null) {
         advanceWatchIndex(index);
-        if (output.response().getSerializedSize() > maximumResponseBytes) {
-          return queueFragmentedOutput(watcher, output);
-        }
-        try {
-          if (watcher.isClosed() || terminalOrPeerCancelled()) return PumpResult.IDLE;
-          responseObserver.onNext(output.response());
-        } catch (RuntimeException | Error failure) {
-          fail(failure);
-          if (failure instanceof Error fatal) throw fatal;
-          return PumpResult.IDLE;
-        } finally {
-          output.release();
-        }
-        return PumpResult.RESPONSE_SENT;
+        return queueOutput(watcher, output);
       }
       if (poll.consumed()) {
         advanceWatchIndex(index);
@@ -908,7 +1030,7 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     return PumpResult.IDLE;
   }
 
-  private PumpResult queueFragmentedOutput(WatchRegistry.Watcher watcher, WatchEventBatchEncoder.Output output) {
+  private PumpResult queueOutput(WatchRegistry.Watcher watcher, WatchEventBatchEncoder.Output output) {
     boolean transferred = false;
     try {
       WatchResponseFragmenter.Cursor cursor = WatchResponseFragmenter.split(
@@ -1042,6 +1164,57 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     if (cancel != null) cancel.cancel(false);
   }
 
+  private void refreshAuthorizationRecheckSchedule() {
+    ScheduledFuture<?> cancel = null;
+    synchronized (lock) {
+      boolean needed = !terminal && !peerCancelled && hasCreatedActiveWatcherLocked()
+          && authorizationRevalidationRequiredLocked();
+      if (!needed && authorizationRecheckTask != null) {
+        cancel = authorizationRecheckTask;
+        authorizationRecheckTask = null;
+      } else if (needed && authorizationRecheckTask == null
+          && !periodicAuthorizationCheckInFlight) {
+        try {
+          authorizationRecheckTask = timers.schedule(this::onAuthorizationRecheckTick,
+              authorizationRecheckIntervalMillis, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException rejected) {
+          fail(rejected);
+        }
+      }
+    }
+    if (cancel != null) cancel.cancel(false);
+  }
+
+  private boolean hasCreatedActiveWatcherLocked() {
+    return watchRegistry.activeSnapshot().stream()
+        .anyMatch(watcher -> watcher.createdSent() && !watcher.isClosed());
+  }
+
+  private boolean authorizationRevalidationRequiredLocked() {
+    return session != null && session.authorizationRevalidationRequired();
+  }
+
+  private void onAuthorizationRecheckTick() {
+    boolean defer;
+    synchronized (lock) {
+      authorizationRecheckTask = null;
+      if (terminal || peerCancelled || !hasCreatedActiveWatcherLocked()
+          || !authorizationRevalidationRequiredLocked()) return;
+      defer = outboundAuthorizationCheckInFlight || periodicAuthorizationCheckInFlight
+          || sendingResponse;
+      if (!defer) {
+        periodicAuthorizationCheckInFlight = true;
+        outboundAuthorizationReady = false;
+      }
+    }
+    if (defer) {
+      refreshAuthorizationRecheckSchedule();
+      return;
+    }
+    startPeriodicAuthorizationCheck();
+  }
+
+
   private boolean hasProgressNotifyWatcherLocked() {
     return watchRegistry.activeSnapshot().stream().anyMatch(watcher -> watcher.progressNotify()
         && watcher.createdSent() && !watcher.isClosed());
@@ -1150,6 +1323,7 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       pendingTerminationResponses++;
       currentSession = session;
     }
+    refreshAuthorizationRecheckSchedule();
     try {
       watcher.close();
     } catch (RuntimeException | Error failure) {
@@ -1266,6 +1440,15 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     if (scheduled != null) scheduled.cancel(false);
   }
 
+  private void cancelAuthorizationRecheckTimer() {
+    ScheduledFuture<?> scheduled;
+    synchronized (lock) {
+      scheduled = authorizationRecheckTask;
+      authorizationRecheckTask = null;
+    }
+    if (scheduled != null) scheduled.cancel(false);
+  }
+
   private boolean isReady() {
     return serverObserver == null || serverObserver.isReady();
   }
@@ -1275,6 +1458,7 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       if (peerCancelled) return false;
       if (terminalFailure != null) return true;
       if (terminal || pendingTerminationResponses > 0) return false;
+      if (outboundAuthorizationCheckInFlight || periodicAuthorizationCheckInFlight) return false;
       if (activeFragment != null) {
         return isReady() || isCancelRequest(pendingRequest) && !processingRequest;
       }
@@ -1399,15 +1583,13 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     }
     cancelDrainYield();
     cancelProgressNotifyTimer();
+    cancelAuthorizationRecheckTimer();
     Throwable cleanupFailure = closeWatchersCollecting();
     cleanupFailure = closeActiveFragmentCollecting(fragments, cleanupFailure);
+    cleanupFailure = closeSessionCollecting(cleanupFailure);
     if (cleanupFailure != null && cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
     if (scheduleWriter) scheduleDrain();
     if (cleanupFailure instanceof Error fatal) throw fatal;
-  }
-
-  private boolean terminalOrPeerCancelled() {
-    synchronized (lock) { return terminal || peerCancelled; }
   }
 
   private static boolean isCancelRequest(Rpc.WatchRequest request) {
@@ -1441,8 +1623,10 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
     }
     cancelDrainYield();
     cancelProgressNotifyTimer();
+    cancelAuthorizationRecheckTimer();
     Throwable cleanupFailure = closeWatchersCollecting(closing);
     cleanupFailure = closeActiveFragmentCollecting(fragments, cleanupFailure);
+    cleanupFailure = closeSessionCollecting(cleanupFailure);
     if (cleanupFailure instanceof Error fatal) throw fatal;
     if (cleanupFailure instanceof RuntimeException cleanup) throw cleanup;
   }
@@ -1454,6 +1638,37 @@ final class WatchStream implements StreamObserver<Rpc.WatchRequest>, AutoCloseab
       fragments.close();
     } catch (RuntimeException | Error cleanup) {
       return appendCleanupFailure(failure, cleanup);
+    }
+    return failure;
+  }
+
+  private Throwable closeSessionCollecting(Throwable failure) {
+    if (!sessionCloseStarted.compareAndSet(false, true)) return failure;
+    Session current;
+    CompletionStage<Session> opening;
+    synchronized (lock) {
+      current = session;
+      opening = sessionFuture;
+    }
+    if (current != null) {
+      try {
+        current.close();
+      } catch (RuntimeException | Error closeFailure) {
+        return appendCleanupFailure(failure, closeFailure);
+      }
+    } else if (opening != null) {
+      opening.whenComplete((opened, openFailure) -> {
+        if (opened == null) return;
+        try {
+          opened.close();
+        } catch (RuntimeException | Error closeFailure) {
+          if (openFailure != null && openFailure != closeFailure) {
+            openFailure.addSuppressed(closeFailure);
+          } else {
+            fail(closeFailure);
+          }
+        }
+      });
     }
     return failure;
   }

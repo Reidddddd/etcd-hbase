@@ -72,6 +72,31 @@ class RangeResultCacheTest {
   }
 
   @Test
+  void invalidationEvictsOnlyItsAuthorizationAndFencesEarlierFills() throws Exception {
+    var budget = budget();
+    try (var owner = RequestScope.withoutDeadline();
+         var scope = RequestScope.withoutDeadline();
+         var account = budget.admit("public", scope, reservation());
+         var cache = new RangeResultCache(4096, 4, 4, budget, "public", owner)) {
+      var oldKey = point(1, AUTH, 10);
+      var otherKey = point(2, bytes(3, 32), 10);
+      assertTrue(cache.put(oldKey, List.of(record(1)), 1, true));
+      assertTrue(cache.put(otherKey, List.of(record(2)), 1, true));
+      Object earlier = cache.invalidationGeneration();
+      cache.invalidateAuthorization(AUTH);
+      assertTrue(cache.get(oldKey, account, scope).isEmpty());
+      try (var other = cache.get(otherKey, account, scope).orElseThrow()) {
+        assertEquals(record(2).key(), other.records().getFirst().key());
+      }
+      assertFalse(cache.putIfCurrent(oldKey, List.of(record(1)), 1, true, Optional.empty(), earlier));
+      assertTrue(cache.get(oldKey, account, scope).isEmpty());
+      assertTrue(cache.putIfCurrent(oldKey, List.of(record(1)), 1, true,
+          Optional.empty(), cache.invalidationGeneration()));
+    }
+    assertEquals(0, budget.snapshot().allocatedBytes());
+  }
+
+  @Test
   void refusesIncompleteOversizedAndUnmaterializedResults() throws Exception {
     var budget = budget();
     try (var ownerScope = RequestScope.withoutDeadline();

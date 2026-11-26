@@ -47,8 +47,8 @@ class MavenCachePolicyTest(unittest.TestCase):
         self.assertEqual(1, result["maven_preparation_jobs"])
         self.assertEqual(1, result["maven_preparation_calls"])
         self.assertEqual(15, result["maven_consumer_workflows"])
-        self.assertEqual(28, result["maven_validation_jobs"])
-        self.assertEqual(30, result["locked_jdk_archive_jobs"])
+        self.assertEqual(29, result["maven_validation_jobs"])
+        self.assertEqual(31, result["locked_jdk_archive_jobs"])
         self.assertTrue(result["stable_summary_gate"])
         self.assertTrue(result["j09_independent"])
 
@@ -121,6 +121,8 @@ class MavenCachePolicyTest(unittest.TestCase):
              "          J43_RESULT: ${{ needs.j43.result }}\n"),
             (".github/workflows/m5.yml", "      - j50\n",
              "          J50_RESULT: ${{ needs.j50.result }}\n"),
+            (".github/workflows/m5.yml", "      - j51\n",
+             "          J51_RESULT: ${{ needs.j51.result }}\n"),
         )
         for workflow_path, missing_need, missing_result in cases:
             workflow = ROOT / workflow_path

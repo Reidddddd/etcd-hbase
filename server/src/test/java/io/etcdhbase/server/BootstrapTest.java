@@ -157,6 +157,9 @@ class BootstrapTest {
     bootstrap.close();
     assertTrue(bootstrap.awaitTermination(Duration.ofSeconds(2)));
     try (ServerSocket rebound = new ServerSocket()) {
+      // The released port may still hold connections in TIME_WAIT; reuse is what "released" means
+      // for a listener, and without it this assertion races unrelated tests' connection churn.
+      rebound.setReuseAddress(true);
       rebound.bind(new InetSocketAddress("127.0.0.1", port));
     }
   }

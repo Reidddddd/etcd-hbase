@@ -1,12 +1,16 @@
 package io.etcdhbase.server.commit;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.CommitAuthorizationProof;
+import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Builds a stable, non-secret label for the configured table-group service identity.
@@ -48,6 +52,18 @@ public final class ServiceAuthorizationContextReference {
       ByteKey candidate) {
     Objects.requireNonNull(candidate, "candidate");
     return candidate.equals(create(identity, authorizationScopeDigest));
+  }
+
+  /** Captures a configured service identity for one observed table-group barrier generation. */
+  public static CommitAuthorizationProof publicationProof(
+      AuthorizedBackendIdentity identity, ByteKey authorizationScopeDigest,
+      long authorizationBarrierGeneration) {
+    ByteKey expected = create(identity, authorizationScopeDigest);
+    return CommitAuthorizationProof.capture(expected, authorizationBarrierGeneration,
+        (proofIdentity, barrierGeneration, scope) -> proofIdentity.equals(expected)
+            ? CompletableFuture.completedFuture(null)
+            : CompletableFuture.failedFuture(
+                new BackendFailure(BackendFailure.Category.PERMISSION)));
   }
 
   private static void updateField(MessageDigest digest, byte[] value) {

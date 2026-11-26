@@ -887,7 +887,8 @@ class ManifestPreparationTest {
               List.of(record).iterator(), () -> CompletableFuture.completedFuture(null), scope).join();
       var sealed = preparing.seal(root.systemIdentity());
       var initial = CommitState.restore(CommitState.EVENT_INDEX_FORMAT_VERSION, digest,
-          Optional.of("owner"), 1, 10_000, 1, 0, 1, 0, 1, Optional.empty(), 0);
+          Optional.of("owner"), 1, 10_000, 1, 0, 1, 0, 1, Optional.empty(), 0,
+          Optional.empty(), Optional.empty(), 0, true, 0);
       var state = new AtomicReference<>(initial);
       var casCalls = new AtomicInteger();
       var changeDuringCas = new java.util.concurrent.atomic.AtomicBoolean();
@@ -956,16 +957,21 @@ class ManifestPreparationTest {
       var publisher = new CommitPublisher(control, new CommitOutcomeResolver(control, decisions), verifier,
           invocations, handoff, (binding, publication, ignored) -> CompletableFuture.completedFuture(publication));
       var owner = new CommitOwnerService.OwnerToken("owner", 1);
+      CommitAuthorizationProof authorization = CommitAuthorizationProof.capture(digest, 0,
+          (proofIdentity, barrierGeneration, authorizationScope) ->
+              CompletableFuture.completedFuture(null));
       changeBeforeCas.set(true);
-      assertThrows(CompletionException.class, () -> publisher.publish(sealed, owner, root, scope).join());
+      assertThrows(CompletionException.class,
+          () -> publisher.publish(sealed, owner, root, scope, authorization).join());
       assertEquals(0, casCalls.get());
       state.set(initial);
       changeDuringCas.set(true);
-      assertThrows(CompletionException.class, () -> publisher.publish(sealed, owner, root, scope).join());
+      assertThrows(CompletionException.class,
+          () -> publisher.publish(sealed, owner, root, scope, authorization).join());
       assertEquals(1, casCalls.get());
       state.set(initial);
       assertEquals(CommitOutcomeResolver.State.SELECTED_PENDING,
-          publisher.publish(sealed, owner, root, scope).join().state());
+          publisher.publish(sealed, owner, root, scope, authorization).join().state());
     }
   }
 

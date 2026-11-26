@@ -15,6 +15,7 @@ public final class AuthorizedBackendIdentity {
   private static final Pattern ID_PATTERN = Pattern.compile("[A-Za-z][A-Za-z0-9._-]{0,63}");
   private static final int MAX_SUBJECT_CODE_POINTS = 256;
   private static final int MAX_CONTEXT_REF_CODE_POINTS = 512;
+  private static final long UNKNOWN_CREDENTIAL_GENERATION = -1;
 
   private final String providerId;
   private final String subject;
@@ -30,6 +31,20 @@ public final class AuthorizedBackendIdentity {
       AuthenticationScope scope,
       Set<String> allowedTableGroupIds,
       long credentialGeneration) {
+    this(providerId, subject, contextRef, scope, allowedTableGroupIds, credentialGeneration, false);
+  }
+
+  /** Creates a non-reusable identity when its backend cannot attest a credential generation. */
+  public static AuthorizedBackendIdentity withUnknownCredentialGeneration(
+      String providerId, String subject, String contextRef, AuthenticationScope scope,
+      Set<String> allowedTableGroupIds) {
+    return new AuthorizedBackendIdentity(providerId, subject, contextRef, scope,
+        allowedTableGroupIds, UNKNOWN_CREDENTIAL_GENERATION, true);
+  }
+
+  private AuthorizedBackendIdentity(String providerId, String subject, String contextRef,
+      AuthenticationScope scope, Set<String> allowedTableGroupIds, long credentialGeneration,
+      boolean unknownGeneration) {
     this.providerId = requireId(providerId, "providerId");
     this.subject = requireBoundedText(subject, "subject", MAX_SUBJECT_CODE_POINTS);
     this.contextRef = requireBoundedText(contextRef, "contextRef", MAX_CONTEXT_REF_CODE_POINTS);
@@ -44,7 +59,7 @@ public final class AuthorizedBackendIdentity {
       throw new IllegalArgumentException(
           "allowedTableGroupIds must include the requested table group");
     }
-    if (credentialGeneration < 0) {
+    if (credentialGeneration < 0 && !unknownGeneration) {
       throw new IllegalArgumentException("credentialGeneration must not be negative");
     }
     this.allowedTableGroupIds = groups;
@@ -76,6 +91,11 @@ public final class AuthorizedBackendIdentity {
     return credentialGeneration;
   }
 
+  /** An unknown generation must not be used for a durable session or identity reuse. */
+  public boolean hasKnownCredentialGeneration() {
+    return credentialGeneration != UNKNOWN_CREDENTIAL_GENERATION;
+  }
+
   @Override
   public String toString() {
     return "AuthorizedBackendIdentity[providerId="
@@ -83,7 +103,7 @@ public final class AuthorizedBackendIdentity {
         + ", tableGroupId="
         + scope.tableGroupId()
         + ", credentialGeneration="
-        + credentialGeneration
+        + (hasKnownCredentialGeneration() ? Long.toString(credentialGeneration) : "unknown")
         + ", subject=redacted, contextRef=redacted]";
   }
 

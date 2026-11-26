@@ -20,6 +20,9 @@ message CommitControlState {
   optional bytes event_registry_namespace = 13;
   optional bytes pending_event_registry_namespace = 14;
   optional uint32 event_registry_attempts = 15;
+  // Presence enables the monotone authorization fence independently of other control formats.
+  // Every new publication CAS includes this field when present; older writers fail exact-byte CAS.
+  optional int64 authorization_barrier_generation = 16;
 }
 
 message PublicationSlot {

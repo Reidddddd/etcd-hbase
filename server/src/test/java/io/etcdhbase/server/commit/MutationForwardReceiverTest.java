@@ -47,6 +47,47 @@ class MutationForwardReceiverTest {
       UUID.fromString("00000000-0000-0000-0000-000000000002"));
 
   @Test
+  void preparingInvocationIsNotDispatchedWhenBarrierAdvancesBeforeSecondControlRead() {
+    CommitState initial = authorizationBarrierState();
+    CommitState advanced = advanceAuthorizationBarrier(initial);
+    var control = new MutableControlStore(initial);
+    var repository = new InMemoryInvocationRepository();
+    var processors = new AtomicInteger();
+    var fixture = receiver(control, repository,
+        (peer, request, barrierGeneration, scope) -> {
+          assertEquals(1, control.readCalls.get(), "the initial control read precedes authorization");
+          var verified = verifiedAuthorization(barrierGeneration);
+          control.advanceTo(advanced);
+          return CompletableFuture.completedFuture(verified);
+        }, (request, binding, authorization, scope) -> {
+          processors.incrementAndGet();
+          return CompletableFuture.completedFuture(
+              new OwnerForwarding.Rejected(BackendFailure.Category.RESOURCE_LIMIT));
+        });
+
+    OwnerForwarding.Reply reply = fixture.receiver().receive(
+        "authenticated-peer", requestForOwnerEpoch(initial.ownerEpoch()),
+        RequestScope.withoutDeadline()).join();
+
+    var unknown = assertInstanceOf(OwnerForwarding.Unknown.class, reply);
+    assertEquals(BackendFailure.Category.PERMISSION, unknown.category());
+    assertEquals(2, control.readCalls.get(), "authorization is followed by the owner recheck");
+    assertEquals(1, repository.createCalls, "the invocation binding remains durable");
+    assertEquals(InvocationBinding.State.PREPARING, repository.binding.state());
+    assertEquals(0, processors.get(), "stale authorization must not dispatch new work");
+  }
+
+  @Test
+  void sealedInvocationsStillResolveDurableOutcomesAfterBarrierAdvances() {
+    assertSealedInvocationResolvesAfterBarrierAdvance(
+        authorizationBarrierState(),
+        new OwnerForwarding.Unknown(BackendFailure.Category.UNAVAILABLE));
+    assertSealedInvocationResolvesAfterBarrierAdvance(
+        selectedAuthorizationBarrierState(),
+        new OwnerForwarding.Completed(request().invocationId().bytes()));
+  }
+
+  @Test
   void stalePreparingBindingIsNotDispatchedAfterOwnerTakeover() {
     assertStaleBindingRejected(InvocationBinding.State.PREPARING);
   }
@@ -56,7 +97,8 @@ class MutationForwardReceiverTest {
     var repository = sealedBindingRepository();
     var processors = new AtomicInteger();
     var fixture = receiver(currentState(), repository,
-        (peer, request, scope) -> CompletableFuture.completedFuture(verifiedAuthorization()),
+        (peer, request, barrierGeneration, scope) -> CompletableFuture.completedFuture(
+            verifiedAuthorization(barrierGeneration)),
         (request, binding, identity, scope) -> {
           processors.incrementAndGet();
           return CompletableFuture.completedFuture(
@@ -83,7 +125,8 @@ class MutationForwardReceiverTest {
     assertEquals(1, current.publishedSequence());
     assertEquals(1, current.finalizedSequence());
     var fixture = receiver(current, repository,
-        (peer, request, scope) -> CompletableFuture.completedFuture(verifiedAuthorization()),
+        (peer, request, barrierGeneration, scope) -> CompletableFuture.completedFuture(
+            verifiedAuthorization(barrierGeneration)),
         (request, binding, identity, scope) -> {
           processors.incrementAndGet();
           return CompletableFuture.completedFuture(
@@ -169,7 +212,7 @@ class MutationForwardReceiverTest {
     var repository = new InMemoryInvocationRepository();
     var processors = new AtomicInteger();
     var fixture = receiver(currentState(), repository,
-        (peer, request, scope) -> {
+        (peer, request, barrierGeneration, scope) -> {
           authorizationBudget.set(scope.remainingDeadlineNanos());
           return pendingAuthorization;
         }, (request, binding, identity, scope) -> {
@@ -181,7 +224,7 @@ class MutationForwardReceiverTest {
     CompletableFuture<OwnerForwarding.Reply> reply = fixture.receiver().receive(
         "authenticated-peer", request(1_000), RequestScope.withoutDeadline(now::get));
     now.set(1_000);
-    pendingAuthorization.complete(verifiedAuthorization());
+    pendingAuthorization.complete(verifiedAuthorization(0));
 
     var unknown = assertInstanceOf(OwnerForwarding.Unknown.class, reply.join());
     assertEquals(BackendFailure.Category.TIMEOUT, unknown.category());
@@ -199,7 +242,7 @@ class MutationForwardReceiverTest {
     var repository = new InMemoryInvocationRepository();
     var processors = new AtomicInteger();
     var fixture = receiver(currentState(), repository,
-        (peer, request, scope) -> {
+        (peer, request, barrierGeneration, scope) -> {
           capturedAuthorizationScope.set(scope);
           return pendingAuthorization;
         }, (request, binding, identity, scope) -> {
@@ -212,7 +255,7 @@ class MutationForwardReceiverTest {
     CompletableFuture<OwnerForwarding.Reply> reply = fixture.receiver().receive(
         "authenticated-peer", request(1_000), RequestScope.withoutDeadline(now::get));
     now.set(400);
-    pendingAuthorization.complete(verifiedAuthorization());
+    pendingAuthorization.complete(verifiedAuthorization(0));
 
     assertInstanceOf(OwnerForwarding.Rejected.class, reply.join());
     assertSame(capturedAuthorizationScope.get(), processorScope.get());
@@ -230,7 +273,8 @@ class MutationForwardReceiverTest {
     var outerScope = RequestScope.withoutDeadline();
     try {
       var fixture = receiver(currentState(), repository,
-          (peer, request, scope) -> CompletableFuture.completedFuture(verifiedAuthorization()),
+          (peer, request, barrierGeneration, scope) -> CompletableFuture.completedFuture(
+              verifiedAuthorization(barrierGeneration)),
           (request, binding, identity, scope) -> {
             scope.trackPhysicalProducer(physicalWrite);
             return CompletableFuture.completedFuture(new OwnerForwarding.Completed(new byte[] {1}));
@@ -274,6 +318,53 @@ class MutationForwardReceiverTest {
     return repository;
   }
 
+  private static void assertSealedInvocationResolvesAfterBarrierAdvance(
+      CommitState initial, OwnerForwarding.Reply durableReply) {
+    CommitState advanced = advanceAuthorizationBarrier(initial);
+    var control = new MutableControlStore(initial);
+    var repository = sealedBindingRepository();
+    var processors = new AtomicInteger();
+    var fixture = receiver(control, repository,
+        (peer, request, barrierGeneration, scope) -> {
+          assertEquals(1, control.readCalls.get(), "authorization follows the initial control read");
+          var verified = verifiedAuthorization(barrierGeneration);
+          control.advanceTo(advanced);
+          return CompletableFuture.completedFuture(verified);
+        }, (request, binding, authorization, scope) -> {
+          processors.incrementAndGet();
+          return CompletableFuture.completedFuture(durableReply);
+        });
+
+    OwnerForwarding.Reply reply = fixture.receiver().receive(
+        "authenticated-peer", requestForOwnerEpoch(initial.ownerEpoch()),
+        RequestScope.withoutDeadline()).join();
+
+    assertSame(durableReply, reply,
+        "sealed invocations must keep resolving their durable outcome after revocation");
+    assertEquals(2, control.readCalls.get());
+    assertEquals(1, processors.get());
+  }
+
+  private static CommitState authorizationBarrierState() {
+    return CommitState.initial(FINGERPRINT, 1)
+        .claimOwner("owner-current", 0, 2_000)
+        .enableAuthorizationBarrier("owner-current", 1, 1_000);
+  }
+
+  private static CommitState selectedAuthorizationBarrierState() {
+    return CommitState.initial(FINGERPRINT, 1)
+        .claimOwner("owner-old", 0, 10)
+        .publish(publication(1))
+        .finalizePublication(TRANSACTION)
+        .claimOwner("owner-current", 10, 2_000)
+        .enableAuthorizationBarrier("owner-current", 2, 1_000);
+  }
+
+  private static CommitState advanceAuthorizationBarrier(CommitState state) {
+    return state.advanceAuthorizationBarrier(state.ownerInstance().orElseThrow(),
+        state.ownerEpoch(), state.authorizationBarrierGeneration());
+  }
+
   private static Fixture receiver(InMemoryInvocationRepository repository, AtomicInteger processors) {
     return receiver(repository, processors, AUTH_DIGEST);
   }
@@ -291,8 +382,9 @@ class MutationForwardReceiverTest {
   private static Fixture receiver(CommitState current, InMemoryInvocationRepository repository,
       AtomicInteger processors, ByteKey resolvedAuthorizationDigest) {
     return receiver(current, repository,
-        (peer, request, scope) -> CompletableFuture.completedFuture(
-            new MutationForwardReceiver.VerifiedAuthorization(identity(), resolvedAuthorizationDigest)),
+        (peer, request, barrierGeneration, scope) -> CompletableFuture.completedFuture(
+            CommitAuthorizationProofTestSupport.verified(
+                identity(), resolvedAuthorizationDigest, barrierGeneration)),
         (request, binding, verified, scope) -> {
           processors.incrementAndGet();
           return CompletableFuture.completedFuture(
@@ -311,6 +403,15 @@ class MutationForwardReceiverTest {
     return new Fixture(receiver, controlScope);
   }
 
+  private static Fixture receiver(CommitControlStore control,
+      InMemoryInvocationRepository repository,
+      MutationForwardReceiver.AuthorizationResolver authorizations,
+      MutationForwardReceiver.MutationProcessor processor) {
+    var receiver = new MutationForwardReceiver(control, new InvocationService(repository),
+        authorizations, processor, Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC));
+    return new Fixture(receiver, new AtomicReference<>());
+  }
+
   private static void assertEffectiveBudget(
       RequestScope outerScope, long requestNanos, long expectedNanos) {
     AtomicReference<RequestScope> authorizationScope = new AtomicReference<>();
@@ -318,9 +419,9 @@ class MutationForwardReceiverTest {
     var repository = new InMemoryInvocationRepository();
     var processors = new AtomicInteger();
     var fixture = receiver(currentState(), repository,
-        (peer, request, scope) -> {
+        (peer, request, barrierGeneration, scope) -> {
           authorizationScope.set(scope);
-          return CompletableFuture.completedFuture(verifiedAuthorization());
+          return CompletableFuture.completedFuture(verifiedAuthorization(barrierGeneration));
         }, (request, binding, identity, scope) -> {
           processorScope.set(scope);
           processors.incrementAndGet();
@@ -339,8 +440,9 @@ class MutationForwardReceiverTest {
     assertEquals(1, processors.get());
   }
 
-  private static MutationForwardReceiver.VerifiedAuthorization verifiedAuthorization() {
-    return new MutationForwardReceiver.VerifiedAuthorization(identity(), AUTH_DIGEST);
+  private static MutationForwardReceiver.VerifiedAuthorization verifiedAuthorization(
+      long barrierGeneration) {
+    return CommitAuthorizationProofTestSupport.verified(identity(), AUTH_DIGEST, barrierGeneration);
   }
 
   private static AuthorizedBackendIdentity identity() {
@@ -364,11 +466,19 @@ class MutationForwardReceiverTest {
   }
 
   private static MutationForwardRequest request(long remainingTimeoutNanos) {
+    return request(remainingTimeoutNanos, 2);
+  }
+
+  private static MutationForwardRequest requestForOwnerEpoch(long ownerEpoch) {
+    return request(MutationForwardRequest.MAX_TIMEOUT_NANOS, ownerEpoch);
+  }
+
+  private static MutationForwardRequest request(long remainingTimeoutNanos, long ownerEpoch) {
     ByteKey operation = ByteKey.copyOf(new byte[] {1, 2, 3});
     return new MutationForwardRequest(GROUP, INVOCATION,
         MutationForwardRequest.digest(GROUP, operation), AUTH_DIGEST,
         ByteKey.copyOf("ctx-1".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
-        2, remainingTimeoutNanos, MutationForwardRequest.MAX_HOPS, operation);
+        ownerEpoch, remainingTimeoutNanos, MutationForwardRequest.MAX_HOPS, operation);
   }
 
   private record Fixture(
@@ -387,6 +497,37 @@ class MutationForwardReceiverTest {
     public CompletableFuture<Optional<ControlSnapshot>> read(RequestScope scope) {
       lastScope.set(scope);
       return CompletableFuture.completedFuture(Optional.of(snapshot));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> initializeIfAbsent(CommitState state, RequestScope scope) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public CompletableFuture<Boolean> compareAndSet(
+        ControlSnapshot observed, CommitState replacement, RequestScope scope) {
+      throw new UnsupportedOperationException();
+    }
+  }
+
+  private static final class MutableControlStore implements CommitControlStore {
+    private final AtomicReference<CommitState> current;
+    private final AtomicInteger readCalls = new AtomicInteger();
+
+    private MutableControlStore(CommitState initial) {
+      current = new AtomicReference<>(initial);
+    }
+
+    private void advanceTo(CommitState state) {
+      current.set(state);
+    }
+
+    @Override
+    public CompletableFuture<Optional<ControlSnapshot>> read(RequestScope scope) {
+      readCalls.incrementAndGet();
+      return CompletableFuture.completedFuture(
+          Optional.of(new ControlSnapshot(current.get(), new byte[] {1})));
     }
 
     @Override

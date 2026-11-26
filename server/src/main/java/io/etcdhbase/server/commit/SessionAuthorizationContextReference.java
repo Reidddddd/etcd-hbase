@@ -3,7 +3,10 @@ package io.etcdhbase.server.commit;
 import io.etcdhbase.core.auth.AuthSession;
 import io.etcdhbase.core.bytes.ByteKey;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 /** Secret-free owner-forwarding reference to one durable, currently validated auth session. */
 public record SessionAuthorizationContextReference(
@@ -15,6 +18,8 @@ public record SessionAuthorizationContextReference(
     long authorizationGeneration) {
   private static final byte FORMAT_VERSION = 1;
   private static final int ENCODED_BYTES = Byte.BYTES + 32 + 16 + Integer.BYTES + 3 * Long.BYTES;
+  private static final byte[] PROOF_DOMAIN =
+      "etcd-hbase/m3/session-publication-proof/v1".getBytes(StandardCharsets.US_ASCII);
 
   public SessionAuthorizationContextReference {
     requireLength(tokenDigest, 32, "tokenDigest");
@@ -68,6 +73,23 @@ public record SessionAuthorizationContextReference(
         && slotIndex == session.slotIndex() && slotGeneration == session.slotGeneration()
         && credentialGeneration == session.credentialGeneration()
         && authorizationGeneration == session.authorizationGeneration();
+  }
+
+  /** Stable, secret-free identity for revalidating this exact session proof during publication. */
+  public ByteKey publicationProofIdentity(ByteKey authorizationScopeDigest) {
+    Objects.requireNonNull(authorizationScopeDigest, "authorizationScopeDigest");
+    if (authorizationScopeDigest.length() != 32) {
+      throw new IllegalArgumentException("authorization scope digest must be SHA-256");
+    }
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      digest.update(PROOF_DOMAIN);
+      digest.update(encode().bytes());
+      digest.update(authorizationScopeDigest.bytes());
+      return ByteKey.copyOf(digest.digest());
+    } catch (NoSuchAlgorithmException impossible) {
+      throw new AssertionError("the JDK must provide SHA-256", impossible);
+    }
   }
 
   private static void requireLength(ByteKey value, int expected, String name) {
