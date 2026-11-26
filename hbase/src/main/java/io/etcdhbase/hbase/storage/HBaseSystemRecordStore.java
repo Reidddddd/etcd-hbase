@@ -2,20 +2,26 @@ package io.etcdhbase.hbase.storage;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.EventIndexBackfillCheckpoint;
-import io.etcdhbase.core.commit.SystemRecordStore;
+import io.etcdhbase.core.commit.RetirementTombstone;
 import io.etcdhbase.core.commit.SystemRecordEntry;
 import io.etcdhbase.core.commit.SystemRecordPage;
+import io.etcdhbase.core.commit.SystemRecordRetirement;
+import io.etcdhbase.core.commit.SystemRecordRetirement.Permit;
+import io.etcdhbase.core.commit.SystemRecordRetirement.Reason;
+import io.etcdhbase.core.commit.SystemRecordRetirement.Outcome;
+import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.commit.SystemRecordType;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.lease.LeaseExpiryCheckpoint;
 import io.etcdhbase.core.request.RequestScope;
-import io.etcdhbase.hbase.codec.SystemRecordKeyCodec;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
+import io.etcdhbase.hbase.codec.SystemRecordKeyCodec;
+import io.etcdhbase.hbase.codec.SystemRecordRetirementMessages;
 import io.etcdhbase.hbase.connection.HBaseRequestContext;
 import io.etcdhbase.hbase.error.HBaseFailures;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
-import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -25,16 +31,24 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.client.AdvancedScanResultConsumer;
 import org.apache.hadoop.hbase.client.AsyncConnection;
 import org.apache.hadoop.hbase.client.AsyncTable;
 import org.apache.hadoop.hbase.client.CheckAndMutate;
 import org.apache.hadoop.hbase.client.Consistency;
+import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.RowMutations;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.filter.BinaryComparator;
+import org.apache.hadoop.hbase.filter.Filter;
+import org.apache.hadoop.hbase.filter.FilterList;
+import org.apache.hadoop.hbase.filter.NullComparator;
+import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
 
 /** Strong-read, exact-CAS adapter for immutable system records; borrowed connections stay shared. */
 public final class HBaseSystemRecordStore implements SystemRecordStore {
@@ -43,6 +57,10 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
   private static final int MAX_SCAN_ENTRIES = 1024;
   private static final long MAX_SCAN_BYTES = 8L << 20;
   private static final byte[] VALUE = {'r'};
+  private static final byte[] TOMBSTONE = {'t'};
+  private static final byte[] RETIRED_VALUE_GUARD = {0};
+  // A retired row keeps VALUE occupied, including against older value-only absent-CAS writers.
+  private static final long RETIREMENT_TIMESTAMP = Long.MAX_VALUE - 1;
 
   private final AsyncConnection connection;
   private final SystemTableBinding binding;
@@ -107,7 +125,13 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     byte[] row = binding.row(type, identity);
     return execute(scope, logicalReadPayloadBytes(row), table -> table.get(
         new Get(row).setConsistency(Consistency.STRONG).addFamily(binding.family())))
-        .thenApply(result -> decode(result, binding.family()));
+        .thenApply(result -> {
+          if (!result.isEmpty() && isRetired(result, binding.family())) {
+            validatedTombstoneLength(result, new SystemRecordKeyCodec.DecodedKey(type, identity));
+            return Optional.<ByteKey>empty();
+          }
+          return decode(result, binding.family());
+        });
   }
 
   @Override
@@ -117,8 +141,13 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     byte[] row = binding.row(type, identity);
     byte[] bytes = checkedValue(value);
     Put put = put(row, bytes);
-    return execute(scope, logicalMutationPayloadBytes(row, bytes.length), table -> table.checkAndMutate(
-        CheckAndMutate.newBuilder(row).ifNotExists(binding.family(), VALUE).build(put)))
+    // VALUE remains present as a guard after retirement, so one absence condition covers both
+    // live and retired records. A filter-based condition cannot create a completely absent row.
+    var mutation = CheckAndMutate.newBuilder(row)
+        .ifNotExists(binding.family(), VALUE)
+        .build(put);
+    return execute(scope, logicalMutationPayloadBytes(row, bytes.length),
+        table -> table.checkAndMutate(mutation))
         .thenCompose(result -> result.isSuccess()
             ? CompletableFuture.completedFuture(CreateResult.CREATED)
             : read(type, identity, scope).thenApply(existing -> existing
@@ -142,7 +171,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
         + expected.map(ByteKey::length).orElse(0));
     var builder = CheckAndMutate.newBuilder(row);
     if (expected.isPresent()) {
-      builder.ifEquals(binding.family(), VALUE, checkedValue(expected.orElseThrow()));
+      builder.ifMatches(liveValueCondition(checkedValue(expected.orElseThrow())));
     } else {
       builder.ifNotExists(binding.family(), VALUE);
     }
@@ -368,6 +397,8 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     private long encodedBytes;
     private long physicalRows;
     private long scanRpcCalls;
+    private Optional<ByteKey> lastInspected = Optional.empty();
+    private byte[] previousRow;
     private boolean hasMore;
 
     private PageCollector(SystemRecordType type, int bucket, int maximumEntries,
@@ -381,7 +412,12 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     @Override
     public boolean onResult(Result result) {
       physicalRows++;
-      SystemRecordKeyCodec.DecodedKey decoded = binding.keyCodec().decode(result.getRow());
+      byte[] row = result.getRow();
+      if (previousRow != null && org.apache.hadoop.hbase.util.Bytes.compareTo(previousRow, row) >= 0) {
+        throw new IllegalArgumentException("system record scan rows are not strictly ordered");
+      }
+      previousRow = row;
+      SystemRecordKeyCodec.DecodedKey decoded = binding.keyCodec().decode(row);
       if (decoded.type() != type || binding.keyCodec().bucket(type, decoded.identity()) != bucket) {
         throw new IllegalArgumentException("system-record scan escaped its type or salt bucket");
       }
@@ -390,22 +426,26 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
               || java.nio.ByteBuffer.wrap(decoded.identity().bytes()).getLong() <= 0)) {
         throw new IllegalArgumentException("event-index row has an invalid revision");
       }
-      if (entries.size() == maximumEntries) {
+      if (physicalRows > maximumEntries) {
         hasMore = true;
         return false;
       }
-      int valueLength = validatedValueLength(result);
+      boolean retired = isRetired(result, binding.family());
+      int valueLength = retired ? validatedTombstoneLength(result, decoded) : validatedValueLength(result);
       long nextBytes = Math.addExact(encodedBytes,
           Math.addExact(decoded.identity().length(), valueLength));
       if (nextBytes > maximumBytes) {
-        if (entries.isEmpty()) {
+        if (lastInspected.isEmpty()) {
           throw new CompletionException(new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
         }
         hasMore = true;
         return false;
       }
-      ByteKey value = decode(result, binding.family()).orElseThrow();
-      entries.add(new SystemRecordEntry(decoded.identity(), value));
+      if (!retired) {
+        ByteKey value = decode(result, binding.family()).orElseThrow();
+        entries.add(new SystemRecordEntry(decoded.identity(), value));
+      }
+      lastInspected = Optional.of(decoded.identity());
       encodedBytes = nextBytes;
       return true;
     }
@@ -418,9 +458,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
 
     @Override
     public SystemRecordPage complete() {
-      Optional<ByteKey> lastIdentity = entries.isEmpty()
-          ? Optional.empty() : Optional.of(entries.getLast().identity());
-      return new SystemRecordPage(entries, lastIdentity, !hasMore, encodedBytes,
+      return new SystemRecordPage(entries, lastInspected, !hasMore, encodedBytes,
           physicalRows, Math.max(1, scanRpcCalls));
     }
   }
@@ -486,6 +524,11 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
 
   static Optional<ByteKey> decode(Result result, byte[] family) {
     if (result.isEmpty()) return Optional.empty();
+    Cell marker = retirementMarker(result, family);
+    if (marker != null) {
+      SystemRecordRetirementMessages.decode(CellUtil.cloneValue(marker));
+      return Optional.empty();
+    }
     int expectedLength = validatedValueLength(result);
     // Check the already-decoded cell before getValue makes another potentially large copy.
     // This does not impose a bound on the HBase client's incoming RPC frame.
@@ -497,15 +540,167 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     return Optional.of(ByteKey.copyOf(bytes));
   }
 
+  /** Checks the bounded cell layout before any value copy, including malformed retired rows. */
+  private static boolean isRetired(Result result, byte[] family) {
+    return retirementMarker(result, family) != null;
+  }
+
+  private static Cell retirementMarker(Result result, byte[] family) {
+    Cell[] cells = result.rawCells();
+    Cell marker = null;
+    Cell guard = null;
+    if (cells == null) return null;
+    for (Cell cell : cells) {
+      if (!CellUtil.matchingFamily(cell, family)) continue;
+      if (CellUtil.matchingQualifier(cell, TOMBSTONE)) marker = cell;
+      if (CellUtil.matchingQualifier(cell, VALUE)) guard = cell;
+    }
+    if (marker == null) return null;
+    if (cells.length != 2 || guard == null
+        || !CellUtil.matchingValue(guard, RETIRED_VALUE_GUARD)
+        || guard.getTimestamp() != RETIREMENT_TIMESTAMP
+        || marker.getTimestamp() != RETIREMENT_TIMESTAMP
+        || marker.getValueLength() < 1
+        || marker.getValueLength() > SystemRecordRetirementMessages.MAX_BYTES) {
+      throw new IllegalArgumentException("invalid system-record retirement layout");
+    }
+    return marker;
+  }
+
+  private int validatedTombstoneLength(Result result,
+      SystemRecordKeyCodec.DecodedKey identity) {
+    Cell cell = retirementMarker(result, binding.family());
+    RetirementTombstone tombstone = SystemRecordRetirementMessages.decode(CellUtil.cloneValue(cell));
+    if (tombstone.type() != identity.type() || !tombstone.identity().equals(identity.identity())) {
+      throw new IllegalArgumentException("retirement tombstone does not match its row");
+    }
+    return Math.addExact(cell.getValueLength(), RETIRED_VALUE_GUARD.length);
+  }
+
   private static int validatedValueLength(Result result) {
     Cell[] cells = result.rawCells();
     if (cells == null || cells.length != 1
         || !CellUtil.matchingQualifier(cells[0], VALUE)) {
+      if (cells != null && cells.length == 1 && CellUtil.matchingQualifier(cells[0], TOMBSTONE)) {
+        throw new IllegalArgumentException("retired system record has no value to decode");
+      }
       throw new IllegalArgumentException("system record contains an unexpected cell layout");
     }
     int length = cells[0].getValueLength();
     validateValueLength(length);
     return length;
+  }
+
+  HBaseCommitControlStore controlStore() {
+    return new HBaseCommitControlStore(connection, binding, auxiliarySupported, leaseBindingsSupported,
+        leaseExpiryCheckpointsSupported, eventRevisionIndexSupported, compactionSupported);
+  }
+
+  int bucketCount() { return binding.saltProfile().bucketCount(); }
+
+  /** The profile this store's table group is bound to; a permit must match it exactly. */
+  public ByteKey profileFingerprint() {
+    return binding.profileFingerprint();
+  }
+
+  public CompletableFuture<Optional<RetirementTombstone>> readTombstone(
+      SystemRecordType type, ByteKey identity, RequestScope scope) {
+    requireTypeSupported(type);
+    byte[] row = binding.row(type, identity);
+    return execute(scope, logicalReadPayloadBytes(row), table -> table.get(
+            new Get(row).setConsistency(Consistency.STRONG).addFamily(binding.family())))
+        .thenApply(result -> {
+          if (result.isEmpty()) return Optional.<RetirementTombstone>empty();
+          Cell marker = retirementMarker(result, binding.family());
+          if (marker == null) {
+            validatedValueLength(result);
+            return Optional.<RetirementTombstone>empty();
+          }
+          RetirementTombstone tombstone =
+              SystemRecordRetirementMessages.decode(CellUtil.cloneValue(marker));
+          if (tombstone.type() != type || !tombstone.identity().equals(identity)) {
+            throw new IllegalArgumentException("retirement tombstone does not match its row");
+          }
+          return Optional.of(tombstone);
+        });
+  }
+
+  CompletableFuture<Outcome> retire(SystemRecordType type, ByteKey identity, ByteKey expected,
+      Permit permit, Reason reason, RequestScope scope) {
+    requireTypeSupported(type);
+    Objects.requireNonNull(identity, "identity");
+    Objects.requireNonNull(expected, "expected");
+    Objects.requireNonNull(permit, "permit");
+    Objects.requireNonNull(reason, "reason");
+    permit.requireUsable(binding.profileFingerprint(), scope);
+    return new SystemRecordGcAuthority(this).validate(permit, scope).thenCompose(ignored ->
+        retireValue(type, identity, expected, permit, reason, scope));
+  }
+
+  private CompletableFuture<Outcome> retireValue(SystemRecordType type, ByteKey identity, ByteKey expected,
+      Permit permit, Reason reason, RequestScope scope) {
+    byte[] row = binding.row(type, identity);
+    byte[] observed = checkedValue(expected);
+    var tombstone = new RetirementTombstone(type, identity, digestOf(observed),
+        permit.generation(), permit.operationId(), reason, permit.safeRevision(),
+        permit.safeSequence());
+    byte[] encodedTombstone = SystemRecordRetirementMessages.encode(tombstone);
+    var retirement = new RowMutations(row);
+    try {
+      retirement.add(new Delete(row).setDurability(Durability.SYNC_WAL)
+          .addColumns(binding.family(), VALUE, RETIREMENT_TIMESTAMP - 1));
+      retirement.add(new Put(row).setDurability(Durability.SYNC_WAL)
+          .addColumn(binding.family(), VALUE, RETIREMENT_TIMESTAMP, RETIRED_VALUE_GUARD)
+          .addColumn(binding.family(), TOMBSTONE, RETIREMENT_TIMESTAMP, encodedTombstone));
+    } catch (java.io.IOException failure) {
+      return CompletableFuture.failedFuture(failure);
+    }
+    var mutation = CheckAndMutate.newBuilder(row)
+        .ifMatches(liveValueCondition(observed))
+        .build(retirement);
+    long payloadBytes = logicalMutationPayloadBytes(row,
+        Math.addExact(observed.length,
+            Math.addExact(encodedTombstone.length, RETIRED_VALUE_GUARD.length)));
+    return execute(scope, payloadBytes, table -> table.checkAndMutate(mutation))
+        .thenCompose(updated -> updated.isSuccess()
+            ? CompletableFuture.completedFuture(new Outcome(true, false, 0))
+            : readTombstone(type, identity, scope).thenCompose(existing -> {
+                if (existing.isPresent()) {
+                  requireSameRetirement(existing.orElseThrow(), tombstone);
+                  return CompletableFuture.completedFuture(new Outcome(false, true, 0));
+                }
+                return read(type, identity, scope).thenApply(current ->
+                    new Outcome(false, false, current.orElseThrow(() -> new CompletionException(
+                        new BackendFailure(BackendFailure.Category.UNAVAILABLE))).length()));
+              }));
+  }
+
+  private Filter liveValueCondition(byte[] expected) {
+    var value = new SingleColumnValueFilter(binding.family(), VALUE,
+        CompareOperator.EQUAL, new BinaryComparator(expected));
+    value.setFilterIfMissing(true);
+    var notRetired = new SingleColumnValueFilter(binding.family(), TOMBSTONE,
+        CompareOperator.EQUAL, new NullComparator());
+    notRetired.setFilterIfMissing(false);
+    return new FilterList(FilterList.Operator.MUST_PASS_ALL, value, notRetired);
+  }
+
+  private static void requireSameRetirement(RetirementTombstone stored,
+      RetirementTombstone proposed) {
+    if (stored.type() != proposed.type() || !stored.identity().equals(proposed.identity())
+        || !stored.retiredValueDigest().equals(proposed.retiredValueDigest())
+        || stored.maintenanceGeneration() != proposed.maintenanceGeneration()
+        || !stored.operationId().equals(proposed.operationId())) {
+      throw new IllegalArgumentException("retirement tombstone conflicts with the stored value");
+    }
+  }
+
+  private static ByteKey digestOf(byte[] value) {
+    try {
+      return ByteKey.copyOf(java.security.MessageDigest.getInstance("SHA-256").digest(value));
+    } catch (java.security.NoSuchAlgorithmException unavailable) {
+      throw new IllegalStateException("SHA-256 is unavailable", unavailable);
+    }
   }
 
   private Put put(byte[] row, byte[] value) {

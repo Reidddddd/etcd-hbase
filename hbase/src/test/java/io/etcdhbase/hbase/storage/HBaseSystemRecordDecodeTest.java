@@ -29,6 +29,17 @@ class HBaseSystemRecordDecodeTest {
   }
 
   @Test
+  void aMalformedRetirementPayloadCannotBeReportedAsAbsent() {
+    byte[] family = {'s'};
+    byte[] row = {'k'};
+    long timestamp = Long.MAX_VALUE - 1;
+    var guard = new KeyValue(row, family, new byte[] {'r'}, timestamp, new byte[] {0});
+    var marker = new KeyValue(row, family, new byte[] {'t'}, timestamp, new byte[] {9, 9});
+    assertThrows(IllegalArgumentException.class,
+        () -> HBaseSystemRecordStore.decode(Result.create(List.of(guard, marker)), family));
+  }
+
+  @Test
   void acceptsExpectedSingleCell() {
     byte[] family = {'s'};
     var cell = new KeyValue(new byte[] {'k'}, family, new byte[] {'r'}, new byte[] {1, 2});

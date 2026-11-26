@@ -53,6 +53,8 @@ public final class SnapshotPinManager implements ReadViewPinRegistry {
 
   public ByteKey registryIdentity() { return registryId; }
 
+  SnapshotPinConfiguration configuration() { return configuration; }
+
   /** Opens an established registry or resumes an initialization with a durable witness. */
   public static CompletableFuture<SnapshotPinManager> open(SystemRecordStore records,
       SnapshotPinConfiguration configuration, RequestScope scope) {
@@ -66,7 +68,7 @@ public final class SnapshotPinManager implements ReadViewPinRegistry {
   }
 
   /** Opens a selected namespace without resuming or recreating initialization metadata. */
-  static CompletableFuture<SnapshotPinManager> openSealed(SystemRecordStore records,
+  public static CompletableFuture<SnapshotPinManager> openSealed(SystemRecordStore records,
       SnapshotPinConfiguration configuration, Clock clock, RequestScope scope) {
     Objects.requireNonNull(records, "records");
     Objects.requireNonNull(configuration, "configuration");

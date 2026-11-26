@@ -1,6 +1,7 @@
 package io.etcdhbase.hbase.storage;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -17,6 +18,10 @@ import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.spi.salt.HashSaltStrategy;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.List;
+import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.client.Result;
+import io.etcdhbase.spi.salt.SaltProfile;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -72,6 +77,63 @@ class HBaseSystemRecordStoreScanTest {
 
       receivedConsumer.get().onComplete();
       physicalCompletion.get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
+  void validatesPhysicalRowOrderForLengthFramedIdentities() {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var scan = new ScanHarness();
+      var shortIdentity = ByteKey.copyOf(new byte[] {9});
+      var longIdentity = ByteKey.copyOf(new byte[] {1, 1});
+      var result = scan.store.scanBucket(SystemRecordType.WORKSET, 0, Optional.empty(), 4, 100, scope);
+      scan.deliver(scan.row(shortIdentity), scan.row(longIdentity));
+      assertEquals(List.of(shortIdentity, longIdentity), result.join().entries().stream()
+          .map(io.etcdhbase.core.commit.SystemRecordEntry::identity).toList());
+    }
+  }
+
+  @Test
+  void rejectsBackwardPhysicalRowsEvenWhenLogicalIdentitiesAreIncreasing() {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var scan = new ScanHarness();
+      var result = scan.store.scanBucket(SystemRecordType.WORKSET, 0, Optional.empty(), 4, 100, scope);
+      scan.deliver(scan.row(ByteKey.copyOf(new byte[] {1, 1})), scan.row(ByteKey.copyOf(new byte[] {9})));
+      assertThrows(CompletionException.class, result::join);
+    }
+  }
+
+  private static final class ScanHarness {
+    private final AtomicReference<AdvancedScanResultConsumer> consumer = new AtomicReference<>();
+    private final SystemTableBinding binding;
+    private final HBaseSystemRecordStore store;
+
+    @SuppressWarnings("unchecked")
+    private ScanHarness() {
+      var connection = mock(AsyncConnection.class);
+      AsyncTableBuilder<AdvancedScanResultConsumer> builder = mock(AsyncTableBuilder.class);
+      AsyncTable<AdvancedScanResultConsumer> table = mock(AsyncTable.class);
+      var salt = new HashSaltStrategy(new SaltProfile(HashSaltStrategy.STRATEGY_ID, 1, 1, 2));
+      binding = new SystemTableBinding(TableName.valueOf("j52_scan_order"), new byte[] {'s'}, "j52", "salt", salt);
+      when(connection.getTableBuilder(binding.table())).thenReturn(builder);
+      when(builder.setOperationTimeout(anyLong(), eq(TimeUnit.NANOSECONDS))).thenReturn(builder);
+      when(builder.setRpcTimeout(anyLong(), eq(TimeUnit.NANOSECONDS))).thenReturn(builder);
+      when(builder.setReadRpcTimeout(anyLong(), eq(TimeUnit.NANOSECONDS))).thenReturn(builder);
+      when(builder.setScanTimeout(anyLong(), eq(TimeUnit.NANOSECONDS))).thenReturn(builder);
+      when(builder.build()).thenReturn(table);
+      doAnswer(invocation -> { consumer.set(invocation.getArgument(1)); return null; })
+          .when(table).scan(any(Scan.class), any(AdvancedScanResultConsumer.class));
+      store = new HBaseSystemRecordStore(connection, binding, true, false, false, false, false, false);
+    }
+
+    private Result row(ByteKey identity) {
+      return Result.create(List.of(new KeyValue(binding.row(SystemRecordType.WORKSET, identity),
+          binding.family(), new byte[] {'r'}, new byte[] {1})));
+    }
+
+    private void deliver(Result... rows) {
+      consumer.get().onNext(rows, mock(AdvancedScanResultConsumer.ScanController.class));
+      consumer.get().onComplete();
     }
   }
 
