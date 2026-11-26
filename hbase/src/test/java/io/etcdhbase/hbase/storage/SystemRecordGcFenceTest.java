@@ -1,12 +1,15 @@
 package io.etcdhbase.hbase.storage;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.InvocationId;
 import io.etcdhbase.core.commit.RetirementTombstone;
 import io.etcdhbase.core.commit.SystemRecordRetirement;
 import io.etcdhbase.core.commit.SystemRecordType;
-import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.hbase.codec.SystemRecordRetirementMessages;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
