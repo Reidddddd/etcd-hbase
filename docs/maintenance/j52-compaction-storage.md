@@ -2,11 +2,13 @@
 
 ## 1. 交付范围
 
-本次提供内部逻辑 Compact 选择器、KV 历史回收许可和 HBase 精确版本删除。`CompactionService` 复用现有控制行与 system 记录，`GcCoordinator` 复用持久 snapshot pin 注册表。它们尚未装配到生产 `KV.Compact` RPC；J52 保持进行中。
+本次提供内部逻辑 Compact 选择器、KV 历史回收许可和 HBase 精确版本删除。`CompactionService` 复用现有控制行与 system 记录，`GcCoordinator` 复用持久 snapshot pin 注册表。`KV.Compact` 已通过 `CompactGateway` 装配到既有 owner lane，与发布和恢复串行执行；J52 保持进行中。
+
+`physical=false` 返回本次逻辑选择结果。当前运行时尚未装配历史枚举与持久检查点，`physical=true` 在逻辑选择成功后返回 `UNAVAILABLE`；该错误不撤销已持久化的逻辑压缩边界，也不表示物理回收完成。请求取消或超时后不返回成功响应。
 
 新的操作先以 `COMPACTION` 类别持久保存请求身份、授权范围、目标 revision 和完整控制状态摘要，再用控制行 CAS 选择逻辑边界。控制行的 `compact_operation_id` 使丢失 ACK 的操作可以按原身份恢复；替换该身份前，必须先持久确认前一操作的逻辑结论。逻辑压缩不增加 KV revision 或 sequence。控制状态未启用授权发布屏障时拒绝选择；控制行含 Compact 身份但 descriptor 未声明能力时拒绝读取。
 
-初始 `Compact(0)` 与已压缩到零不同。固定 etcd v3.5.23 的原生对照覆盖初始零、负数、重复、未来 revision，以及 Compact 后 Range/Watch 的 C−1、C、C+1 边界。Go 测试目前只提供原生行为依据，不代表 Java Compact RPC 已互通。
+初始 `Compact(0)` 与已压缩到零不同。固定 etcd v3.5.23 的原生对照覆盖初始零、负数、重复、未来 revision，以及 Compact 后 Range/Watch 的 C−1、C、C+1 边界。重复与未来 revision 在网关中投影为 `OUT_OF_RANGE`。Go 测试目前只提供原生行为依据，不代表 Java Compact RPC 已互通。
 
 ## 2. KV 历史回收约束
 
@@ -22,7 +24,7 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 以下内容属于已批准的 J52，当前仍需实现：
 
-- owner RPC 路由、实际用户连接的管理权限复核、前后台身份与调度生命周期。
+- 跨副本 owner RPC 转发、实际用户连接的管理权限复核、前后台身份与调度生命周期。
 - 结合 `EventHistoryRetention`、tailer/backfill 和确切根引用的事件、索引、manifest、候选、决定及结果回收闭包。
 - invocation 结果窗口的运行时关闭、在途结果查询的持久保护，以及不可重放的最小证明。
 - 持久 GC 检查点、重启接管，以及 `physical=false` 的工作登记和 `physical=true` 的完成等待、超时后后台继续。
