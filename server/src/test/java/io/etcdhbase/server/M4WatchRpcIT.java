@@ -172,7 +172,7 @@ class M4WatchRpcIT {
               + metrics.watchCreateResourceFailures()
               + "\nWatch replay open resource failure stages: "
               + metrics.watchReplayOpenResourceFailures()
-              + "\nWatch replay lookup reserved admission snapshot: "
+              + "\nWatch replay lookup regular admission snapshot: "
               + metrics.watchReplayLookupAdmissionFailure(), failure);
         }
       }

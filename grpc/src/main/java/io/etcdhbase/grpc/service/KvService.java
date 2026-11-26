@@ -12,6 +12,7 @@ public final class KvService extends KVGrpc.KVImplBase {
   private final BiConsumer<Rpc.TxnRequest, StreamObserver<Rpc.TxnResponse>> txnHandler;
   private final BiConsumer<Rpc.DeleteRangeRequest, StreamObserver<Rpc.DeleteRangeResponse>> deleteHandler;
   private final BiConsumer<Rpc.RangeRequest, StreamObserver<Rpc.RangeResponse>> rangeHandler;
+  private final BiConsumer<Rpc.CompactionRequest, StreamObserver<Rpc.CompactionResponse>> compactHandler;
 
   /** Keeps the protocol-only skeleton explicitly unimplemented. */
   public KvService() {
@@ -19,6 +20,7 @@ public final class KvService extends KVGrpc.KVImplBase {
     this.txnHandler = null;
     this.deleteHandler = null;
     this.rangeHandler = null;
+    this.compactHandler = null;
   }
 
   /** Installs a fully assembled Put handler; other KV methods remain unimplemented. */
@@ -27,6 +29,7 @@ public final class KvService extends KVGrpc.KVImplBase {
     this.txnHandler = null;
     this.deleteHandler = null;
     this.rangeHandler = null;
+    this.compactHandler = null;
   }
 
   /** Installs both fully assembled handlers. */
@@ -36,6 +39,7 @@ public final class KvService extends KVGrpc.KVImplBase {
     this.txnHandler = Objects.requireNonNull(txnHandler, "txnHandler");
     this.deleteHandler = null;
     this.rangeHandler = null;
+    this.compactHandler = null;
   }
 
   /** Installs Put, Txn and DeleteRange handlers backed by the same table-group runtime. */
@@ -46,6 +50,7 @@ public final class KvService extends KVGrpc.KVImplBase {
     this.txnHandler = Objects.requireNonNull(txnHandler, "txnHandler");
     this.deleteHandler = Objects.requireNonNull(deleteHandler, "deleteHandler");
     this.rangeHandler = null;
+    this.compactHandler = null;
   }
 
   /** Installs the Range, Put, Txn and DeleteRange handlers for one table group. */
@@ -57,6 +62,7 @@ public final class KvService extends KVGrpc.KVImplBase {
     this.txnHandler = Objects.requireNonNull(txnHandler, "txnHandler");
     this.deleteHandler = Objects.requireNonNull(deleteHandler, "deleteHandler");
     this.rangeHandler = Objects.requireNonNull(rangeHandler, "rangeHandler");
+    this.compactHandler = null;
   }
 
   @Override
@@ -84,9 +90,30 @@ public final class KvService extends KVGrpc.KVImplBase {
     else txnHandler.accept(request, responseObserver);
   }
 
+  /** Installs the assembled Compact handler; the logical boundary still comes from its own CAS. */
+  public KvService withCompact(
+      BiConsumer<Rpc.CompactionRequest, StreamObserver<Rpc.CompactionResponse>> compactHandler) {
+    return new KvService(putHandler, txnHandler, deleteHandler, rangeHandler,
+        Objects.requireNonNull(compactHandler, "compactHandler"));
+  }
+
+  private KvService(
+      BiConsumer<Rpc.PutRequest, StreamObserver<Rpc.PutResponse>> putHandler,
+      BiConsumer<Rpc.TxnRequest, StreamObserver<Rpc.TxnResponse>> txnHandler,
+      BiConsumer<Rpc.DeleteRangeRequest, StreamObserver<Rpc.DeleteRangeResponse>> deleteHandler,
+      BiConsumer<Rpc.RangeRequest, StreamObserver<Rpc.RangeResponse>> rangeHandler,
+      BiConsumer<Rpc.CompactionRequest, StreamObserver<Rpc.CompactionResponse>> compactHandler) {
+    this.putHandler = putHandler;
+    this.txnHandler = txnHandler;
+    this.deleteHandler = deleteHandler;
+    this.rangeHandler = rangeHandler;
+    this.compactHandler = compactHandler;
+  }
+
   @Override
   public void compact(
       Rpc.CompactionRequest request, StreamObserver<Rpc.CompactionResponse> responseObserver) {
-    UnimplementedStreams.failUnary(responseObserver, "KV.Compact");
+    if (compactHandler == null) UnimplementedStreams.failUnary(responseObserver, "KV.Compact");
+    else compactHandler.accept(request, responseObserver);
   }
 }

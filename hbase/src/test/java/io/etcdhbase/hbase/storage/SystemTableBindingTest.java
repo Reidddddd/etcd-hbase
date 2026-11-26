@@ -73,6 +73,22 @@ class SystemTableBindingTest {
   }
 
   @Test
+  void compactRecordsRequireExplicitDescriptorCapability() {
+    var legacy = descriptor(TABLE, FAMILY, TABLE_GROUP, SALT_PROFILE, REQUIRED_CATEGORIES,
+        Durability.SYNC_WAL, HConstants.FOREVER, 1);
+    assertFalse(BINDING.supportsCompaction(legacy));
+    var declared = BINDING.withCompactionCapability(legacy);
+    assertTrue(BINDING.supportsCompaction(declared));
+    assertTrue(BINDING.supportsCompaction(BINDING.withCompactionCapability(declared)));
+    assertFalse(BINDING.supportsCompaction(TableDescriptorBuilder.newBuilder(declared)
+        .setValue("etcdhbase.m0.record-categories", REQUIRED_CATEGORIES).build()));
+    var unknown = TableDescriptorBuilder.newBuilder(declared)
+        .setValue("etcdhbase.m5.compaction-format", "2").build();
+    assertFalse(BINDING.supportsCompaction(unknown));
+    assertThrows(IllegalStateException.class, () -> BINDING.withCompactionCapability(unknown));
+  }
+
+  @Test
   void rejectsTableFamilyProfileCategoryAndDurabilityMismatches() {
     assertThrows(IllegalArgumentException.class, () -> BINDING.validate(descriptor(
         TableName.valueOf("m2", "other"), FAMILY, TABLE_GROUP, SALT_PROFILE, REQUIRED_CATEGORIES,

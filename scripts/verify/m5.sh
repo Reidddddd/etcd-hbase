@@ -25,16 +25,16 @@ while (($#)); do
       artifact_request="$2"; seen_artifact=true; shift 2 ;;
     --help)
       cat <<'USAGE'
-用法：scripts/verify/m5.sh --scope public --task J50|J51 --artifact-root .artifacts/m5/<fresh-run-id>
+用法：scripts/verify/m5.sh --scope public --task J50|J51|J52 --artifact-root .artifacts/m5/<fresh-run-id>
 USAGE
       exit 0 ;;
     *) echo "unknown M5 verification option: $1" >&2; exit 2 ;;
   esac
 done
 
-if [[ "$scope" != public || ( "$task" != J50 && "$task" != J51 ) || "$seen_scope" != true || \
+if [[ "$scope" != public || ( "$task" != J50 && "$task" != J51 && "$task" != J52 ) || "$seen_scope" != true || \
       "$seen_task" != true || "$seen_artifact" != true ]]; then
-  echo 'M5 public verification requires --scope public, --task J50 or J51, and --artifact-root' >&2
+  echo 'M5 public verification requires --scope public, --task J50, J51 or J52, and --artifact-root' >&2
   exit 2
 fi
 
@@ -122,6 +122,15 @@ if [[ "$task" == J51 ]]; then
   run_logged maven-verify maven.log maven.stderr \
     scripts/dev/mvn21.sh -B -ntp -pl server -am clean test \
       "-Dtest=$surefire_selector" -Dsurefire.failIfNoSpecifiedTests=false
+elif [[ "$task" == J52 ]]; then
+  [[ -n "$failsafe_selector" ]] || { echo 'J52 integration selector is missing' >&2; exit 2; }
+  run_logged maven-verify maven.log maven.stderr \
+    scripts/dev/mvn21.sh -B -ntp -pl hbase -am verify -Pm5-j52-public -DforkCount=1 \
+      "-Dtest=$surefire_selector" -Dsurefire.failIfNoSpecifiedTests=false \
+      "-Dit.test=$failsafe_selector" -Dfailsafe.failIfNoSpecifiedTests=false
+  run_logged native-oracle native-oracle.jsonl native-oracle.stderr \
+    scripts/dev/go-m0.sh test -json -count=1 -run '^TestM5CompactPinnedNativeBoundaries$' ./internal/scenario
+
 else
   [[ -n "$failsafe_selector" ]] || { echo "$task integration selector is missing" >&2; exit 2; }
   profile="$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')"

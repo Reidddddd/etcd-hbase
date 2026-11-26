@@ -136,6 +136,8 @@ public final class HBaseMaterializationStore implements MaterializationStore {
     }).exceptionallyCompose(failure -> CompletableFuture.failedFuture(HBaseFailures.classify(failure)));
   }
 
+  int nativeVersionLimit() { return nativeVersionLimit; }
+
   private record Descriptors(TableDescriptor primary, Optional<TableDescriptor> current) {}
 
   /** Rejects mixed or unowned tables before a group can be made ready for writes. */
@@ -309,7 +311,7 @@ public final class HBaseMaterializationStore implements MaterializationStore {
     });
   }
 
-  private CompletableFuture<NativeRowState> readNativeState(
+  CompletableFuture<NativeRowState> readNativeState(
       byte[] row, int versions, RequestScope scope) {
     CompletableFuture<Result> readVersions;
     try {
@@ -333,7 +335,7 @@ public final class HBaseMaterializationStore implements MaterializationStore {
     });
   }
 
-  private CompletableFuture<Result> readNativeVersion(byte[] row, long revision, RequestScope scope) {
+  CompletableFuture<Result> readNativeVersion(byte[] row, long revision, RequestScope scope) {
     long timestamp = RevisionTimestamp.timestamp(revision);
     try {
       Get get = new Get(row).setConsistency(Consistency.STRONG)
@@ -345,7 +347,7 @@ public final class HBaseMaterializationStore implements MaterializationStore {
     }
   }
 
-  private Optional<ObservedFence> observedNativeFence(Result versions) {
+  Optional<ObservedFence> observedNativeFence(Result versions) {
     if (versions.isEmpty()) return Optional.empty();
     validateQualifiers(primary, versions, RowFenceMessages.RowKind.NATIVE);
     List<Cell> metadataVersions = cells(versions, METADATA);
@@ -396,7 +398,7 @@ public final class HBaseMaterializationStore implements MaterializationStore {
     return readRow(binding, row, 1, scope).thenApply(result -> observedFence(binding, row, result, kind));
   }
 
-  private Optional<ObservedFence> observedFence(
+  Optional<ObservedFence> observedFence(
       StorageTableBinding binding, byte[] row, Result result, RowFenceMessages.RowKind expectedKind) {
     if (result.isEmpty()) return Optional.empty();
     validateQualifiers(binding, result, expectedKind);
@@ -484,7 +486,7 @@ public final class HBaseMaterializationStore implements MaterializationStore {
     }
   }
 
-  private CompletableFuture<Result> readRow(
+  CompletableFuture<Result> readRow(
       StorageTableBinding binding, byte[] row, int versions, RequestScope scope) {
     try {
       Get get = new Get(row).setConsistency(Consistency.STRONG).readVersions(versions)
@@ -495,7 +497,7 @@ public final class HBaseMaterializationStore implements MaterializationStore {
     }
   }
 
-  private <T> CompletableFuture<T> execute(RequestScope scope, StorageTableBinding binding,
+  <T> CompletableFuture<T> execute(RequestScope scope, StorageTableBinding binding,
       Function<AsyncTable<?>, CompletableFuture<T>> operation) {
     return HBaseRequestCompletion.startRequest(scope, () -> {
       long timeout = Math.max(1, Math.min(TimeUnit.SECONDS.toNanos(30), scope.remainingDeadlineNanos()));
@@ -604,6 +606,6 @@ public final class HBaseMaterializationStore implements MaterializationStore {
     return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
   }
 
-  private record ObservedFence(RowFenceMessages.Fence fence, byte[] encoded) {}
-  private record NativeRowState(Result versions, Optional<ObservedFence> fence) {}
+  record ObservedFence(RowFenceMessages.Fence fence, byte[] encoded) {}
+  record NativeRowState(Result versions, Optional<ObservedFence> fence) {}
 }

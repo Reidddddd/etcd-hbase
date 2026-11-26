@@ -168,6 +168,29 @@ public final class SystemTableBinding {
     return upgraded;
   }
 
+  /** A capability gate for Compact operation identities and exact KV version retirement. */
+  public boolean supportsCompaction(TableDescriptor descriptor) {
+    validate(descriptor);
+    return "1".equals(descriptor.getValue("etcdhbase.m5.compaction-format"))
+        && containsAllCategories(descriptor.getValue("etcdhbase.m0.record-categories"),
+            Set.of("COMPACTION"));
+  }
+
+  /** Declares storage support; activation and RPC assembly remain separate responsibilities. */
+  public TableDescriptor withCompactionCapability(TableDescriptor descriptor) {
+    validate(descriptor);
+    String format = descriptor.getValue("etcdhbase.m5.compaction-format");
+    if (format != null && !"1".equals(format)) {
+      throw new IllegalStateException("system table declares an unsupported Compact format");
+    }
+    var categories = new LinkedHashSet<>(Arrays.asList(
+        descriptor.getValue("etcdhbase.m0.record-categories").split(",", -1)));
+    categories.add("COMPACTION");
+    return TableDescriptorBuilder.newBuilder(descriptor)
+        .setValue("etcdhbase.m0.record-categories", String.join(",", categories))
+        .setValue("etcdhbase.m5.compaction-format", "1").build();
+  }
+
   /** Returns an additive record-category declaration for the fenced M4 capability upgrade. */
   public String auxiliaryRecordCategories(TableDescriptor descriptor) {
     validate(descriptor);

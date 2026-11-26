@@ -32,6 +32,7 @@ public final class CommitState {
   private final int eventRegistryAttempts;
   private final boolean authorizationBarrierEnabled;
   private final long authorizationBarrierGeneration;
+  private final Optional<InvocationId> compactOperationId;
 
   private CommitState(
       int formatVersion,
@@ -48,7 +49,7 @@ public final class CommitState {
       long compactRevision) {
     this(formatVersion, profileFingerprint, ownerInstance, ownerEpoch, ownerLeaseDeadlineEpochMillis,
         stateVersion, publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
-        publication, compactRevision, Optional.empty(), Optional.empty(), 0, false, 0);
+        publication, compactRevision, Optional.empty(), Optional.empty(), 0, false, 0, Optional.empty());
   }
 
   private CommitState(int formatVersion, ByteKey profileFingerprint, Optional<String> ownerInstance,
@@ -59,7 +60,7 @@ public final class CommitState {
     this(formatVersion, profileFingerprint, ownerInstance, ownerEpoch, ownerLeaseDeadlineEpochMillis,
         stateVersion, publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
         publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
-        eventRegistryAttempts, false, 0);
+        eventRegistryAttempts, false, 0, Optional.empty());
   }
 
   private CommitState(int formatVersion, ByteKey profileFingerprint, Optional<String> ownerInstance,
@@ -67,7 +68,9 @@ public final class CommitState {
       long publishedRevision, long finalizedSequence, long finalizedRevision,
       Optional<PublicationSlot> publication, long compactRevision, Optional<ByteKey> eventRegistryNamespace,
       Optional<ByteKey> pendingEventRegistryNamespace, int eventRegistryAttempts,
-      boolean authorizationBarrierEnabled, long authorizationBarrierGeneration) {
+      boolean authorizationBarrierEnabled, long authorizationBarrierGeneration,
+      Optional<InvocationId> compactOperationId) {
+    this.compactOperationId = Objects.requireNonNull(compactOperationId, "compactOperationId");
     this.profileFingerprint = Objects.requireNonNull(profileFingerprint, "profileFingerprint");
     this.ownerInstance = Objects.requireNonNull(ownerInstance, "ownerInstance");
     this.publication = Objects.requireNonNull(publication, "publication");
@@ -168,7 +171,7 @@ public final class CommitState {
     return new CommitState(formatVersion, profileFingerprint, ownerInstance, ownerEpoch,
         ownerLeaseDeadlineEpochMillis, stateVersion, publishedSequence, publishedRevision,
         finalizedSequence, finalizedRevision, publication, compactRevision, eventRegistryNamespace,
-        pendingEventRegistryNamespace, eventRegistryAttempts, true, authorizationBarrierGeneration);
+        pendingEventRegistryNamespace, eventRegistryAttempts, true, authorizationBarrierGeneration, Optional.empty());
   }
 
   public static CommitState restore(int formatVersion, ByteKey profileFingerprint,
@@ -182,8 +185,35 @@ public final class CommitState {
         ownerLeaseDeadlineEpochMillis, stateVersion, publishedSequence, publishedRevision,
         finalizedSequence, finalizedRevision, publication, compactRevision, eventRegistryNamespace,
         pendingEventRegistryNamespace, eventRegistryAttempts, authorizationBarrierEnabled,
-        authorizationBarrierGeneration);
+        authorizationBarrierGeneration, Optional.empty());
   }
+
+  public static CommitState restore(int formatVersion, ByteKey profileFingerprint,
+      Optional<String> ownerInstance, long ownerEpoch, long ownerLeaseDeadlineEpochMillis,
+      long stateVersion, long publishedSequence, long publishedRevision, long finalizedSequence,
+      long finalizedRevision, Optional<PublicationSlot> publication, long compactRevision,
+      Optional<ByteKey> eventRegistryNamespace, Optional<ByteKey> pendingEventRegistryNamespace,
+      int eventRegistryAttempts, boolean authorizationBarrierEnabled,
+      long authorizationBarrierGeneration, Optional<InvocationId> compactOperationId) {
+    return new CommitState(formatVersion, profileFingerprint, ownerInstance, ownerEpoch,
+        ownerLeaseDeadlineEpochMillis, stateVersion, publishedSequence, publishedRevision,
+        finalizedSequence, finalizedRevision, publication, compactRevision, eventRegistryNamespace,
+        pendingEventRegistryNamespace, eventRegistryAttempts, authorizationBarrierEnabled,
+        authorizationBarrierGeneration, compactOperationId);
+  }
+
+  /** Selects one durable maintenance operation without creating a KV revision or sequence. */
+  public CommitState selectCompaction(long revision, InvocationId operationId) {
+    Objects.requireNonNull(operationId, "operationId");
+    CommitState advanced = advanceCompactRevision(revision);
+    return new CommitState(formatVersion, profileFingerprint, ownerInstance, ownerEpoch,
+        ownerLeaseDeadlineEpochMillis, advanced.stateVersion(), publishedSequence, publishedRevision,
+        finalizedSequence, finalizedRevision, publication, revision, eventRegistryNamespace,
+        pendingEventRegistryNamespace, eventRegistryAttempts, authorizationBarrierEnabled,
+        authorizationBarrierGeneration, Optional.of(operationId));
+  }
+
+  public Optional<InvocationId> compactOperationId() { return compactOperationId; }
 
   public int formatVersion() { return formatVersion; }
   public boolean supportsAuxiliaryRecords() { return formatVersion >= AUXILIARY_FORMAT_VERSION; }
@@ -217,7 +247,7 @@ public final class CommitState {
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
         publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
-        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration);
+        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration, compactOperationId);
   }
 
   /** Fences J40 writers before J41 persists Lease binding histories and accounting. */
@@ -232,7 +262,7 @@ public final class CommitState {
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
         publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
-        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration);
+        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration, compactOperationId);
   }
 
   /** Fences J41 owners before J43 persists expiry checkpoints and runs automatic revocation. */
@@ -247,7 +277,7 @@ public final class CommitState {
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
         publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
-        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration);
+        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration, compactOperationId);
   }
 
   /** Fences older owners before event indexes become mandatory for new KV commits. */
@@ -261,7 +291,7 @@ public final class CommitState {
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
         publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
-        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration);
+        eventRegistryAttempts, authorizationBarrierEnabled, authorizationBarrierGeneration, compactOperationId);
   }
 
   /** Reserves one bounded staging attempt and fences earlier attempts before any staging writes. */
@@ -277,7 +307,7 @@ public final class CommitState {
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision, publication,
         compactRevision, Optional.empty(), Optional.of(namespace), eventRegistryAttempts + 1,
-        authorizationBarrierEnabled, authorizationBarrierGeneration);
+        authorizationBarrierEnabled, authorizationBarrierGeneration, compactOperationId);
   }
 
   /** Selects one fully prepared registry namespace and fences the previous owner in the same CAS. */
@@ -293,7 +323,7 @@ public final class CommitState {
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
         publication, compactRevision, Optional.of(namespace), Optional.empty(), eventRegistryAttempts,
-        authorizationBarrierEnabled, authorizationBarrierGeneration);
+        authorizationBarrierEnabled, authorizationBarrierGeneration, compactOperationId);
   }
 
   /** Fences older control-row writers before enabling authorization publication barriers. */
@@ -307,7 +337,7 @@ public final class CommitState {
         Math.addExact(ownerEpoch, 1), ownerLeaseDeadlineEpochMillis, nextStateVersion(),
         publishedSequence, publishedRevision, finalizedSequence, finalizedRevision,
         publication, compactRevision, eventRegistryNamespace, pendingEventRegistryNamespace,
-        eventRegistryAttempts, true, 0);
+        eventRegistryAttempts, true, 0, compactOperationId);
   }
 
   /** Advances the per-table-group authorization fence without changing an existing selection. */
@@ -413,7 +443,7 @@ public final class CommitState {
         nextPublishedSequence, nextPublishedRevision, nextFinalizedSequence,
         nextFinalizedRevision, nextPublication, nextCompactRevision, eventRegistryNamespace,
         pendingEventRegistryNamespace, eventRegistryAttempts, authorizationBarrierEnabled,
-        nextAuthorizationBarrierGeneration);
+        nextAuthorizationBarrierGeneration, compactOperationId);
   }
 
   private long nextStateVersion() {

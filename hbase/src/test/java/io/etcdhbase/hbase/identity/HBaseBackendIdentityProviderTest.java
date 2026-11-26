@@ -381,13 +381,14 @@ class HBaseBackendIdentityProviderTest {
       verify(connection, never()).close();
 
       borrow.release().toCompletableFuture().get(5, TimeUnit.SECONDS);
-      verify(connection).close();
-      verify(context, never()).close();
-
       provider.close();
+      awaitFullyDrained(provider);
       verify(connection, times(2)).close();
       verify(context).close();
-      assertTrue(provider.isFullyDrained());
+      // The scheduled retry may already have run by the time the borrower observes release.
+      var order = inOrder(connection, context);
+      order.verify(connection, times(2)).close();
+      order.verify(context).close();
     }
   }
 
@@ -438,9 +439,10 @@ class HBaseBackendIdentityProviderTest {
         allowRetryClose.countDown();
       }
       assertTrue(retryClosed.await(5, TimeUnit.SECONDS));
+      // The connection signals from inside close(); the context closes only after it returns.
+      awaitFullyDrained(provider);
       verify(connection, times(2)).close();
       verify(context).close();
-      awaitFullyDrained(provider);
     }
   }
 
@@ -603,11 +605,15 @@ class HBaseBackendIdentityProviderTest {
             TIMEOUT);
     authenticate(provider).get(5, TimeUnit.SECONDS);
     assertThrows(IllegalStateException.class, provider::close);
-    verify(context, never()).close();
     provider.close();
     provider.close();
     verify(connection, times(2)).close();
     verify(context).close();
+    // The retry runs on a completion worker, so "never" is not a stable assertion. The contract is
+    // ordering: the backend context is released only after its connection was actually closed.
+    var order = inOrder(connection, context);
+    order.verify(connection, times(2)).close();
+    order.verify(context).close();
   }
 
   @Test

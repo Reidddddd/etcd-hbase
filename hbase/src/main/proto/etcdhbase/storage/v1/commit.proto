@@ -23,6 +23,8 @@ message CommitControlState {
   // Presence enables the monotone authorization fence independently of other control formats.
   // Every new publication CAS includes this field when present; older writers fail exact-byte CAS.
   optional int64 authorization_barrier_generation = 16;
+  // Exact durable maintenance operation selected with compact_revision.
+  optional bytes compact_operation_id = 17;
 }
 
 message PublicationSlot {

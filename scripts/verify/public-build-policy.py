@@ -32,8 +32,8 @@ CI_WORKFLOW_CALL_ORDER = (
     "j11", "j23", "j24", "j36-proof", "m1", "m3", "m4", "m5",
 )
 MAVEN_CONSUMER_JOB_COUNTS = {name: 1 for name in MAVEN_CONSUMER_WORKFLOWS}
-MAVEN_CONSUMER_JOB_COUNTS.update({"m3": 7, "m4": 8, "m5": 2})
-MAVEN_VALIDATION_JOB_COUNT = 29
+MAVEN_CONSUMER_JOB_COUNTS.update({"m3": 7, "m4": 8, "m5": 3})
+MAVEN_VALIDATION_JOB_COUNT = 30
 
 # Keep CI Action pins outside the Maven dependency lock so they do not invalidate its cache key.
 
@@ -134,7 +134,7 @@ def multi_job_summary_policy(workflow, content, validation_job_ids):
     required = {
         "m3.yml": ["j28-history", "j30", "j31", "j32", "j33", "j34", "j35"],
         "m4.yml": ["j40", "j41", "j42", "j43", "j44", "j45", "j46", "j47"],
-        "m5.yml": ["j50", "j51"],
+        "m5.yml": ["j50", "j51", "j52"],
     }
     if workflow.name not in required:
         return

@@ -35,7 +35,7 @@ public final class RequestMetrics implements RequestCompletionRecorder {
   private final Map<LeaseRevocationStage, StageCounter> leaseRevocationStages;
   private final Map<WatchCreateResourceFailureStage, LongAdder> watchCreateResourceFailures;
   private final Map<WatchReplayOpenResourceFailureStage, LongAdder> watchReplayOpenResourceFailures;
-  private final AtomicReference<BudgetManager.ReservedAdmissionFailureSnapshot>
+  private final AtomicReference<BudgetManager.AdmissionFailureSnapshot>
       watchReplayLookupAdmissionFailure = new AtomicReference<>();
   private final LongAdder putOutputBytes = new LongAdder();
   private final LongAdder txnOutputBytes = new LongAdder();
@@ -191,11 +191,11 @@ public final class RequestMetrics implements RequestCompletionRecorder {
 
   /** Retains only the latest bounded lookup-admission rejection; no group or request identity. */
   public void recordWatchReplayLookupAdmissionFailure(
-      BudgetManager.ReservedAdmissionFailureSnapshot snapshot) {
+      BudgetManager.AdmissionFailureSnapshot snapshot) {
     watchReplayLookupAdmissionFailure.set(Objects.requireNonNull(snapshot, "snapshot"));
   }
 
-  public Optional<BudgetManager.ReservedAdmissionFailureSnapshot>
+  public Optional<BudgetManager.AdmissionFailureSnapshot>
       watchReplayLookupAdmissionFailure() {
     return Optional.ofNullable(watchReplayLookupAdmissionFailure.get());
   }

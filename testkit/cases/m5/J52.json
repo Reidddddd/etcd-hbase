@@ -1,0 +1,228 @@
+{
+  "schema": "etcd-hbase-m5-task/v1",
+  "task": "J52",
+  "status": "executable",
+  "scope": "public",
+  "execution_profile": "m5-j52-public",
+  "maven_reactor": "hbase",
+  "maven_profiles": [
+    {
+      "module": "hbase",
+      "id": "m5-j52-public"
+    }
+  ],
+  "backend_adapters": [
+    "minicluster-simple"
+  ],
+  "layouts": [
+    "HISTORY",
+    "NATIVE"
+  ],
+  "scenarios": [
+    "exact-kv-version-delete-and-baseline-retention",
+    "independent-pin-floors",
+    "late-materializer-new-write-and-cancellation",
+    "logical-selection-and-unknown-outcome",
+    "native-v3.5.23-compact-range-watch-oracle"
+  ],
+  "tests": [
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.CommitStateTest",
+      "methods": [
+        "auxiliaryUpgradeFencesOldEpochAndPreservesWatermarks",
+        "leaseBindingUpgradeFencesTheAuxiliaryOwnerBeforeChangingCapabilities",
+        "leaseExpiryUpgradeFencesBindingWritersBeforeEnablingCheckpointProgress",
+        "eventIndexUpgradeFencesOldOwnerAndRejectsPendingOrExpiredWork",
+        "eventRegistrySelectionFencesOldOwnerAndSurvivesControlUpdates",
+        "authorizationBarrierIsIndependentOfControlFormatAndPreservesOwnerFence",
+        "authorizationBarrierAdvancesMonotonicallyWithoutReplacingSelectedPublication",
+        "authorizationBarrierRestoreRejectsNegativeAndOverflowDoesNotWrap",
+        "eventRegistryAttemptsAreDurablyBounded",
+        "metadataOnlyPublicationDoesNotAdvanceRevisionAndKeyChangesAdvanceItOnce",
+        "ownerEpochFencesOldOwnersAndExpiredLeaseCanBeClaimed",
+        "restoreRejectsBrokenOwnerWatermarkAndPublicationInvariants",
+        "counterAndRevisionExhaustionFailsWithoutWrapping"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.CompactionServiceTest",
+      "methods": [
+        "matchesNativeZeroRepeatedFutureAndNegativeBoundariesWithoutKvCommit",
+        "recoversUnknownCreateControlAndOperationAcknowledgements",
+        "persistsPreviousSelectionBeforeReplacingItsControlIdentity",
+        "unknownCasBeforeWriteDoesNotBecomeSuccessFromAHigherUnrelatedCompact",
+        "authorizationBarrierRaceRevalidatesAndUsesExactFullState",
+        "refreshesResponseBarrierAfterConcurrentControlChange",
+        "permissionFailureIsNotHiddenByReadbackAndCancellationStopsNewSelection",
+        "ownerTakeoverAndInvocationConflictCannotSelectAPreparedOperation",
+        "strictRecordCodecRejectsMalformedAndUnknownStages",
+        "refusesLegacyControlBeforeCreatingAnOperationWithoutAnAuthorizationBarrier",
+        "deniedAuthorizationCannotCreateACompactionRecord"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.EventIndexBackfillMaterializerTest",
+      "methods": [
+        "initialPreflightAcceptsNewerFinalizedSequencesOutsideCapturedLegacyWindow",
+        "initialPreflightStillRejectsOwnerCompactAndCapturedUpperChanges"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.EventIndexMaterializerTest",
+      "methods": [
+        "initialCheckpointMustCaptureTheCurrentFinalizedBarrier",
+        "initialCheckpointCannotSkipOrInventRetainedDecisionBoundaries",
+        "backfillVerifiesLegacyDecisionBeforeSelectionAndRecoversIndexAfterSelection",
+        "failedIndexWriteCannotMaterializeCheckpointAndSelectedRecoveryRetries",
+        "persistsSelectedIndexAndReplaysIdentically",
+        "resolvesUnknownWriteFromDurableValueAndRejectsConflicts",
+        "metadataOnlyDoesNotCreateAnIndex"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.GcCoordinatorTest",
+      "methods": [
+        "requiresConfirmedLogicalOperationAndBothIndependentPinFloors",
+        "staleOwnerCannotObtainDeletionPermissionEvenAfterLogicalSelection"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.SnapshotPinManagerTest",
+      "methods": [
+        "onlyEventPinsExposeEventPromotionCapability",
+        "eventHistoryUsesAnIndependentDurableBoundaryAndRetainsItsExactRoot",
+        "eventHistoryRootPromotionSurvivesAnUnknownCasReplyAndIsIdempotent",
+        "eventHistoryRootPromotionRetriesWhenRenewWinsTheShardCas",
+        "closingAnEventHistoryPinDuringRootPromotionDoesNotResurrectItsProtection",
+        "eventPinRegistrationLosingTheGcFloorRaceFailsClosed",
+        "durableFloorsProtectExistingViewsAndRejectNewOlderViews",
+        "selectedMetadataDecisionUsesItsOwnSequenceBoundaryAndReference",
+        "auxiliaryPinRetainsStableSequenceWithoutASelectedRootAcrossReopen",
+        "auxiliaryPinProtectsStableBaseAndSelectedRootTogether",
+        "shardCodecKeepsLegacyFormatUnlessSequenceHasNoSelectedRoot",
+        "expiryAloneDoesNotReleaseProtectionAndRevocationFencesTheOldLease",
+        "terminalSlotCanBeReusedOnlyWithANewerFencingGeneration",
+        "unknownCasRepliesAreResolvedFromTheDurableSlot",
+        "registrationRacesFloorAdvanceOnTheSameShardCas",
+        "storedConfigurationIsImmutableAndShardRowsMustBeComplete",
+        "interruptedInitialShardCreationCanResumeBeforeTheConfigurationReadyMarker",
+        "unknownInitializationReservationCanBeRetried",
+        "unknownInitializationSealIsResolvedFromTheDurableWitness",
+        "definiteInitializationSealFailureKeepsItsCategory",
+        "cancelledOpenDoesNotCreateInitializationState",
+        "emptyStoreRequiresExplicitBootstrap",
+        "abandonedInitializationGenerationsAreBounded",
+        "legacyShardWithoutConfigurationFailsClosed",
+        "legacyConfigurationRequiresExplicitMigration",
+        "missingInitializationWitnessCannotReopenConfiguredShards",
+        "missingBothMetadataRecordsDoesNotBootstrapAnActiveRegistry",
+        "missingConfigurationCannotReinitializeNonEmptyShardState",
+        "missingConfigurationAndShardCannotChangeAnActiveRegistryBeforeOpenFails",
+        "lateInitialCreateCannotRestoreAMissingShardOfAnEstablishedRegistry",
+        "corruptedDurableShardFailsClosed",
+        "completionCasLosingToDurableRevocationCannotReportSuccess"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.codec.CommitControlMessagesTest",
+      "methods": [
+        "auxiliaryControlFormatRoundTripsWithoutChangingLegacyBytes",
+        "compactIdentitySurvivesOwnerPublicationAndAuthorizationUpdates",
+        "initialAndPendingPublicationStatesRoundTrip",
+        "authorizationBarrierPresenceIsIndependentOfControlFormatAndEventRegistry",
+        "missingRequiredFieldsAndCorruptNestedValuesAreRejected",
+        "manifestRootAcceptsItsMaximumAndRejectsTheNextByte",
+        "decoderRejectsControlMessagesAboveTheByteLimit"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.codec.SystemRecordKeyCodecTest",
+      "methods": [
+        "binaryIdentityRoundTripsForEveryRecordDomain",
+        "backfillCheckpointVersionsHaveOneRouteAndBoundedReverseSeek",
+        "leaseBindingRowsAreRoutedAndOrderedByLeaseKeyAndVersion",
+        "leaseStateVersionsShareTheLeaseRouteAndCanBeReverseSought",
+        "leaseBindingVersionSeekStopsAtOneExactKeyRoute",
+        "eventRevisionSeekStartsAtRequestedRevisionInEveryBucket",
+        "expiryCandidatesSortByDeadlineAndExposeHalfOpenWindowBounds",
+        "enforcesIdentityAndRowLengthBoundaries",
+        "candidateRowsReuseTheKvOrderedKeyBytesWithoutChangingEscapeFormat",
+        "kvRowsContinueToAllowAnEmptyLogicalKey",
+        "rejectsUnknownTypesInvalidSaltAndMalformedLengths"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseCommitControlStoreTest",
+      "methods": [
+        "authorizationBarrierTransitionIsIndependentOfEventRegistryFormat"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseMaterializationStoreTest",
+      "methods": [
+        "rejectsInvalidStorageDescriptorDuringTableGroupStartup",
+        "requiresSystemAndDataTablesToBelongToTheSameProvisionedGroup",
+        "requiresTheCurrentTableToBelongToTheHistoryGroup",
+        "rejectsOversizedUnknownQualifierBeforeAccessingItsBackingArray",
+        "rejectsOversizedCellsBeforeAccessingTheirBackingArrays"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordStoreScanTest",
+      "methods": [
+        "cancelledScanRetainsPhysicalOwnershipUntilHBaseSignalsCompletion",
+        "rejectsCompactRecordsBeforeTouchingAnUndeclaredTable",
+        "rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable",
+        "rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent",
+        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.hbase.storage.J52HistoryCollectionIT",
+      "methods": [
+        "preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts",
+        "resolvesLostDeleteAcknowledgementAndReplansWhenANewerNativeWriteWins",
+        "cancellationRetainsPhysicalProducerUntilLateDeleteDrains",
+        "rejectsPermissionFromAnotherPinRegistryBeforeDeletingData",
+        "rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.SystemTableBindingTest",
+      "methods": [
+        "acceptsTheExactDurableSingleVersionSystemTable",
+        "resultCapabilityIsExplicitAndDoesNotChangeLegacyValidation",
+        "compactRecordsRequireExplicitDescriptorCapability",
+        "rejectsTableFamilyProfileCategoryAndDurabilityMismatches",
+        "rejectsExpiringOrMultiVersionFamilies",
+        "rejectsDifferentRoutingParametersWithTheSameProfileId"
+      ]
+    }
+  ]
+}

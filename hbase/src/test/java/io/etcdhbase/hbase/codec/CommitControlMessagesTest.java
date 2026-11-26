@@ -78,6 +78,29 @@ class CommitControlMessagesTest {
   }
 
   @Test
+  void compactIdentitySurvivesOwnerPublicationAndAuthorizationUpdates() throws Exception {
+    var selected = CommitState.initial(FINGERPRINT, 5).claimOwner("owner-a", 10, 100)
+        .selectCompaction(3, INVOCATION);
+    assertEquals(java.util.Optional.of(INVOCATION), roundTrip(selected).compactOperationId());
+    assertStateEquals(selected, roundTrip(selected));
+    assertStateEquals(selected.heartbeat("owner-a", 1, 200),
+        roundTrip(selected.heartbeat("owner-a", 1, 200)));
+    var takeover = selected.claimOwner("owner-b", 101, 200);
+    assertEquals(java.util.Optional.of(INVOCATION), roundTrip(takeover).compactOperationId());
+    var next = new PublicationSlot(TXN, INVOCATION, 2, 0, 5, 1, 6, true,
+        ByteKey.copyOf(new byte[] {1}), FINGERPRINT);
+    var finalized = takeover.publish(next).finalizePublication(TXN);
+    assertEquals(java.util.Optional.of(INVOCATION), roundTrip(finalized).compactOperationId());
+    var barrier = selected.enableAuthorizationBarrier("owner-a", 1, 20);
+    assertStateEquals(barrier, roundTrip(barrier));
+    var wire = CommitProtos.CommitControlState.parseFrom(CommitControlMessages.encode(selected));
+    assertThrows(IllegalArgumentException.class, () -> CommitControlMessages.decode(
+        wire.toBuilder().setCompactOperationId(ByteString.copyFrom(new byte[15])).build().toByteArray()));
+    assertFalse(CommitProtos.CommitControlState.parseFrom(
+        CommitControlMessages.encode(CommitState.initial(FINGERPRINT, 5))).hasCompactOperationId());
+  }
+
+  @Test
   void initialAndPendingPublicationStatesRoundTrip() {
     CommitState initial = CommitState.initial(FINGERPRINT, 5);
     assertStateEquals(initial, roundTrip(initial));
@@ -178,6 +201,7 @@ class CommitControlMessagesTest {
     assertEquals(expected.finalizedRevision(), actual.finalizedRevision());
     assertEquals(expected.publication(), actual.publication());
     assertEquals(expected.compactRevision(), actual.compactRevision());
+    assertEquals(expected.compactOperationId(), actual.compactOperationId());
     assertEquals(expected.eventRegistryNamespace(), actual.eventRegistryNamespace());
     assertEquals(expected.pendingEventRegistryNamespace(), actual.pendingEventRegistryNamespace());
     assertEquals(expected.eventRegistryAttempts(), actual.eventRegistryAttempts());
