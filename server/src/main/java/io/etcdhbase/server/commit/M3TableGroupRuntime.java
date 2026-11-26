@@ -886,18 +886,14 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       var eventRetention = new io.etcdhbase.core.commit.EventHistoryRetention(pending.eventPins,
           stores.views(),
           new io.etcdhbase.core.commit.EventIndexBackfillReader(stores.records(), stores.manifests()));
-      // Background system-record GC resumes from durable per-shard checkpoints. It runs on the
-      // shared owner worker and yields whenever regular admission is unavailable.
-      var gcClosure = new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records(),
-          stores.records(), plan.system().profileFingerprint(),
-          plan.system().saltProfile().bucketCount());
-      var gcWorker = new GcCheckpointWorker(plan.source().tableGroupId(), gcClosure,
-          new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), owner,
-          plan.system().saltProfile().bucketCount(), GC_PAGE_RECORDS, GC_TIMEOUT_MILLIS,
-          plan.system().profileFingerprint(), pending.eventPins.registryIdentity(),
-          budgets, REQUEST_MEMORY, pending.worker, pending.leaseTimers, Clock.systemUTC(),
-          business.metrics());
-      pending.installGcWorker(gcWorker);
+      var compactions = new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(), Clock.systemUTC());
+      var gcCycle = new GcCheckpointCycle(plan.source().tableGroupId(), owner::currentToken, stores.control(),
+          new io.etcdhbase.core.commit.GcCoordinator(stores.control(), compactions, stores.pins(), Clock.systemUTC()),
+          eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records()),
+          new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), budgets, GcCheckpointCycle.MEMORY,
+          plan.system().saltProfile().bucketCount(), GC_PAGE_RECORDS, business.metrics());
+      pending.installGcWorker(new GcCheckpointWorker(pending.worker, pending.leaseTimers,
+          Duration.ofMillis(GC_TIMEOUT_MILLIS), gcCycle::run, business.metrics()));
       pending.installEventHistoryWorker(new EventHistoryWorker(
           pending.leaseTimers, owner::currentToken, history::run, business.metrics()));
       var selectedEvents = new SelectedSequenceReader(pending.eventPins, stores.control(),
@@ -1156,7 +1152,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
 
     synchronized void installGcWorker(GcCheckpointWorker worker) {
       Objects.requireNonNull(worker, "worker");
-      if (closing.get() || ownerLost) {
+      if (closing.get() || ownerLost || gcWorker != null) {
         throw new IllegalStateException("GC worker cannot be installed now");
       }
       gcWorker = worker;
@@ -1253,6 +1249,8 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       if (current != null) current.stop();
       EventHistoryWorker history = eventHistoryWorker;
       if (history != null) history.stop();
+      GcCheckpointWorker gc = gcWorker;
+      if (gc != null) gc.stop();
       SharedEventTailer tailer = eventTailer;
       if (tailer != null) tailer.close();
       else eventTailerReady.completeExceptionally(new BackendFailure(BackendFailure.Category.UNAVAILABLE));

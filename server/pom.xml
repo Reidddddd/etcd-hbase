@@ -24,6 +24,23 @@
   </build>
   <profiles>
     <profile>
+      <id>m5-j52-public</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <skipITs>false</skipITs>
+              <failIfNoTests>true</failIfNoTests>
+              <includes><include>**/GcCheckpointCycleIT.java</include></includes>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
       <id>m5-j51-public</id>
       <properties>
         <j03.skipWire>false</j03.skipWire>

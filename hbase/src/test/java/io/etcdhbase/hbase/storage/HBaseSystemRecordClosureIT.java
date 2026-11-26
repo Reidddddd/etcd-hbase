@@ -81,7 +81,7 @@ class HBaseSystemRecordClosureIT {
           CommitDecisionMessages.encode(decision), scope);
 
       var closure = new HBaseSystemRecordClosure(store);
-      var page = closure.collect(SystemRecordClosure.Domain.MANIFEST, Optional.empty(), 16, permit,
+      var page = closure.collect(SystemRecordClosure.Domain.MANIFEST, 0, Optional.empty(), 16, permit,
           scope).join();
 
       assertEquals(2, page.examined(), "both manifests are examined");
@@ -112,7 +112,7 @@ class HBaseSystemRecordClosureIT {
           new byte[] {9, 9, 9}, scope);
 
       var closure = new HBaseSystemRecordClosure(store);
-      assertThrows(CompletionException.class, () -> closure.collect(SystemRecordClosure.Domain.MANIFEST,
+      assertThrows(CompletionException.class, () -> closure.collect(SystemRecordClosure.Domain.MANIFEST, 0,
           Optional.empty(), 16, permit, scope).join(), "a corrupt proof must not publish a checkpoint");
       assertTrue(store.read(SystemRecordType.MANIFEST, target, scope).join().isPresent());
     }
@@ -149,7 +149,7 @@ class HBaseSystemRecordClosureIT {
       var permit = SystemRecordGcTestFixture.authorize(store, scope);
       for (var domain : List.of(SystemRecordClosure.Domain.CANDIDATE, SystemRecordClosure.Domain.EVENT,
           SystemRecordClosure.Domain.RESULT)) {
-        var page = closure.collect(domain, Optional.empty(), 16, permit, scope).join();
+        var page = closure.collect(domain, 0, Optional.empty(), 16, permit, scope).join();
         assertEquals(0, page.retired(), "durable references protect " + domain);
         assertTrue(page.examined() > 0);
       }

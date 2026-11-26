@@ -321,7 +321,7 @@ def _validate_task(task: dict[str, object], path: Path, repo: Path) -> None:
     task_id = _legal_task(task.get("task"))
     if (task.get("schema") != TASK_SCHEMA or task.get("status") != "executable"
             or task.get("scope") != "public"
-            or task.get("maven_reactor") != ("hbase" if task_id == "J52" else "server")):
+            or task.get("maven_reactor") != "server"):
         raise ReportError(f"task metadata is invalid in {path.name}")
     profile = task.get("execution_profile")
     if not isinstance(profile, str) or profile != f"m5-{task_id.lower()}-public":
@@ -505,6 +505,36 @@ J52_REQUIRED_TESTS = {
         'closingAWindowRetainsAResultStillReferencedByAManifest',
     },
 
+    ('core', 'surefire', 'io.etcdhbase.core.commit.GcCheckpointStoreTest'): {
+        'roundTripsEveryDomainAndMaximumGroupAndCursor',
+        'rejectsNonBooleanPresenceHiddenCursorMalformedUtf8AndTrailingBytes',
+        'rejectsTopologyChangesOnResumeAndTakeover',
+        'sameEpochResumesAndTakeoverPreservesProgressWhileStaleCasLoses',
+        'exhaustedSweepAndNewPermissionRevisitRetainedPrefixesWithoutAba',
+        'rejectsRowValueShardMismatchInClaimAndRead',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.GcCheckpointCycleTest'): {
+        'nonOwnerNeverAdmitsOrTouchesStorage',
+        'absentCompactWaitsWithoutCallingAuthorityOrCreatingCheckpoints',
+        'regularAdmissionFailureYieldsAndRecordsGcBacklogWithoutUsingReserve',
+        'authorizationFailureCannotCreateOrAdvanceACheckpoint',
+        'ownerLossAfterCollectionCannotAdvanceDurableProgressAndAdmissionWaitsForProducer',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.GcCheckpointWorkerTest'): {
+        'queuedCycleDoesNotStartIoAfterStop',
+        'stopWaitsForPhysicalProducerAndActualCleanupAfterLogicalCompletion',
+        'cancellationReachesLogicalIoButDoesNotPretendPhysicalDrain',
+        'physicalAndCleanupFailuresSurviveStop',
+        'executorRejectionClosesScopeAndRetriesWithoutLeakingOutstandingWork',
+        'schedulerRejectionIsVisibleAndStopBeforeStartCannotResurrectWorker',
+    },
+    ('server', 'failsafe', 'io.etcdhbase.server.commit.GcCheckpointCycleIT'): {
+        'realWorkerProtectsPinnedEventsThenRestartCollectsBothBucketsAndFencesOldCheckpoint',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.M3TableGroupRuntimeWorkerLifecycleTest'): {
+        'ownerLossStopsInstalledGcAndRejectsReplacement',
+    },
+
 }
 
 
@@ -517,15 +547,19 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "native-v3.5.23-compact-range-watch-oracle",
         "durable-system-retirement-and-reference-closure",
         "invocation-window-close-before-result-retirement",
+        "bucket-checkpoint-restart-pin-retention-and-physical-drain",
     }
     scenarios = task.get("scenarios", [])
     if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)
             or len(scenarios) != len(set(scenarios)) or set(scenarios) != expected_scenarios):
         raise ReportError("J52 storage scenarios are incomplete")
-    if task.get("maven_profiles") != [{"module": "hbase", "id": "m5-j52-public"}]:
+    if task.get("maven_profiles") != [
+            {"module": "hbase", "id": "m5-j52-public"},
+            {"module": "server", "id": "m5-j52-public"}]:
         raise ReportError("J52 must execute its real storage integration profile")
     _validate_maven_profile(repo, "hbase", "m5-j52-public")
-    found = _validate_suites(task, repo, "J52", J52_REQUIRED_TESTS, {"core", "hbase"})
+    _validate_maven_profile(repo, "server", "m5-j52-public")
+    found = _validate_suites(task, repo, "J52", J52_REQUIRED_TESTS, {"core", "hbase", "server"})
 
 
 def _verify_j52_oracle(commands: list[dict[str, object]], artifact_root: Path) -> None:
@@ -619,6 +653,7 @@ def _validate_maven_profile(repo: Path, module: str, profile_id: str) -> None:
         ("m5-j50-public", "hbase"): {"**/HBaseAuthControlIT.java"},
         ("m5-j50-public", "server"): {"**/M5AuthProcessIT.java", "**/M5AuthenticateGatewayProcessIT.java"},
         ("m5-j51-public", "server"): {"**/M5AuthenticateGatewayProcessIT.java"},
+        ("m5-j52-public", "server"): {"**/GcCheckpointCycleIT.java"},
         ("m5-j52-public", "hbase"): {
             "**/J52HistoryCollectionIT.java", "**/HBaseSystemRecordRetirementIT.java",
             "**/HBaseSystemRecordClosureIT.java", "**/InvocationWindowCloserIT.java",

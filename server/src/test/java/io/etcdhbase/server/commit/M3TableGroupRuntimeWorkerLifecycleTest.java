@@ -16,6 +16,22 @@ import org.junit.jupiter.api.Test;
 
 class M3TableGroupRuntimeWorkerLifecycleTest {
   @Test
+  void ownerLossStopsInstalledGcAndRejectsReplacement() {
+    try (var scope = RequestScope.withoutDeadline()) {
+      var pending = new M3TableGroupRuntime.Pending(scope, null, true);
+      var gc = mock(GcCheckpointWorker.class);
+      pending.installGcWorker(gc);
+      verify(gc).start();
+      assertThrows(IllegalStateException.class, () -> pending.installGcWorker(mock(GcCheckpointWorker.class)));
+      pending.ownerLost();
+      verify(gc).stop();
+      var late = mock(GcCheckpointWorker.class);
+      assertThrows(IllegalStateException.class, () -> pending.installGcWorker(late));
+      verify(late, never()).start();
+    }
+  }
+
+  @Test
   void closedTailerCanBeDetachedAndRecreatedWithoutRemovingTheNewGeneration() {
     try (var scope = RequestScope.withoutDeadline()) {
       var pending = new M3TableGroupRuntime.Pending(scope, null, true);

@@ -448,6 +448,40 @@ class M5J52ReportTest(unittest.TestCase):
                     with self.assertRaises(m5_report.ReportError):
                         m5_report._validate_maven_profile(repo, "hbase", "m5-j52-public")
 
+    def test_runtime_registry_cannot_omit_worker_or_use_the_hbase_only_reactor(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for class_name in ("GcCheckpointCycleIT", "GcCheckpointCycleTest", "GcCheckpointWorkerTest", "GcCheckpointStoreTest"):
+            task = json.loads(json.dumps(original))
+            task["tests"] = [test for test in task["tests"] if not test["class"].endswith(class_name)]
+            with self.subTest(missing=class_name), self.assertRaises(m5_report.ReportError):
+                m5_report._validate_task(task, path, repo)
+        task = json.loads(json.dumps(original))
+        task["maven_reactor"] = "hbase"
+        with self.assertRaises(m5_report.ReportError):
+            m5_report._validate_task(task, path, repo)
+        task = json.loads(json.dumps(original))
+        task["maven_profiles"] = task["maven_profiles"][:1]
+        with self.assertRaises(m5_report.ReportError):
+            m5_report._validate_task(task, path, repo)
+
+    def test_runtime_profile_cannot_skip_or_omit_the_real_worker_integration_suite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            pom = repo / "server/pom.xml"
+            pom.parent.mkdir(parents=True)
+            original = (Path(__file__).parents[2] / "server/pom.xml").read_text(encoding="utf-8")
+            pom.write_text(original, encoding="utf-8")
+            m5_report._validate_maven_profile(repo, "server", "m5-j52-public")
+            for invalid in (
+                    original.replace("<skipITs>false</skipITs>", "<skipITs>true</skipITs>"),
+                    original.replace("**/GcCheckpointCycleIT.java", "**/MissingIT.java")):
+                with self.subTest(profile=invalid):
+                    pom.write_text(invalid, encoding="utf-8")
+                    with self.assertRaises(m5_report.ReportError):
+                        m5_report._validate_maven_profile(repo, "server", "m5-j52-public")
+
 
 if __name__ == "__main__":
     unittest.main()
