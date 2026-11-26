@@ -481,6 +481,7 @@ J52_REQUIRED_TESTS = {
         'closedInvocationDoesNotRetainItsTransactionForever',
         'unselectedInvocationDoesNotProtectAbandonedTransactionRecords',
         'lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative',
+        'byteLimitedPageDoesNotEndCollectionBeforeTheContinuation',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
         'retirementReplacesTheValueAndBlocksEveryRecreationPath',
@@ -501,6 +502,7 @@ J52_REQUIRED_TESTS = {
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.InvocationWindowCloserIT'): {
         'closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay',
         'anUnresolvedInvocationIsRetainedRatherThanClosed',
+        'closingAWindowRetainsAResultStillReferencedByAManifest',
     },
 
 }

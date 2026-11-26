@@ -26,7 +26,10 @@ public final class InvocationWindowCloser {
     closure = new HBaseSystemRecordClosure(records);
   }
 
-  public enum Skip { STILL_PREPARING, ALREADY_CLOSED, NO_RESULT_REFERENCE, STILL_PROTECTED }
+  public enum Skip {
+    STILL_PREPARING, ALREADY_CLOSED, NO_RESULT_REFERENCE, STILL_PROTECTED,
+    RESULT_STILL_REFERENCED, RESULT_CHANGED
+  }
 
   public sealed interface Outcome permits Closed, Retained {
     ByteKey invocation();
@@ -35,6 +38,7 @@ public final class InvocationWindowCloser {
   /** The binding retains the non-replay proof, even if another durable reference keeps the result. */
   public record Closed(ByteKey invocation, boolean resultRetired) implements Outcome {}
 
+  /** RESULT skips retain the payload after closing the window; other skips leave the binding unchanged. */
   public record Retained(ByteKey invocation, Skip skip) implements Outcome {}
 
   public CompletableFuture<Outcome> close(ByteKey identity, SystemRecordRetirement.Permit permit,
@@ -68,7 +72,12 @@ public final class InvocationWindowCloser {
       // The CAS keeps the digest/non-replay binding before any result can disappear.
       return invocations.transition(binding, binding.closeQueryWindow(), scope).thenCompose(closed ->
           closure.collectResult(ResultDirectory.systemIdentity(ResultIdentity.from(binding)), permit, scope)
-              .thenApply(retired -> (Outcome) new Closed(identity, retired)));
+              .thenApply(result -> (Outcome) switch (result) {
+                case ABSENT -> new Closed(identity, false);
+                case RETIRED -> new Closed(identity, true);
+                case REFERENCED -> new Retained(identity, Skip.RESULT_STILL_REFERENCED);
+                case CHANGED -> new Retained(identity, Skip.RESULT_CHANGED);
+              }));
     });
   }
 

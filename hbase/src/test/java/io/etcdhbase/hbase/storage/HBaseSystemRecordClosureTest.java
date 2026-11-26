@@ -191,6 +191,25 @@ class HBaseSystemRecordClosureTest {
     }
   }
 
+  @Test
+  void byteLimitedPageDoesNotEndCollectionBeforeTheContinuation() {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
+      var records = mock(SystemRecordStore.class);
+      var first = new SystemRecordEntry(key(1), key(2));
+      var second = new SystemRecordEntry(key(3), key(4));
+      when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 16, 8L << 20, scope))
+          .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(first),
+              Optional.of(first.identity()), false, 2, 2, 1)));
+      when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.of(first.identity()), 14, 8L << 20, scope))
+          .thenReturn(CompletableFuture.completedFuture(page(second)));
+      var result = closure(records, mock(HBaseSystemRecordStore.class), DIGEST, 1)
+          .collect(SystemRecordClosure.Domain.INVOCATION, Optional.empty(), 16, permit(scope), scope).join();
+      assertEquals(2, result.examined());
+      assertEquals(Optional.of(second.identity()), result.lastIdentity());
+      assertTrue(result.exhausted());
+    }
+  }
+
   private static StoredRecord storedValue() {
     return StoredRecord.live(key(2), new StorageMetadata(2, 2, 1, 0, StorageMetadata.State.LIVE, 1), new byte[] {1});
   }

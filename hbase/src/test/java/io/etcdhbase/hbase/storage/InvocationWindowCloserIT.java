@@ -1,6 +1,7 @@
 package io.etcdhbase.hbase.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -109,12 +110,45 @@ class InvocationWindowCloserIT {
     }
   }
 
+  @Test
+  void closingAWindowRetainsAResultStillReferencedByAManifest() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var store = open(environment, scope);
+      var invocations = new InvocationService(new HBaseInvocationRepository(store));
+      var binding = selectedInvocation(invocations, scope);
+      var permit = SystemRecordGcTestFixture.authorize(store, scope);
+      var resultIdentity = ResultIdentity.from(binding);
+      var directory = ResultDirectory.create(resultIdentity, java.util.List.of(
+          new ResultPageReference(resultIdentity, 0, 8, 1, ByteKey.copyOf(new byte[32]))));
+      var resultRow = directory.systemIdentity();
+      var resultValue = ByteKey.copyOf(ResultMessages.encode(directory));
+      assertEquals(SystemRecordStore.CreateResult.CREATED,
+          store.createIfAbsent(SystemRecordType.RESULT, resultRow, resultValue, scope).join());
+      var root = io.etcdhbase.core.commit.ManifestRoot.createWithResult(binding.transactionId(),
+          binding.preparedOwnerEpoch(), binding.baseSequence(), binding.baseRevision(), 0, 0,
+          java.util.Optional.empty(), 0, 0, java.util.Optional.empty(), directory.reference());
+      store.createIfAbsent(SystemRecordType.MANIFEST, root.systemIdentity(),
+          ByteKey.copyOf(io.etcdhbase.hbase.codec.ManifestMessages.encode(root)), scope).join();
+      var identity = ByteKey.copyOf(binding.invocationId().bytes());
+      var outcome = new InvocationWindowCloser(store).close(identity, permit, scope).join();
+      assertAll(() -> assertInstanceOf(InvocationWindowCloser.Retained.class, outcome),
+          () -> assertEquals(java.util.Optional.of(resultValue), store.read(SystemRecordType.RESULT, resultRow, scope).join()),
+          () -> assertTrue(store.readTombstone(SystemRecordType.RESULT, resultRow, scope).join().isEmpty()));
+      assertEquals(InvocationWindowCloser.Skip.RESULT_STILL_REFERENCED,
+          ((InvocationWindowCloser.Retained) outcome).skip());
+      assertEquals(InvocationBinding.State.WINDOW_CLOSED, InvocationMessages.decode(
+          store.read(SystemRecordType.INVOCATION, identity, scope).join().orElseThrow().bytes()).state());
+    }
+  }
+
   private static InvocationBinding selectedInvocation(InvocationService invocations,
       RequestScope scope) {
     var prepared = proposedInvocation();
     var bound = invocations.bindOrJoin(prepared, scope).join();
-    var sealed = invocations.transition(bound, bound.seal(ByteKey.copyOf(new byte[] {1, 1})), scope)
-        .join();
+    var root = io.etcdhbase.core.commit.ManifestRoot.create(bound.transactionId(), bound.preparedOwnerEpoch(),
+        bound.baseSequence(), bound.baseRevision(), 0, 0, java.util.Optional.empty());
+    var sealed = invocations.transition(bound, bound.seal(root.systemIdentity()), scope).join();
     var resultIdentity = ResultIdentity.from(sealed);
     var directory = ResultDirectory.create(resultIdentity,
         java.util.List.of(new ResultPageReference(resultIdentity, 0, 8, 1,

@@ -61,17 +61,20 @@ public final class HBaseSystemRecordClosure implements SystemRecordClosure {
             progress.lastIdentity, exhausted));
   }
 
-  CompletableFuture<Boolean> collectResult(ByteKey identity, SystemRecordRetirement.Permit permit,
+  enum ResultCollection { ABSENT, REFERENCED, RETIRED, CHANGED }
+
+  CompletableFuture<ResultCollection> collectResult(ByteKey identity, SystemRecordRetirement.Permit permit,
       RequestScope scope) {
     return authority.validate(permit, scope).thenCompose(ignored ->
         records.read(SystemRecordType.RESULT, identity, scope)).thenCompose(found -> {
-      if (found.isEmpty()) return CompletableFuture.completedFuture(false);
+      if (found.isEmpty()) return CompletableFuture.completedFuture(ResultCollection.ABSENT);
       var entry = new SystemRecordEntry(identity, found.orElseThrow());
       return isReferenced(Domain.RESULT, entry, permit, new ProofBudget(), scope).thenCompose(referenced -> {
-        if (referenced) return CompletableFuture.completedFuture(false);
+        if (referenced) return CompletableFuture.completedFuture(ResultCollection.REFERENCED);
         return retirement.retire(SystemRecordType.RESULT, identity, entry.value(), permit,
             SystemRecordRetirement.Reason.CLOSED_INVOCATION_WINDOW, scope)
-            .thenApply(outcome -> outcome.retiredNow() || outcome.alreadyRetired());
+            .thenApply(outcome -> outcome.retiredNow() || outcome.alreadyRetired()
+                ? ResultCollection.RETIRED : ResultCollection.CHANGED);
       });
     });
   }

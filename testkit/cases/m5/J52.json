@@ -281,7 +281,8 @@
         "preparingInvocationProtectsRecordsBeforeItsManifestIsWritten",
         "closedInvocationDoesNotRetainItsTransactionForever",
         "unselectedInvocationDoesNotProtectAbandonedTransactionRecords",
-        "lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative"
+        "lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative",
+        "byteLimitedPageDoesNotEndCollectionBeforeTheContinuation"
       ]
     },
     {
@@ -316,7 +317,8 @@
       "class": "io.etcdhbase.hbase.storage.InvocationWindowCloserIT",
       "methods": [
         "closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay",
-        "anUnresolvedInvocationIsRetainedRatherThanClosed"
+        "anUnresolvedInvocationIsRetainedRatherThanClosed",
+        "closingAWindowRetainsAResultStillReferencedByAManifest"
       ]
     }
   ]
