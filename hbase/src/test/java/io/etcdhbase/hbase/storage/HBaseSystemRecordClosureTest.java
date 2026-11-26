@@ -87,7 +87,7 @@ class HBaseSystemRecordClosureTest {
   void followsReferencePagesIncludingAnEmptyTombstonePage() {
     try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
       var records = mock(SystemRecordStore.class);
-      var retirement = mock(SystemRecordRetirement.class);
+      var retirement = mock(HBaseSystemRecordStore.class);
       var candidate = new PreparedCandidate(TransactionId.create(), 1, 0, 1, storedValue());
       var target = new SystemRecordEntry(candidate.systemIdentity(), ByteKey.copyOf(ManifestMessages.encode(candidate)));
       var reference = ManifestPage.create(candidate.transactionId(), 0,
@@ -102,7 +102,7 @@ class HBaseSystemRecordClosureTest {
       when(records.scanBucket(eq(SystemRecordType.MANIFEST), eq(0), eq(Optional.of(cursor)), anyInt(), anyLong(), eq(scope)))
           .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(reference.systemIdentity(),
               ByteKey.copyOf(ManifestMessages.encode(reference))))));
-      var page = new HBaseSystemRecordClosure(records, retirement, DIGEST, 1)
+      var page = closure(records, retirement, DIGEST, 1)
           .collect(SystemRecordClosure.Domain.CANDIDATE, Optional.empty(), 16, permit(scope), scope).join();
       assertEquals(0, page.retired());
     }
@@ -112,13 +112,13 @@ class HBaseSystemRecordClosureTest {
   void resumesFromPhysicalCursorWithoutRestartingEarlierBuckets() {
     try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
       var records = mock(SystemRecordStore.class);
-      var retirement = mock(SystemRecordRetirement.class);
+      var retirement = mock(HBaseSystemRecordStore.class);
       var cursor = key(8);
       var next = key(9);
       when(records.bucket(SystemRecordType.INVOCATION, cursor)).thenReturn(1);
       when(records.scanBucket(SystemRecordType.INVOCATION, 1, Optional.of(cursor), 1, 8L << 20, scope))
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(), Optional.of(next), false, 10, 1, 1)));
-      var page = new HBaseSystemRecordClosure(records, retirement, DIGEST, 2)
+      var page = closure(records, retirement, DIGEST, 2)
           .collect(SystemRecordClosure.Domain.INVOCATION, Optional.of(cursor), 1, permit(scope), scope).join();
       assertEquals(0, page.examined());
       assertEquals(Optional.of(next), page.lastIdentity());
@@ -132,7 +132,7 @@ class HBaseSystemRecordClosureTest {
       var records = mock(SystemRecordStore.class);
       when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 1, 8L << 20, scope))
           .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(key(1), key(2)))));
-      var page = new HBaseSystemRecordClosure(records, mock(SystemRecordRetirement.class), DIGEST, 1)
+      var page = closure(records, mock(HBaseSystemRecordStore.class), DIGEST, 1)
           .collect(SystemRecordClosure.Domain.INVOCATION, Optional.empty(), 1, permit(scope), scope).join();
       assertEquals(1, page.examined());
       assertTrue(page.exhausted());
@@ -162,7 +162,7 @@ class HBaseSystemRecordClosureTest {
       when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 1, 8L << 20, scope))
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(entry),
               Optional.of(entry.identity()), false, 2, 2, 1)));
-      var result = new HBaseSystemRecordClosure(records, mock(SystemRecordRetirement.class), DIGEST, 1)
+      var result = closure(records, mock(HBaseSystemRecordStore.class), DIGEST, 1)
           .collect(SystemRecordClosure.Domain.INVOCATION, Optional.empty(), 1, permit(scope), scope).join();
       assertEquals(1, result.examined());
       assertFalse(result.exhausted());
@@ -172,7 +172,7 @@ class HBaseSystemRecordClosureTest {
   private static void assertCandidateRetirement(InvocationBinding.State state, int expectedRetired) {
     try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
       var records = mock(SystemRecordStore.class);
-      var retirement = mock(SystemRecordRetirement.class);
+      var retirement = mock(HBaseSystemRecordStore.class);
       var candidate = new PreparedCandidate(TransactionId.create(), 1, 0, 1, storedValue());
       var target = new SystemRecordEntry(candidate.systemIdentity(), ByteKey.copyOf(ManifestMessages.encode(candidate)));
       var invocation = InvocationBinding.restore(InvocationId.create(), DIGEST, DIGEST,
@@ -185,7 +185,7 @@ class HBaseSystemRecordClosureTest {
               ByteKey.copyOf(invocation.invocationId().bytes()), ByteKey.copyOf(InvocationMessages.encode(invocation))))));
       when(retirement.retire(any(), any(), any(), any(), any(), eq(scope)))
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordRetirement.Outcome(true, false, 0)));
-      var result = new HBaseSystemRecordClosure(records, retirement, DIGEST, 1)
+      var result = closure(records, retirement, DIGEST, 1)
           .collect(SystemRecordClosure.Domain.CANDIDATE, Optional.empty(), 16, permit(scope), scope).join();
       assertEquals(expectedRetired, result.retired());
     }
@@ -196,7 +196,10 @@ class HBaseSystemRecordClosureTest {
   }
 
   private static SystemRecordRetirement.Permit permit(RequestScope scope) {
-    return SystemRecordRetirement.Permit.issue(DIGEST, DIGEST, InvocationId.create(), 1, 10, 10, scope);
+    var permit = mock(SystemRecordRetirement.Permit.class);
+    when(permit.safeRevision()).thenReturn(10L);
+    when(permit.safeSequence()).thenReturn(10L);
+    return permit;
   }
 
   private static void stubEmptyScans(SystemRecordStore records, RequestScope scope) {
@@ -208,7 +211,7 @@ class HBaseSystemRecordClosureTest {
       SystemRecordEntry reference) {
     try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
       var records = mock(SystemRecordStore.class);
-      var retirement = mock(SystemRecordRetirement.class);
+      var retirement = mock(HBaseSystemRecordStore.class);
       var targetPage = page(target);
       stubEmptyScans(records, scope);
       when(records.scanBucket(eq(domain.recordType()), eq(0), any(), anyInt(), anyLong(), eq(scope)))
@@ -217,13 +220,19 @@ class HBaseSystemRecordClosureTest {
           .thenReturn(CompletableFuture.completedFuture(page(reference)));
       when(retirement.retire(any(), any(), any(), any(), any(), eq(scope)))
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordRetirement.Outcome(true, false, 0)));
-      var permit = SystemRecordRetirement.Permit.issue(DIGEST, DIGEST, InvocationId.create(),
-          1, 10, 10, scope);
-      var result = new HBaseSystemRecordClosure(records, retirement, DIGEST, 1)
+      var permit = permit(scope);
+      var result = closure(records, retirement, DIGEST, 1)
           .collect(domain, Optional.empty(), 16, permit, scope).join();
       assertEquals(1, result.examined());
       assertEquals(0, result.retired(), "a durable manifest reference must prevent retirement");
     }
+  }
+
+  private static HBaseSystemRecordClosure closure(SystemRecordStore records, HBaseSystemRecordStore retirement,
+      ByteKey profile, int buckets) {
+    var authority = mock(SystemRecordGcAuthority.class);
+    when(authority.validate(any(), any())).thenReturn(CompletableFuture.completedFuture(List.of()));
+    return new HBaseSystemRecordClosure(records, retirement, profile, buckets, authority);
   }
 
   private static SystemRecordPage page(SystemRecordEntry entry) {

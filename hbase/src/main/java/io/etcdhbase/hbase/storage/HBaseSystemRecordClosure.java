@@ -21,12 +21,18 @@ import java.util.function.Predicate;
 public final class HBaseSystemRecordClosure implements SystemRecordClosure {
   private static final long MAX_SCAN_BYTES = 8L << 20;
   private final SystemRecordStore records;
-  private final SystemRecordRetirement retirement;
+  private final HBaseSystemRecordStore retirement;
+  private final SystemRecordGcAuthority authority;
   private final ByteKey profile;
   private final int bucketCount;
 
-  public HBaseSystemRecordClosure(SystemRecordStore records, SystemRecordRetirement retirement,
-      ByteKey profile, int bucketCount) {
+  public HBaseSystemRecordClosure(HBaseSystemRecordStore store) {
+    this(store, store, store.profileFingerprint(), store.bucketCount(), new SystemRecordGcAuthority(store));
+  }
+
+  HBaseSystemRecordClosure(SystemRecordStore records, HBaseSystemRecordStore retirement,
+      ByteKey profile, int bucketCount, SystemRecordGcAuthority authority) {
+    this.authority = Objects.requireNonNull(authority, "authority");
     this.records = Objects.requireNonNull(records, "records");
     this.retirement = Objects.requireNonNull(retirement, "retirement");
     this.profile = Objects.requireNonNull(profile, "profile");
@@ -49,9 +55,25 @@ public final class HBaseSystemRecordClosure implements SystemRecordClosure {
     permit.requireUsable(profile, scope);
     var progress = new Progress(maximumRecords, afterIdentity);
     int start = afterIdentity.map(identity -> records.bucket(domain.recordType(), identity)).orElse(0);
-    return collectBucket(domain, start, afterIdentity, progress, permit, scope)
+    return authority.validate(permit, scope).thenCompose(ignored ->
+        collectBucket(domain, start, afterIdentity, progress, permit, scope))
         .thenApply(exhausted -> new Page(domain, progress.examined, progress.retired,
             progress.lastIdentity, exhausted));
+  }
+
+  CompletableFuture<Boolean> collectResult(ByteKey identity, SystemRecordRetirement.Permit permit,
+      RequestScope scope) {
+    return authority.validate(permit, scope).thenCompose(ignored ->
+        records.read(SystemRecordType.RESULT, identity, scope)).thenCompose(found -> {
+      if (found.isEmpty()) return CompletableFuture.completedFuture(false);
+      var entry = new SystemRecordEntry(identity, found.orElseThrow());
+      return isReferenced(Domain.RESULT, entry, permit, new ProofBudget(), scope).thenCompose(referenced -> {
+        if (referenced) return CompletableFuture.completedFuture(false);
+        return retirement.retire(SystemRecordType.RESULT, identity, entry.value(), permit,
+            SystemRecordRetirement.Reason.CLOSED_INVOCATION_WINDOW, scope)
+            .thenApply(outcome -> outcome.retiredNow() || outcome.alreadyRetired());
+      });
+    });
   }
 
   private CompletableFuture<Boolean> collectBucket(Domain domain, int bucket,
@@ -100,14 +122,21 @@ public final class HBaseSystemRecordClosure implements SystemRecordClosure {
     if (target.revision() >= permit.safeRevision() || target.sequence() >= permit.safeSequence()) {
       return CompletableFuture.completedFuture(true);
     }
-    return scanForReference(SystemRecordType.INVOCATION, reference -> {
-      var binding = InvocationMessages.decode(reference.value().bytes());
-      SystemRecordReferences.requireIdentity(reference.identity(), ByteKey.copyOf(binding.invocationId().bytes()));
-      return binding.transactionId().equals(target.transaction())
-          && binding.state() != InvocationBinding.State.WINDOW_CLOSED
-          && binding.state() != InvocationBinding.State.NOT_SELECTED;
-    }, budget, scope).thenCompose(found -> found ? CompletableFuture.completedFuture(true)
-        : scanRecordEdges(domain, entry, target, permit, budget, scope));
+    return authority.validate(permit, scope).thenCompose(protections -> {
+      if (protections.stream().anyMatch(protection -> protection.transactionId()
+          .filter(target.transaction()::equals).isPresent()
+              || protection.rootIdentity().filter(entry.identity()::equals).isPresent())) {
+        return CompletableFuture.completedFuture(true);
+      }
+      return scanForReference(SystemRecordType.INVOCATION, reference -> {
+        var binding = InvocationMessages.decode(reference.value().bytes());
+        SystemRecordReferences.requireIdentity(reference.identity(), ByteKey.copyOf(binding.invocationId().bytes()));
+        return binding.transactionId().equals(target.transaction())
+            && binding.state() != InvocationBinding.State.WINDOW_CLOSED
+            && binding.state() != InvocationBinding.State.NOT_SELECTED;
+      }, budget, scope).thenCompose(found -> found ? CompletableFuture.completedFuture(true)
+          : scanRecordEdges(domain, entry, target, permit, budget, scope));
+    });
   }
 
   private CompletableFuture<Boolean> scanRecordEdges(Domain domain, SystemRecordEntry entry,
@@ -199,7 +228,7 @@ public final class HBaseSystemRecordClosure implements SystemRecordClosure {
     private long bytes;
 
     private void reserveScan() {
-      if (++scans > 4096) throw new IllegalStateException("closure proof scan budget exceeded");
+      if (++scans > 8192) throw new IllegalStateException("closure proof scan budget exceeded");
     }
 
     private void charge(SystemRecordPage page) {

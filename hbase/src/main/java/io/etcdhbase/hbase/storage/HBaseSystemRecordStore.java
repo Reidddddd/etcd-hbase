@@ -6,6 +6,9 @@ import io.etcdhbase.core.commit.RetirementTombstone;
 import io.etcdhbase.core.commit.SystemRecordEntry;
 import io.etcdhbase.core.commit.SystemRecordPage;
 import io.etcdhbase.core.commit.SystemRecordRetirement;
+import io.etcdhbase.core.commit.SystemRecordRetirement.Permit;
+import io.etcdhbase.core.commit.SystemRecordRetirement.Reason;
+import io.etcdhbase.core.commit.SystemRecordRetirement.Outcome;
 import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.commit.SystemRecordType;
 import io.etcdhbase.core.error.BackendFailure;
@@ -48,7 +51,7 @@ import org.apache.hadoop.hbase.filter.NullComparator;
 import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
 
 /** Strong-read, exact-CAS adapter for immutable system records; borrowed connections stay shared. */
-public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRecordRetirement {
+public final class HBaseSystemRecordStore implements SystemRecordStore {
   public static final int MAX_RECORD_BYTES = 9 * 1024 * 1024;
   public static final int MAX_EXPIRY_CHECKPOINT_SCAN_BYTES = 1 << 20;
   private static final int MAX_SCAN_ENTRIES = 1024;
@@ -122,7 +125,13 @@ public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRe
     byte[] row = binding.row(type, identity);
     return execute(scope, logicalReadPayloadBytes(row), table -> table.get(
         new Get(row).setConsistency(Consistency.STRONG).addFamily(binding.family())))
-        .thenApply(result -> decode(result, binding.family()));
+        .thenApply(result -> {
+          if (!result.isEmpty() && isRetired(result, binding.family())) {
+            validatedTombstoneLength(result, new SystemRecordKeyCodec.DecodedKey(type, identity));
+            return Optional.<ByteKey>empty();
+          }
+          return decode(result, binding.family());
+        });
   }
 
   @Override
@@ -515,7 +524,11 @@ public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRe
 
   static Optional<ByteKey> decode(Result result, byte[] family) {
     if (result.isEmpty()) return Optional.empty();
-    if (isRetired(result, family)) return Optional.empty();
+    Cell marker = retirementMarker(result, family);
+    if (marker != null) {
+      SystemRecordRetirementMessages.decode(CellUtil.cloneValue(marker));
+      return Optional.empty();
+    }
     int expectedLength = validatedValueLength(result);
     // Check the already-decoded cell before getValue makes another potentially large copy.
     // This does not impose a bound on the HBase client's incoming RPC frame.
@@ -578,12 +591,18 @@ public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRe
     return length;
   }
 
+  HBaseCommitControlStore controlStore() {
+    return new HBaseCommitControlStore(connection, binding, auxiliarySupported, leaseBindingsSupported,
+        leaseExpiryCheckpointsSupported, eventRevisionIndexSupported, compactionSupported);
+  }
+
+  int bucketCount() { return binding.saltProfile().bucketCount(); }
+
   /** The profile this store's table group is bound to; a permit must match it exactly. */
   public ByteKey profileFingerprint() {
     return binding.profileFingerprint();
   }
 
-  @Override
   public CompletableFuture<Optional<RetirementTombstone>> readTombstone(
       SystemRecordType type, ByteKey identity, RequestScope scope) {
     requireTypeSupported(type);
@@ -606,8 +625,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRe
         });
   }
 
-  @Override
-  public CompletableFuture<Outcome> retire(SystemRecordType type, ByteKey identity, ByteKey expected,
+  CompletableFuture<Outcome> retire(SystemRecordType type, ByteKey identity, ByteKey expected,
       Permit permit, Reason reason, RequestScope scope) {
     requireTypeSupported(type);
     Objects.requireNonNull(identity, "identity");
@@ -615,6 +633,12 @@ public final class HBaseSystemRecordStore implements SystemRecordStore, SystemRe
     Objects.requireNonNull(permit, "permit");
     Objects.requireNonNull(reason, "reason");
     permit.requireUsable(binding.profileFingerprint(), scope);
+    return new SystemRecordGcAuthority(this).validate(permit, scope).thenCompose(ignored ->
+        retireValue(type, identity, expected, permit, reason, scope));
+  }
+
+  private CompletableFuture<Outcome> retireValue(SystemRecordType type, ByteKey identity, ByteKey expected,
+      Permit permit, Reason reason, RequestScope scope) {
     byte[] row = binding.row(type, identity);
     byte[] observed = checkedValue(expected);
     var tombstone = new RetirementTombstone(type, identity, digestOf(observed),

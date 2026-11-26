@@ -441,6 +441,8 @@ J52_REQUIRED_TESTS = {
         'rejectsCompactRecordsBeforeTouchingAnUndeclaredTable',
         'rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent',
         'rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent',
+        'validatesPhysicalRowOrderForLengthFramedIdentities',
+        'rejectsBackwardPhysicalRowsEvenWhenLogicalIdentitiesAreIncreasing',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.J52HistoryCollectionIT'): {
         'cancellationRetainsPhysicalProducerUntilLateDeleteDrains',
@@ -449,6 +451,58 @@ J52_REQUIRED_TESTS = {
         'rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization',
         'resolvesLostDeleteAcknowledgementAndReplansWhenANewerNativeWriteWins',
     },
+    ('core', 'surefire', 'io.etcdhbase.core.commit.SystemRecordRetirementPermitTest'): {
+        'ordinaryCallersCannotMintRetirementPermits',
+        'permitBindsProfileRegistryOperationGenerationAndBoundary',
+        'permitFailsClosedForAnotherProfileScopeOrAfterItsScopeCloses',
+        'permitRejectsAnUnaccountedGenerationOrNegativeBoundary',
+        'tombstoneRequiresAnExactDigestAndAccountedBoundary',
+    },
+    ('core', 'surefire', 'io.etcdhbase.core.commit.SystemRecordPageTest'): {
+        'preservesStorageOrderForLengthFramedIdentities',
+        'rejectsDuplicateIdentitiesRegardlessOfStorageEncoding',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.HBaseSystemRecordDecodeTest'): {
+        'rejectsOversizedCellBeforeCopyingItsValue',
+        'aMalformedRetirementPayloadCannotBeReportedAsAbsent',
+        'acceptsExpectedSingleCell',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementApiTest'): {
+        'publicStoreApiCannotBypassTheClosureDecision',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.HBaseSystemRecordClosureTest'): {
+        'retainsCandidateReferencedByManifestPage',
+        'retainsEventReferencedByEventPage',
+        'retainsResultReferencedByManifestRoot',
+        'followsReferencePagesIncludingAnEmptyTombstonePage',
+        'resumesFromPhysicalCursorWithoutRestartingEarlierBuckets',
+        'aFullLastBucketCanStillBeExhausted',
+        'preparingInvocationProtectsRecordsBeforeItsManifestIsWritten',
+        'closedInvocationDoesNotRetainItsTransactionForever',
+        'unselectedInvocationDoesNotProtectAbandonedTransactionRecords',
+        'lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative',
+    },
+    ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
+        'retirementReplacesTheValueAndBlocksEveryRecreationPath',
+        'retirementIsIdempotentForTheSamePlanAndRejectsAChangedValue',
+        'repeatedCreateCannotOverwriteAnExistingImmutableRecord',
+        'absentCasCannotReplaceALiveValue',
+        'staleRetirementCannotDeleteAReplacementValue',
+        'bucketScanAdvancesAcrossTombstonesAndReturnsFollowingLiveRecord',
+        'permitIsUnusableAfterItsScopeClosesAndForAnotherProfile',
+        'staleOwnerCannotRetireOrCloseAnInvocationWindow',
+        'durableRegistryDamageRejectsAnAlreadyIssuedPermit',
+    },
+    ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordClosureIT'): {
+        'keepsAReferencedManifestAndCollectsAnUnreferencedOne',
+        'corruptReferenceStopsPageWithoutRetirement',
+        'manifestPagesAndRootsProtectRealCandidateEventAndResultRecords',
+    },
+    ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.InvocationWindowCloserIT'): {
+        'closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay',
+        'anUnresolvedInvocationIsRetainedRatherThanClosed',
+    },
+
 }
 
 
@@ -459,6 +513,8 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "logical-selection-and-unknown-outcome", "independent-pin-floors",
         "exact-kv-version-delete-and-baseline-retention", "late-materializer-new-write-and-cancellation",
         "native-v3.5.23-compact-range-watch-oracle",
+        "durable-system-retirement-and-reference-closure",
+        "invocation-window-close-before-result-retirement",
     }
     scenarios = task.get("scenarios", [])
     if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)
@@ -561,7 +617,10 @@ def _validate_maven_profile(repo: Path, module: str, profile_id: str) -> None:
         ("m5-j50-public", "hbase"): {"**/HBaseAuthControlIT.java"},
         ("m5-j50-public", "server"): {"**/M5AuthProcessIT.java", "**/M5AuthenticateGatewayProcessIT.java"},
         ("m5-j51-public", "server"): {"**/M5AuthenticateGatewayProcessIT.java"},
-        ("m5-j52-public", "hbase"): {"**/J52HistoryCollectionIT.java"},
+        ("m5-j52-public", "hbase"): {
+            "**/J52HistoryCollectionIT.java", "**/HBaseSystemRecordRetirementIT.java",
+            "**/HBaseSystemRecordClosureIT.java", "**/InvocationWindowCloserIT.java",
+        },
     }.get((profile_id, module), set())
     if not required.issubset(includes):
         raise ReportError(f"execution profile does not include required IT: {module}/{profile_id}")

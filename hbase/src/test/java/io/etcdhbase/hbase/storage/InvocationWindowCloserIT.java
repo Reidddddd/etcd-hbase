@@ -51,9 +51,8 @@ class InvocationWindowCloserIT {
       var store = open(environment, scope);
       var invocations = new InvocationService(new HBaseInvocationRepository(store));
       var binding = selectedInvocation(invocations, scope);
-      var permit = SystemRecordRetirement.Permit.issue(store.profileFingerprint(),
-          ByteKey.copyOf(new byte[32]), InvocationId.create(), 1, 16, 16, scope);
-      var closer = new InvocationWindowCloser(store, invocations, store);
+      var permit = SystemRecordGcTestFixture.authorize(store, scope);
+      var closer = new InvocationWindowCloser(store);
 
       var identity = ByteKey.copyOf(binding.invocationId().bytes());
       var resultIdentity = ResultIdentity.from(binding);
@@ -64,7 +63,6 @@ class InvocationWindowCloserIT {
       assertEquals(SystemRecordStore.CreateResult.CREATED,
           store.createIfAbsent(SystemRecordType.RESULT, resultRow,
               ByteKey.copyOf(ResultMessages.encode(directory)), scope).join());
-      // Passing null lets the page derive its own digest, which the directory reference must match.
       var outcome = closer.close(identity, permit, scope).join();
       var closed = assertInstanceOf(InvocationWindowCloser.Closed.class, outcome);
 
@@ -95,9 +93,8 @@ class InvocationWindowCloserIT {
       var invocations = new InvocationService(new HBaseInvocationRepository(store));
       var preparing = proposedInvocation();
       invocations.bindOrJoin(preparing, scope).join();
-      var permit = SystemRecordRetirement.Permit.issue(store.profileFingerprint(),
-          ByteKey.copyOf(new byte[32]), InvocationId.create(), 1, 16, 16, scope);
-      var closer = new InvocationWindowCloser(store, invocations, store);
+      var permit = SystemRecordGcTestFixture.authorize(store, scope);
+      var closer = new InvocationWindowCloser(store);
 
       var identity = ByteKey.copyOf(preparing.invocationId().bytes());
       var outcome = assertInstanceOf(InvocationWindowCloser.Retained.class,
@@ -156,9 +153,9 @@ class InvocationWindowCloserIT {
         .setValue("etcdhbase.m0.salt-bucket-count", Integer.toString(SALT.profile().bucketCount()))
         .setValue("etcdhbase.m0.salt-width-bytes", Integer.toString(SALT.profile().saltWidthBytes()))
         .setValue("etcdhbase.m0.record-categories", RECORD_CATEGORIES)
-        .setValue("etcdhbase.m4.auxiliary-format", "1")
+        .setValue("etcdhbase.m4.auxiliary-format", "3")
         .build();
-    environment.create(table, descriptor, SALT.splitKeys().toArray(byte[][]::new));
+    environment.create(table, SystemRecordGcTestFixture.descriptor(binding, descriptor), SALT.splitKeys().toArray(byte[][]::new));
     return binding;
   }
 }

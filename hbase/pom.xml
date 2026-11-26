@@ -522,6 +522,9 @@
               <failIfNoTests>true</failIfNoTests>
               <includes combine.self="override">
                 <include>**/J52HistoryCollectionIT.java</include>
+                <include>**/HBaseSystemRecordRetirementIT.java</include>
+                <include>**/HBaseSystemRecordClosureIT.java</include>
+                <include>**/InvocationWindowCloserIT.java</include>
               </includes>
               <forkCount>1</forkCount>
               <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>

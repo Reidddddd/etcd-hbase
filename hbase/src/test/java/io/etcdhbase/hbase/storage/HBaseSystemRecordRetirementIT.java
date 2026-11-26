@@ -222,6 +222,56 @@ class HBaseSystemRecordRetirementIT {
     }
   }
 
+  @Test
+  void staleOwnerCannotRetireOrCloseAnInvocationWindow() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var store = open(environment, scope);
+      var permit = permit(store, scope);
+      var identity = ByteKey.copyOf(new byte[] {44});
+      var value = ByteKey.copyOf(new byte[] {45});
+      store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      var binding = io.etcdhbase.core.commit.InvocationBinding.begin(InvocationId.create(),
+          AUTHORIZATION_DIGEST, AUTHORIZATION_DIGEST, io.etcdhbase.core.commit.TransactionId.create(), 1, 0, 1);
+      var invocation = ByteKey.copyOf(binding.invocationId().bytes());
+      var encoded = ByteKey.copyOf(io.etcdhbase.hbase.codec.InvocationMessages.encode(binding));
+      store.createIfAbsent(SystemRecordType.INVOCATION, invocation, encoded, scope).join();
+      var control = store.controlStore();
+      var observed = control.read(scope).join().orElseThrow();
+      long takeover = observed.state().ownerLeaseDeadlineEpochMillis() + 1;
+      assertTrue(control.compareAndSet(observed,
+          observed.state().claimOwner("successor", takeover, takeover + 180_000), scope).join());
+      assertThrows(CompletionException.class, () -> store.retire(SystemRecordType.WORKSET, identity,
+          value, permit, SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join());
+      assertThrows(CompletionException.class, () -> new InvocationWindowCloser(store)
+          .close(invocation, permit, scope).join());
+      assertEquals(Optional.of(value), store.read(SystemRecordType.WORKSET, identity, scope).join());
+      assertEquals(Optional.of(encoded), store.read(SystemRecordType.INVOCATION, invocation, scope).join());
+      assertTrue(store.readTombstone(SystemRecordType.WORKSET, identity, scope).join().isEmpty());
+    }
+  }
+
+  @Test
+  void durableRegistryDamageRejectsAnAlreadyIssuedPermit() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var store = open(environment, scope);
+      var permit = permit(store, scope);
+      var identity = ByteKey.copyOf(new byte[] {46});
+      var value = ByteKey.copyOf(new byte[] {47});
+      store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      // The persisted SPIN configuration is deliberately corrupted after legitimate issuance.
+      var configuration = ByteKey.copyOf(new byte[] {0x53, 0x50, 0x49, 0x4e, 0x01, 0x00});
+      var expected = store.read(SystemRecordType.SNAPSHOT_PIN, configuration, scope).join();
+      assertTrue(store.compareAndSet(SystemRecordType.SNAPSHOT_PIN, configuration, expected,
+          ByteKey.copyOf(new byte[] {0}), scope).join());
+      assertThrows(CompletionException.class, () -> store.retire(SystemRecordType.WORKSET, identity,
+          value, permit, SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join());
+      assertEquals(Optional.of(value), store.read(SystemRecordType.WORKSET, identity, scope).join());
+      assertTrue(store.readTombstone(SystemRecordType.WORKSET, identity, scope).join().isEmpty());
+    }
+  }
+
   private static HBaseSystemRecordStore open(M1TestEnvironment environment, RequestScope scope)
       throws Exception {
     SystemTableBinding binding = createRetirementCapableSystemTable(environment);
@@ -229,11 +279,10 @@ class HBaseSystemRecordRetirementIT {
         scope).join();
   }
 
-  /** Production permits come from the GC coordinator; this fixture issues an equivalent one. */
+  /** Uses the same durable GC authority as the production consumer. */
   private static SystemRecordRetirement.Permit permit(HBaseSystemRecordStore store,
-      RequestScope scope) {
-    return SystemRecordRetirement.Permit.issue(store.profileFingerprint(), AUTHORIZATION_DIGEST,
-        InvocationId.create(), 1, 4, 4, scope);
+      RequestScope scope) throws io.etcdhbase.core.error.BackendFailure {
+    return SystemRecordGcTestFixture.authorize(store, scope);
   }
 
   private static SystemTableBinding createRetirementCapableSystemTable(
@@ -256,9 +305,9 @@ class HBaseSystemRecordRetirementIT {
         .setValue("etcdhbase.m0.salt-bucket-count", Integer.toString(salt.profile().bucketCount()))
         .setValue("etcdhbase.m0.salt-width-bytes", Integer.toString(salt.profile().saltWidthBytes()))
         .setValue("etcdhbase.m0.record-categories", RECORD_CATEGORIES)
-        .setValue("etcdhbase.m4.auxiliary-format", "1")
+        .setValue("etcdhbase.m4.auxiliary-format", "3")
         .build();
-    environment.create(table, descriptor, salt.splitKeys().toArray(byte[][]::new));
+    environment.create(table, SystemRecordGcTestFixture.descriptor(binding, descriptor), salt.splitKeys().toArray(byte[][]::new));
     return binding;
   }
 }

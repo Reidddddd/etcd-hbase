@@ -19,6 +19,8 @@ public final class EventHistoryRetention {
     this.backfill = Objects.requireNonNull(backfill, "backfill");
   }
 
+  EventHistoryPinManager pins() { return pins; }
+
   /**
    * Opens a fresh auxiliary barrier before raising registration floors. The caller owns the
    * scope until collection drains; Compact and exact root references still constrain deletion.

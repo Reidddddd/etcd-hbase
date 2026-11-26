@@ -23,7 +23,9 @@
     "independent-pin-floors",
     "late-materializer-new-write-and-cancellation",
     "logical-selection-and-unknown-outcome",
-    "native-v3.5.23-compact-range-watch-oracle"
+    "native-v3.5.23-compact-range-watch-oracle",
+    "durable-system-retirement-and-reference-closure",
+    "invocation-window-close-before-result-retirement"
   ],
   "tests": [
     {
@@ -196,7 +198,9 @@
         "rejectsCompactRecordsBeforeTouchingAnUndeclaredTable",
         "rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable",
         "rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent",
-        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent"
+        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent",
+        "validatesPhysicalRowOrderForLengthFramedIdentities",
+        "rejectsBackwardPhysicalRowsEvenWhenLogicalIdentitiesAreIncreasing"
       ]
     },
     {
@@ -222,6 +226,97 @@
         "rejectsTableFamilyProfileCategoryAndDurabilityMismatches",
         "rejectsExpiringOrMultiVersionFamilies",
         "rejectsDifferentRoutingParametersWithTheSameProfileId"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.SystemRecordRetirementPermitTest",
+      "methods": [
+        "ordinaryCallersCannotMintRetirementPermits",
+        "permitBindsProfileRegistryOperationGenerationAndBoundary",
+        "permitFailsClosedForAnotherProfileScopeOrAfterItsScopeCloses",
+        "permitRejectsAnUnaccountedGenerationOrNegativeBoundary",
+        "tombstoneRequiresAnExactDigestAndAccountedBoundary"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.SystemRecordPageTest",
+      "methods": [
+        "preservesStorageOrderForLengthFramedIdentities",
+        "rejectsDuplicateIdentitiesRegardlessOfStorageEncoding"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordDecodeTest",
+      "methods": [
+        "rejectsOversizedCellBeforeCopyingItsValue",
+        "aMalformedRetirementPayloadCannotBeReportedAsAbsent",
+        "acceptsExpectedSingleCell"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementApiTest",
+      "methods": [
+        "publicStoreApiCannotBypassTheClosureDecision"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordClosureTest",
+      "methods": [
+        "retainsCandidateReferencedByManifestPage",
+        "retainsEventReferencedByEventPage",
+        "retainsResultReferencedByManifestRoot",
+        "followsReferencePagesIncludingAnEmptyTombstonePage",
+        "resumesFromPhysicalCursorWithoutRestartingEarlierBuckets",
+        "aFullLastBucketCanStillBeExhausted",
+        "preparingInvocationProtectsRecordsBeforeItsManifestIsWritten",
+        "closedInvocationDoesNotRetainItsTransactionForever",
+        "unselectedInvocationDoesNotProtectAbandonedTransactionRecords",
+        "lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT",
+      "methods": [
+        "retirementReplacesTheValueAndBlocksEveryRecreationPath",
+        "retirementIsIdempotentForTheSamePlanAndRejectsAChangedValue",
+        "repeatedCreateCannotOverwriteAnExistingImmutableRecord",
+        "absentCasCannotReplaceALiveValue",
+        "staleRetirementCannotDeleteAReplacementValue",
+        "bucketScanAdvancesAcrossTombstonesAndReturnsFollowingLiveRecord",
+        "permitIsUnusableAfterItsScopeClosesAndForAnotherProfile",
+        "staleOwnerCannotRetireOrCloseAnInvocationWindow",
+        "durableRegistryDamageRejectsAnAlreadyIssuedPermit"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordClosureIT",
+      "methods": [
+        "keepsAReferencedManifestAndCollectsAnUnreferencedOne",
+        "corruptReferenceStopsPageWithoutRetirement",
+        "manifestPagesAndRootsProtectRealCandidateEventAndResultRecords"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.hbase.storage.InvocationWindowCloserIT",
+      "methods": [
+        "closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay",
+        "anUnresolvedInvocationIsRetainedRatherThanClosed"
       ]
     }
   ]

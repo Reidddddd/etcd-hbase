@@ -2,7 +2,7 @@
 
 ## 1. 交付范围
 
-本次提供内部逻辑 Compact 选择器、KV 历史回收许可和 HBase 精确版本删除。`CompactionService` 复用现有控制行与 system 记录，`GcCoordinator` 复用持久 snapshot pin 注册表。`KV.Compact` 已通过 `CompactGateway` 装配到既有 owner lane，与发布和恢复串行执行；J52 保持进行中。
+本次提供内部逻辑 Compact 选择器、KV 历史回收许可、系统记录引用闭包和 HBase 精确退休原语。`CompactionService` 复用现有控制行与 system 记录，`GcCoordinator` 复用持久 snapshot pin 注册表。`KV.Compact` 已通过 `CompactGateway` 装配到既有 owner lane，与发布和恢复串行执行；J52 保持进行中。
 
 `physical=false` 返回本次逻辑选择结果。当前运行时尚未装配历史枚举与持久检查点，`physical=true` 在逻辑选择成功后返回 `UNAVAILABLE`；该错误不撤销已持久化的逻辑压缩边界，也不表示物理回收完成。请求取消或超时后不返回成功响应。
 
@@ -20,7 +20,7 @@
 
 ## 2. KV 历史回收约束
 
-回收许可绑定 profile、pin 注册表、逻辑操作及本轮 scope。所有分片的 revision/sequence 注册 floor 确认后，活动 pin 继续分别限制两个边界。回收器重新核对 owner 和控制身份；HBase 适配器再次核对本表组实际 pin 注册表。许可只允许处理冗余 KV 物化版本。
+回收许可绑定 profile、pin 注册表、逻辑操作及本轮 scope。所有分片的 revision/sequence 注册 floor 确认后，活动 pin 继续分别限制两个边界。回收器重新核对 owner 和控制身份；HBase 适配器再次核对本表组实际 pin 注册表。`HistoryGcPermit` 只允许处理冗余 KV 物化版本；系统记录使用独立许可。
 
 HISTORY 每个 key 保留 safe revision 处的最后基线、墓碑和更高版本。旧行用完整 guard 条件，在同一 `RowMutations` 中写入 RETIRED guard 并精确删除 `m/v`，随后强一致确认。退休证明继续阻止迟到 materializer 重插。
 
@@ -28,18 +28,28 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 每次 HISTORY 页最多处理 64 个版本，NATIVE 页最多删除 64 个版本。当前入口处理显式枚举的单个 key；持久 bucket/key 检查点、后台调度和预算准入仍待装配。保留的最小 guard 会持续占用空间，不能把它描述为常数磁盘容量。
 
-## 3. 尚未交付的完整 Compact 能力
+## 3. 系统记录退休与结果窗口
+
+`GcCoordinator.authorizeSystemRecords` 先确认事件及 backfill 保护，再推进 KV 注册 floor。签发的不可变许可绑定 profile、两个 sealed 注册表及配置、event namespace、owner 与授权屏障、选定 Compact 操作、独立 revision/sequence 边界、确切根保护和本轮带 deadline 的 scope。普通调用方不能自行构造许可。消费端从目标 HBase 表重新读取控制行、LOGICAL 操作、实际注册表与已收尾 backfill checkpoint；缺失、损坏或身份变化均停止本页，不把原调用方提供的端口当作持久权威。
+
+`HBaseSystemRecordClosure` 绑定实际 store 及其路由，保留 invocation 的不可重放证明。其余域按真实身份解码，检查存活 invocation、decision、事件 revision 索引、manifest root/directory/page 和 result directory 的引用；PREPARING/SEALED 事务在后续引用写出前也受保护。确切 pin 根和事务独立于两个 floor 保留。证明扫描完整分页，损坏或超出扫描、行数及字节预算时返回失败，不发布可恢复的成功游标。分页沿实际 HBase 行序推进，墓碑与 lookahead 仍计入物理工作量。
+
+`InvocationWindowCloser` 使用同一 store 的实际 invocation repository。它先核验许可、边界及确切保护，再用 CAS 关闭结果窗口；保留摘要及不可重放绑定，随后通过引用闭包处理 RESULT。仍被 manifest 或其他目录引用的结果继续保留，不能因窗口已关闭就直接删除。
+
+退休用同一 `CheckAndMutate(RowMutations)` 比较完整旧值和墓碑缺失，移除旧 value，并保留 `r={0}` guard 与严格编码的 `t` 墓碑。两者使用保留的内部 timestamp `Long.MAX_VALUE - 1`，使迟到的旧 absent-CAS 不能让记录复活；它不是 KV revision 或应用墙钟。目标 HBase 的 future timestamp 策略必须允许该保留值；拒绝时退休失败，不声明已删除。MiniCluster 覆盖此协议，真实目标环境的 timestamp 配置尚未验收。
+
+## 4. 尚未交付的完整 Compact 能力
 
 以下内容属于已批准的 J52，当前仍需实现：
 
 - 跨副本 owner RPC 转发、前后台身份与调度生命周期，以及真实目标环境的管理权限验收。
-- 结合 `EventHistoryRetention`、tailer/backfill 和确切根引用的事件、索引、manifest、候选、决定及结果回收闭包。
+- 系统记录闭包的运行时调度、维护任务准入及持久检查点装配；当前只交付可独立验证的内部入口。
 - invocation 结果窗口的运行时关闭、在途结果查询的持久保护，以及不可重放的最小证明。
 - 持久 GC 检查点、重启接管，以及 `physical=false` 的工作登记和 `physical=true` 的完成等待、超时后后台继续。
 
 因此，本次不设置物理完成水位，不将逻辑 CAS 或 KV 页删除解释为完整 physical 完成，也不宣称 J52 验收通过。批准设计中的 physical 投影仍要求全部应回收记录完成精确删除和强读确认；HFile 空间释放另由 HBase compaction 完成。
 
-## 4. 格式与验证入口
+## 5. 格式与验证入口
 
 system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compaction-format=1`。没有该能力的 store 拒绝读写 Compact 记录或安装控制身份。已有控制格式增加 optional `compact_operation_id`；旧版严格解码器会拒绝该字段，不能把启用后的 writer 回退称为兼容。J55 仍需接入受控升级与启动能力校验。
 
@@ -49,7 +59,7 @@ system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compactio
 scripts/verify/m5.sh --scope public --task J52 --artifact-root .artifacts/m5/j52-storage-run
 ```
 
-入口运行确定性逻辑/pin 单测、HISTORY/NATIVE MiniCluster 和固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。它登记在 M5 CI 中，运行报告明确保留第 3 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
+入口运行确定性逻辑/pin/许可及扫描单测、HISTORY/NATIVE MiniCluster、系统记录与结果窗口 MiniCluster，以及固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。它登记在 M5 CI 中，运行报告明确保留第 4 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
 
 网关的请求授权、真实 gRPC token 传递、CAS 前失效及取消排空回归属于 server 单测，由 J09 的完整构建执行；不将 server 套件登记到只构建 hbase 的 J52 存储门禁。真实 Kerberos/HBase 的 `ADMIN` 授予与撤销反例属于 J04 的安全后端集成测试；替身网关测试和实际后端 ACL 测试各自保留验证范围。
 

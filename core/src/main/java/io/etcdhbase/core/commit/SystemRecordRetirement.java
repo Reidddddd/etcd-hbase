@@ -3,11 +3,10 @@ package io.etcdhbase.core.commit;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.request.RequestScope;
 import java.util.Objects;
-import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
+import java.util.List;
 
 /**
- * The one conservative authority for retiring system records whose references have all cleared.
+ * Immutable permission and outcome models for system-record retirement.
  *
  * <p>A retire never deletes a value on its own. The record first moves to a durable RETIRED state
  * that carries the maintenance generation which retired it, and only then is its payload removed.
@@ -17,12 +16,13 @@ import java.util.concurrent.CompletableFuture;
  * <p>See {@code docs/specs/2026-11-20-m5-auth-gc-lifecycle-design.md} §6.2 (per-domain retention
  * rules) and §6.3 (retirement state and generation for directories and system records).
  */
-public interface SystemRecordRetirement {
+public final class SystemRecordRetirement {
+  private SystemRecordRetirement() {}
   /** Why a record was considered unreachable; recorded for diagnosis, never used as permission. */
-  enum Reason {
+  public enum Reason {
     COMPACTED_HISTORY("compacted-history"),
     UNREFERENCED_CLOSURE("unreferenced-closure"),
-    EXPIRED_INVOCATION("expired-invocation");
+    CLOSED_INVOCATION_WINDOW("closed-invocation-window");
 
     private final String label;
 
@@ -32,11 +32,11 @@ public interface SystemRecordRetirement {
   }
 
   /**
-   * A permit for one bounded retirement page. It binds the table group profile, the pin registry
-   * that confirmed the boundary, the Compact operation, and the caller's scope, so a permit can
+   * A permit for one collection scope. It binds the table group profile, both sealed pin registries,
+   * the owner and authorization fences, and the selected Compact operation, so a permit can
    * never be replayed against another table group or after its scope closed.
    */
-  final class Permit {
+  public static final class Permit {
     private final ByteKey profile;
     private final ByteKey registryIdentity;
     private final InvocationId operationId;
@@ -45,26 +45,29 @@ public interface SystemRecordRetirement {
     private final long safeSequence;
     private final RequestScope scope;
 
-    /** Only the GC authority may mint a permit; reachability and durability stay separated. */
-    public static Permit issue(ByteKey profile, ByteKey registryIdentity, InvocationId operationId,
-        long generation, long safeRevision, long safeSequence, RequestScope scope) {
-      return new Permit(profile, registryIdentity, operationId, generation, safeRevision,
-          safeSequence, scope);
-    }
+    private final Authority authority;
+    private final List<SnapshotGcBoundary.Protection> protections;
 
-    private Permit(ByteKey profile, ByteKey registryIdentity, InvocationId operationId, long generation,
-        long safeRevision, long safeSequence, RequestScope scope) {
+    Permit(ByteKey profile, ByteKey registryIdentity, InvocationId operationId, long generation,
+        long safeRevision, long safeSequence, Authority authority,
+        List<SnapshotGcBoundary.Protection> protections, RequestScope scope) {
       this.profile = Objects.requireNonNull(profile, "profile");
       this.registryIdentity = Objects.requireNonNull(registryIdentity, "registryIdentity");
       this.operationId = Objects.requireNonNull(operationId, "operationId");
       this.scope = Objects.requireNonNull(scope, "scope");
-      if (generation <= 0 || safeRevision < 0 || safeSequence < 0) {
+      this.authority = Objects.requireNonNull(authority, "authority");
+      this.protections = List.copyOf(protections);
+      if (profile.length() != 32 || registryIdentity.length() != 16
+          || generation <= 0 || safeRevision < 0 || safeSequence < 0) {
         throw new IllegalArgumentException("invalid system-record retirement permit");
       }
       this.generation = generation;
       this.safeRevision = safeRevision;
       this.safeSequence = safeSequence;
     }
+
+    public Authority authority() { return authority; }
+    public List<SnapshotGcBoundary.Protection> protections() { return protections; }
 
     public ByteKey profile() { return profile; }
     public ByteKey registryIdentity() { return registryIdentity; }
@@ -83,7 +86,7 @@ public interface SystemRecordRetirement {
   }
 
   /** The durable state of one record identity after a retirement attempt. */
-  record Outcome(boolean retiredNow, boolean alreadyRetired, long visiblePayloadBytes) {
+  public record Outcome(boolean retiredNow, boolean alreadyRetired, long visiblePayloadBytes) {
     public Outcome {
       if (retiredNow && alreadyRetired) {
         throw new IllegalArgumentException("a retirement is either new or already applied");
@@ -94,18 +97,19 @@ public interface SystemRecordRetirement {
     }
   }
 
-  /**
-   * Reads the retirement tombstone for one identity, if any. A present tombstone means the record
-   * is retired even when its payload has already been removed.
-   */
-  CompletableFuture<Optional<RetirementTombstone>> readTombstone(
-      SystemRecordType type, ByteKey identity, RequestScope scope);
-
-  /**
-   * Retires one identity only if its exact current value still matches {@code expected}. The
-   * caller decides reachability; this method decides durability. A stale expectation returns a
-   * non-retired outcome instead of deleting a value the caller did not observe.
-   */
-  CompletableFuture<Outcome> retire(SystemRecordType type, ByteKey identity, ByteKey expected,
-      Permit permit, Reason reason, RequestScope scope);
+  /** Immutable identities needed for independent validation by the target backend. */
+  public record Authority(CommitOwnerService.OwnerToken owner, long authorizationGeneration,
+      SnapshotPinConfiguration kvConfiguration, SnapshotPinConfiguration eventConfiguration,
+      ByteKey eventRegistryIdentity, ByteKey eventNamespace) {
+    public Authority {
+      Objects.requireNonNull(owner, "owner");
+      Objects.requireNonNull(kvConfiguration, "kvConfiguration");
+      Objects.requireNonNull(eventConfiguration, "eventConfiguration");
+      Objects.requireNonNull(eventRegistryIdentity, "eventRegistryIdentity");
+      Objects.requireNonNull(eventNamespace, "eventNamespace");
+      if (authorizationGeneration < 0 || eventRegistryIdentity.length() != 16 || eventNamespace.length() != 16) {
+        throw new IllegalArgumentException("invalid retirement authority identity");
+      }
+    }
+  }
 }

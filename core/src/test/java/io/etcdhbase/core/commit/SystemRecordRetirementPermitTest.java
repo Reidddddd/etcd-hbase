@@ -2,6 +2,9 @@ package io.etcdhbase.core.commit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.request.RequestScope;
@@ -17,10 +20,18 @@ class SystemRecordRetirementPermitTest {
   private static final ByteKey REGISTRY = ByteKey.copyOf(new byte[16]);
 
   @Test
+  void ordinaryCallersCannotMintRetirementPermits() {
+    assertEquals(0, SystemRecordRetirement.Permit.class.getConstructors().length);
+    assertTrue(Arrays.stream(SystemRecordRetirement.Permit.class.getMethods()).noneMatch(method ->
+        Modifier.isStatic(method.getModifiers()) && method.getReturnType() == SystemRecordRetirement.Permit.class),
+        "GC authority must be the only permit issuer");
+  }
+
+  @Test
   void permitBindsProfileRegistryOperationGenerationAndBoundary() {
     try (var scope = RequestScope.withTimeout(Duration.ofSeconds(5))) {
       var operation = InvocationId.create();
-      var permit = SystemRecordRetirement.Permit.issue(PROFILE, REGISTRY, operation, 3, 7, 5, scope);
+      var permit = permit(PROFILE, REGISTRY, operation, 3, 7, 5, scope);
       assertEquals(PROFILE, permit.profile());
       assertEquals(REGISTRY, permit.registryIdentity());
       assertEquals(operation, permit.operationId());
@@ -34,7 +45,7 @@ class SystemRecordRetirementPermitTest {
   @Test
   void permitFailsClosedForAnotherProfileScopeOrAfterItsScopeCloses() {
     RequestScope scope = RequestScope.withTimeout(Duration.ofSeconds(5));
-    var permit = SystemRecordRetirement.Permit.issue(
+    var permit = permit(
         PROFILE, REGISTRY, InvocationId.create(), 1, 4, 4, scope);
     try (var other = RequestScope.withTimeout(Duration.ofSeconds(1))) {
       assertThrows(IllegalStateException.class, () -> permit.requireUsable(PROFILE, other),
@@ -53,11 +64,11 @@ class SystemRecordRetirementPermitTest {
   @Test
   void permitRejectsAnUnaccountedGenerationOrNegativeBoundary() {
     try (var scope = RequestScope.withTimeout(Duration.ofSeconds(5))) {
-      assertThrows(IllegalArgumentException.class, () -> SystemRecordRetirement.Permit.issue(
+      assertThrows(IllegalArgumentException.class, () -> permit(
           PROFILE, REGISTRY, InvocationId.create(), 0, 4, 4, scope));
-      assertThrows(IllegalArgumentException.class, () -> SystemRecordRetirement.Permit.issue(
+      assertThrows(IllegalArgumentException.class, () -> permit(
           PROFILE, REGISTRY, InvocationId.create(), 1, -1, 4, scope));
-      assertThrows(IllegalArgumentException.class, () -> SystemRecordRetirement.Permit.issue(
+      assertThrows(IllegalArgumentException.class, () -> permit(
           PROFILE, REGISTRY, InvocationId.create(), 1, 4, -1, scope));
     }
   }
@@ -85,4 +96,13 @@ class SystemRecordRetirementPermitTest {
         SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, 9, 4));
     assertEquals(SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, tombstone.reason());
   }
+  private static SystemRecordRetirement.Permit permit(ByteKey profile, ByteKey registry,
+      InvocationId operation, long generation, long revision, long sequence, RequestScope scope) {
+    var configuration = new SnapshotPinConfiguration(1, 2, Duration.ofMinutes(1));
+    var authority = new SystemRecordRetirement.Authority(new CommitOwnerService.OwnerToken("owner", 1), 0,
+        configuration, configuration, REGISTRY, REGISTRY);
+    return new SystemRecordRetirement.Permit(profile, registry, operation, generation, revision, sequence,
+        authority, java.util.List.of(), scope);
+  }
+
 }

@@ -66,8 +66,7 @@ class HBaseSystemRecordClosureIT {
       SystemTableBinding binding = createSystemTable(environment);
       HBaseSystemRecordStore store = HBaseSystemRecordStore.open(
           environment.factory(), environment.identity(), binding, scope).join();
-      var permit = SystemRecordRetirement.Permit.issue(store.profileFingerprint(),
-          AUTHORIZATION_DIGEST, InvocationId.create(), 1, 16, 16, scope);
+      var permit = SystemRecordGcTestFixture.authorize(store, scope);
 
       var referenced = manifest(1);
       var orphan = manifest(2);
@@ -81,8 +80,7 @@ class HBaseSystemRecordClosureIT {
       create(store, SystemRecordType.DECISION, ByteKey.copyOf(ByteBuffer.allocate(Long.BYTES).putLong(decision.sequence()).array()),
           CommitDecisionMessages.encode(decision), scope);
 
-      var closure = new HBaseSystemRecordClosure(store, store, store.profileFingerprint(),
-          SALT_BUCKETS);
+      var closure = new HBaseSystemRecordClosure(store);
       var page = closure.collect(SystemRecordClosure.Domain.MANIFEST, Optional.empty(), 16, permit,
           scope).join();
 
@@ -98,14 +96,13 @@ class HBaseSystemRecordClosureIT {
   }
 
   @Test
-  void undecodableReferenceRetainsDataInsteadOfCollectingIt() throws Exception {
+  void corruptReferenceStopsPageWithoutRetirement() throws Exception {
     try (M1TestEnvironment environment = M1TestEnvironment.start(1);
         RequestScope scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
       SystemTableBinding binding = createSystemTable(environment);
       HBaseSystemRecordStore store = HBaseSystemRecordStore.open(
           environment.factory(), environment.identity(), binding, scope).join();
-      var permit = SystemRecordRetirement.Permit.issue(store.profileFingerprint(),
-          AUTHORIZATION_DIGEST, InvocationId.create(), 1, 16, 16, scope);
+      var permit = SystemRecordGcTestFixture.authorize(store, scope);
 
       var root = manifest(3);
       var target = root.systemIdentity();
@@ -114,8 +111,7 @@ class HBaseSystemRecordClosureIT {
       create(store, SystemRecordType.DECISION, ByteKey.copyOf(new byte[] {6, 6}),
           new byte[] {9, 9, 9}, scope);
 
-      var closure = new HBaseSystemRecordClosure(store, store, store.profileFingerprint(),
-          SALT_BUCKETS);
+      var closure = new HBaseSystemRecordClosure(store);
       assertThrows(CompletionException.class, () -> closure.collect(SystemRecordClosure.Domain.MANIFEST,
           Optional.empty(), 16, permit, scope).join(), "a corrupt proof must not publish a checkpoint");
       assertTrue(store.read(SystemRecordType.MANIFEST, target, scope).join().isPresent());
@@ -149,9 +145,8 @@ class HBaseSystemRecordClosureIT {
       create(store, SystemRecordType.MANIFEST, candidates.systemIdentity(), ManifestMessages.encode(candidates), scope);
       create(store, SystemRecordType.MANIFEST, events.systemIdentity(), ManifestMessages.encode(events), scope);
       create(store, SystemRecordType.MANIFEST, root.systemIdentity(), root, scope);
-      var closure = new HBaseSystemRecordClosure(store, store, store.profileFingerprint(), SALT_BUCKETS);
-      var permit = SystemRecordRetirement.Permit.issue(store.profileFingerprint(), AUTHORIZATION_DIGEST,
-          InvocationId.create(), 1, 16, 16, scope);
+      var closure = new HBaseSystemRecordClosure(store);
+      var permit = SystemRecordGcTestFixture.authorize(store, scope);
       for (var domain : List.of(SystemRecordClosure.Domain.CANDIDATE, SystemRecordClosure.Domain.EVENT,
           SystemRecordClosure.Domain.RESULT)) {
         var page = closure.collect(domain, Optional.empty(), 16, permit, scope).join();
@@ -199,7 +194,7 @@ class HBaseSystemRecordClosureIT {
         .setValue("etcdhbase.m0.record-categories", RECORD_CATEGORIES)
         .setValue("etcdhbase.m4.auxiliary-format", "3")
         .build();
-    environment.create(table, binding.withEventRevisionIndexCapability(descriptor), salt.splitKeys().toArray(byte[][]::new));
+    environment.create(table, SystemRecordGcTestFixture.descriptor(binding, descriptor), salt.splitKeys().toArray(byte[][]::new));
     return binding;
   }
 }

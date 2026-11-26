@@ -52,6 +52,8 @@ public final class EventHistoryPinManager {
   /** Identifies the immutable registry generation whose protections must be recovered. */
   public ByteKey registryIdentity() { return registry.registryIdentity(); }
 
+  SnapshotPinConfiguration configuration() { return registry.configuration(); }
+
   /** Storage namespace, distinct from the registry's generated identity; staging is not selected yet. */
   public Optional<ByteKey> namespace() { return namespace; }
 

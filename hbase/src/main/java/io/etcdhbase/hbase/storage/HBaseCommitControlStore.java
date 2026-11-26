@@ -37,7 +37,7 @@ public final class HBaseCommitControlStore implements CommitControlStore {
   private final boolean eventRevisionIndexSupported;
   private final boolean compactionSupported;
 
-  private HBaseCommitControlStore(AsyncConnection connection, SystemTableBinding binding,
+  HBaseCommitControlStore(AsyncConnection connection, SystemTableBinding binding,
       boolean auxiliarySupported, boolean leaseBindingsSupported,
       boolean leaseExpiryCheckpointsSupported, boolean eventRevisionIndexSupported,
       boolean compactionSupported) {
