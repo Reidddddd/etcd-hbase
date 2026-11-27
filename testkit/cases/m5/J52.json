@@ -30,7 +30,10 @@
     "native-v3.5.23-compact-range-watch-oracle",
     "durable-system-retirement-and-reference-closure",
     "invocation-window-close-before-result-retirement",
-    "bucket-checkpoint-restart-pin-retention-and-physical-drain"
+    "bucket-checkpoint-restart-pin-retention-and-physical-drain",
+    "durable-kv-bucket-version-progress-and-target-completion",
+    "physical-rpc-old-pin-owner-lane-and-exact-delete",
+    "cancelled-rpc-owner-process-death-and-logical-only-resume"
   ],
   "tests": [
     {
@@ -219,9 +222,10 @@
         "cancellationRetainsPhysicalProducerUntilLateDeleteDrains",
         "rejectsPermissionFromAnotherPinRegistryBeforeDeletingData",
         "rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization",
-        "enumeratesEveryKeyInBoundedPagesThatPhysicalCompactCanDrain",
+        "enumeratesEveryKeyWithBucketLocalExclusiveResumePoints",
         "doesNotEndEnumerationInsideAHighChurnKey",
-        "resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder"
+        "resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder",
+        "boundsKeyEnumerationToOneDurableBucketInBothLayouts"
       ]
     },
     {
@@ -400,7 +404,9 @@
         "eventHistoryWorkerStartsImmediatelyAndStartupReadinessWaitsForTailer",
         "readinessRequiresEventPinsAHealthyWorkerAndAnOpenTailer",
         "ownerLossBeforeEventHistoryWorkerInstallationRejectsLateWorker",
-        "ownerLossBeforeInstallationRejectsBothWorkers"
+        "ownerLossBeforeInstallationRejectsBothWorkers",
+        "historyMaintenanceRunsWithoutLeaseAndOwnerLossRejectsLateInstallation",
+        "failedHistoryStopStillClosesWaitersSystemGcAndTailerOnOwnerLoss"
       ]
     },
     {
@@ -432,11 +438,86 @@
       ]
     },
     {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.HistoryGcCheckpointStoreTest",
+      "methods": [
+        "encodingDistinguishesAnEmptyBusinessKeyFromAnAbsentCursor",
+        "rejectsTruncatedOversizedAndTrailingCheckpointBytes",
+        "restartResumesTheExactActiveVersionPageAfterAnUnknownIntentAcknowledgement",
+        "incompleteVersionsCannotAdvanceTheKeyOrPublishCompletion",
+        "aNewOwnerFencesOldProgressButKeepsTheConfirmedCursor",
+        "strongerFloorsWaitForTheNextSweepAndKeepThePreviousCompletionReceipt",
+        "foreignBucketKeysCannotBecomeDurableWorkOrCompletion",
+        "permitRestrictionCannotWidenBoundsOrEscapeItsScope",
+        "aDifferentProfileOrPinRegistryCannotClaimHistoryProgress"
+      ]
+    },
+    {
       "module": "server",
       "kind": "surefire",
-      "class": "io.etcdhbase.server.commit.PhysicalHistoryCollectionTest",
+      "class": "io.etcdhbase.server.commit.HistoryGcCycleTest",
       "methods": [
-        "drainsEveryVersionPageBeforeReportingAKeyComplete"
+        "persistsActiveKeyIntentBeforeAnyDeletionCanStart",
+        "resumesOnlyOneConfirmedVersionPageUnderTheFrozenSafeBounds",
+        "unknownDeletionCannotAdvanceTheDurableVersionCursor",
+        "onlyBackendEofAfterTheLastCompleteKeyPublishesTheBucketWatermark",
+        "ownerLossBeforeDeleteReadbackCannotPublishProgress",
+        "maintenanceAdmissionDoesNotReleaseUntilTheActualProducerDrains",
+        "unavailableMaintenanceCapacityStartsNoStorageWork"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.HistoryGcCompletionScanTest",
+      "methods": [
+        "conservativePinBoundsDoNotCompleteTheRequestedTarget",
+        "defaultZeroCountersAreNotACompletedZeroRevisionSweep",
+        "bothRevisionAndSequenceAndEveryBucketMustBeConfirmed"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.PhysicalCompactionWaiterTest",
+      "methods": [
+        "waitsForDurableProgressAndGivesEachCallerAnIndependentScan",
+        "cancellationDetachesTheRpcButRetainsAdmissionUntilTheRealReadDrains",
+        "deadlineTerminatesEvenWhenTheReadFutureNeverResponds",
+        "successWaitsForCleanupAndCleanupFailureCannotFollowASuccessResponse",
+        "shutdownRejectsWaitersAndPreventsQueuedPollsFromStartingStorageWork"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "failsafe",
+      "class": "io.etcdhbase.server.J52PhysicalCompactIT",
+      "methods": [
+        "physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts",
+        "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.CompactGatewayTest",
+      "methods": [
+        "emptyEncodedZeroRequestCanEnterTheRealOwnerLane",
+        "realLaneRejectionReturnsAnErrorInsteadOfHanging",
+        "dispatchedServiceScopeCannotSendSuccessAfterTheRpcScopeIsCancelled",
+        "realLaneSuccessWaitsForServiceCleanup",
+        "realLaneCleanupFailureCannotFollowAnAlreadySentSuccess",
+        "logicalSelectionReturnsTheResponseRevisionAndItsServingHeader",
+        "physicalWaitDoesNotHoldTheOwnerLane",
+        "physicalCompactWaitsForItsOwnBoundedHistoryDeletion",
+        "physicalCompactReportsFailureWhenHistoryDeletionFails",
+        "physicalCompactFailsClosedWhenNoHistoryCollectorIsWired",
+        "logicalCompactStillSucceedsWithoutAHistoryCollector",
+        "repeatedCompactIsReportedAsCompactedRatherThanSucceeding",
+        "futureCompactIsRejectedWithoutAdvancingTheBoundary",
+        "missingOwnerFailsClosedWithoutAttemptingAControlWrite",
+        "cancelledRequestDoesNotSendAResponse"
       ]
     }
   ]

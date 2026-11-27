@@ -24,7 +24,7 @@ class GcCheckpointWorkerTest {
       var calls = new AtomicInteger();
       var worker = new GcCheckpointWorker(queued::add, timer, Duration.ofSeconds(5), scope -> {
         calls.incrementAndGet();
-        return CompletableFuture.completedFuture(GcCheckpointCycle.Outcome.IDLE);
+        return CompletableFuture.completedFuture(GcCheckpointWorker.Outcome.IDLE);
       }, new RequestMetrics());
       worker.start();
       var task = queued.poll(5, TimeUnit.SECONDS);
@@ -50,7 +50,7 @@ class GcCheckpointWorkerTest {
         scope.startIfOpen(() -> scope.trackPhysicalProducer(physical));
         scope.registerScopedCleanup(cleanupStarted::countDown, cleanup);
         started.countDown();
-        return CompletableFuture.completedFuture(GcCheckpointCycle.Outcome.PROGRESSED);
+        return CompletableFuture.completedFuture(GcCheckpointWorker.Outcome.PROGRESSED);
       }, new RequestMetrics());
       worker.start();
       assertTrue(started.await(5, TimeUnit.SECONDS));
@@ -70,10 +70,10 @@ class GcCheckpointWorkerTest {
     try (var timer = new ScheduledThreadPoolExecutor(1)) {
       var started = new CountDownLatch(1);
       var physical = new CompletableFuture<Void>();
-      var logical = new CompletableFuture<GcCheckpointCycle.Outcome>();
+      var logical = new CompletableFuture<GcCheckpointWorker.Outcome>();
       var worker = new GcCheckpointWorker(Runnable::run, timer, Duration.ofSeconds(5), scope -> {
         scope.startIfOpen(() -> scope.trackPhysicalProducer(physical));
-        scope.registerCleanup(() -> logical.complete(GcCheckpointCycle.Outcome.IDLE));
+        scope.registerCleanup(() -> logical.complete(GcCheckpointWorker.Outcome.IDLE));
         started.countDown();
         return logical;
       }, new RequestMetrics());
@@ -97,7 +97,7 @@ class GcCheckpointWorkerTest {
         scope.startIfOpen(() -> scope.trackPhysicalProducer(physical));
         scope.registerScopedCleanup(() -> {}, cleanup);
         started.countDown();
-        return CompletableFuture.completedFuture(GcCheckpointCycle.Outcome.IDLE);
+        return CompletableFuture.completedFuture(GcCheckpointWorker.Outcome.IDLE);
       }, new RequestMetrics());
       worker.start();
       assertTrue(started.await(5, TimeUnit.SECONDS));

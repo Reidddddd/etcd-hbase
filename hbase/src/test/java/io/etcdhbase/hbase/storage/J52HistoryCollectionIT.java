@@ -78,7 +78,7 @@ class J52HistoryCollectionIT {
   @AfterAll static void stop() throws Exception { if (environment != null) environment.close(); }
 
   @Test
-  void enumeratesEveryKeyInBoundedPagesThatPhysicalCompactCanDrain() throws Exception {
+  void enumeratesEveryKeyWithBucketLocalExclusiveResumePoints() throws Exception {
     try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
       var group = group(StorageTableBinding.Layout.HISTORY, scope);
       var keys = List.of(ByteKey.copyOf(new byte[] {1}), ByteKey.copyOf(new byte[] {2}),
@@ -89,29 +89,20 @@ class J52HistoryCollectionIT {
       group.compact(4, scope);
       var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
           Clock.systemUTC()).authorizeHistory(OWNER, scope));
-
       var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
           environment.identity(), group.system, group.primary, group.current, scope));
-
-      var first = await(enumerator.nextKeys(permit, Optional.empty(), 2, scope));
-      assertEquals(2, first.keys().size(), "the page budget bounds enumeration");
-      assertFalse(first.exhausted());
-      var rest = await(enumerator.nextKeys(permit, first.lastKey(), 2, scope));
-      assertEquals(1, rest.keys().size(), "the resume point is exclusive");
-      assertTrue(rest.exhausted());
-      var all = new java.util.ArrayList<ByteKey>(first.keys());
-      all.addAll(rest.keys());
-      assertEquals(new java.util.TreeSet<>(keys), new java.util.TreeSet<>(all),
-          "every business key is enumerated exactly once");
-
-      // A physical Compact then deletes through the same permit, confirming actual work.
-      var collector = await(HBaseHistoryCollector.open(environment.factory(), environment.identity(),
-          group.system, group.primary, group.current, PIN_CONFIGURATION, scope));
-      int deleted = 0;
-      for (var key : all) {
-        deleted += await(collector.collectKey(permit, key, 0, 64, scope)).deletedVersions();
+      var all = new java.util.HashSet<ByteKey>();
+      for (int bucket = 0; bucket < SALT.profile().bucketCount(); bucket++) {
+        Optional<ByteKey> after = Optional.empty();
+        while (true) {
+          var next = await(enumerator.nextKey(permit, bucket, after, scope));
+          if (next.isEmpty()) break;
+          assertTrue(all.add(next.orElseThrow()), "each complete key is visited exactly once");
+          assertEquals(bucket, group.primary.codec().bucket(next.orElseThrow()));
+          after = next;
+        }
       }
-      assertTrue(deleted > 0, "physical completion requires real deletions");
+      assertEquals(new java.util.HashSet<>(keys), all);
     }
   }
 
@@ -130,10 +121,11 @@ class J52HistoryCollectionIT {
           Clock.systemUTC()).authorizeHistory(OWNER, scope));
       var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
           environment.identity(), group.system, group.primary, group.current, scope));
-      var first = await(enumerator.nextKeys(permit, Optional.empty(), 2, scope));
-      if (first.keys().size() < keys.size()) {
-        assertFalse(first.exhausted(), "a row window cannot prove the following key is absent");
-      }
+      var first = await(enumerator.nextKey(permit, 0, Optional.empty(), scope));
+      assertEquals(Optional.of(keys.getFirst()), first);
+      var second = await(enumerator.nextKey(permit, 0, first, scope));
+      assertEquals(Optional.of(keys.getLast()), second, "all 40 versions of the prior key must be skipped");
+      assertTrue(await(enumerator.nextKey(permit, 0, second, scope)).isEmpty());
     }
   }
 
@@ -155,10 +147,42 @@ class J52HistoryCollectionIT {
           Clock.systemUTC()).authorizeHistory(OWNER, scope));
       var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
           environment.identity(), group.system, group.primary, group.current, scope));
-      var first = await(enumerator.nextKeys(permit, Optional.empty(), 1, scope));
-      assertEquals(List.of(firstKey), first.keys());
-      var second = await(enumerator.nextKeys(permit, first.lastKey(), 1, scope));
-      assertEquals(List.of(nextKey), second.keys(), "salt order is independent of logical key order");
+      var first = await(enumerator.nextKey(permit, 0, Optional.empty(), scope));
+      assertEquals(Optional.of(firstKey), first);
+      assertTrue(await(enumerator.nextKey(permit, 0, first, scope)).isEmpty());
+      assertEquals(Optional.of(nextKey), await(enumerator.nextKey(permit, 3, Optional.empty(), scope)),
+          "the next bucket begins with its own exclusive cursor");
+      assertThrows(IllegalArgumentException.class, () -> enumerator.nextKey(permit, 3, first, scope));
+    }
+  }
+
+  @Test
+  void boundsKeyEnumerationToOneDurableBucketInBothLayouts() throws Exception {
+    for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
+      try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+        var group = group(layout, scope);
+        var candidates = java.util.stream.IntStream.range(1, 256)
+            .mapToObj(value -> ByteKey.copyOf(new byte[] {(byte) value})).toList();
+        var inBucket = candidates.stream().filter(key -> group.primary.codec().bucket(key) == 0)
+            .limit(2).toList();
+        var other = candidates.stream().filter(key -> group.primary.codec().bucket(key) == 1)
+            .findFirst().orElseThrow();
+        for (var key : inBucket) group.append(false, scope, key);
+        group.append(false, scope, other);
+        group.compact(4, scope);
+        var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
+            Clock.systemUTC()).authorizeHistory(OWNER, scope));
+        var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
+            environment.identity(), group.system, group.primary, group.current, scope));
+        var first = await(enumerator.nextKey(permit, 0, Optional.empty(), scope));
+        assertEquals(Optional.of(inBucket.getFirst()), first);
+        var second = await(enumerator.nextKey(permit, 0, first, scope));
+        assertEquals(Optional.of(inBucket.getLast()), second);
+        assertTrue(await(enumerator.nextKey(permit, 0, second, scope)).isEmpty());
+        assertEquals(Optional.of(other), await(enumerator.nextKey(permit, 1, Optional.empty(), scope)));
+        assertThrows(IllegalArgumentException.class,
+            () -> enumerator.nextKey(permit, 0, Optional.of(other), scope));
+      }
     }
   }
 

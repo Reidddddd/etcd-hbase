@@ -293,15 +293,8 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         verifyExistingLeaseLimits(plan, activation, budgets, stores, authorization,
             business.lease().orElseThrow(), startup);
       }
-      // Open the physical-Compute storage once, under the startup scope, so an unavailable backend
-      // fails startup instead of silently degrading physical=true into a logical success.
-      var physicalHistory = java.util.Optional.<CompactGateway.HistoryCollection>of(
-          new PhysicalHistoryCollection(
-              await(io.etcdhbase.hbase.storage.HBaseHistoryKeyEnumerator.open(connections, identity,
-                  plan.system(), plan.primary(), plan.current(), startup), startup),
-              await(io.etcdhbase.hbase.storage.HBaseHistoryCollector.open(connections, identity,
-                  plan.system(), plan.primary(), plan.current(), activation.pinConfiguration(),
-                  startup), startup)));
+      var physicalHistory = assembleHistoryGc(plan, activation, limits, connections, identity,
+          budgets, pending, stores, owner, business.metrics(), startup);
       ServiceComponents services = assembleService(plan, activation, limits, identity, authorization, budgets,
           pending, stores, invocations, owner, business, ownerForwarding, authSessions, connections, physicalHistory);
       await(pending.initialReadiness(), startup);
@@ -793,7 +786,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       TableGroupStores stores, InvocationService invocations, M3OwnerLease owner,
       BusinessComponents business, OwnerForwardingRuntime ownerForwarding,
       AuthSessionService authSessions, HBaseConnectionFactory connections,
-      java.util.Optional<CompactGateway.HistoryCollection> physicalHistory) {
+      java.util.Optional<CompactGateway.PhysicalCompletion> physicalHistory) {
     java.util.function.Predicate<String> trustedPeer = peer -> ownerForwarding == null
         ? owner.currentToken().map(token -> token.instance().equals(peer)).orElse(false)
         : ownerForwarding.isTrustedPeerIdentity(peer);
@@ -869,7 +862,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
           stores.clusterId(), activation.memberIdBits(), activation.maxEtcdRequestBytes(),
           stores.control(), relay, stores.invocationResults(), stores.views(), lease.readView(),
           lease.enumeration(), lease.bindings(), lease.time(), budgets, LEASE_REQUEST_MEMORY,
-          pending.worker, pending.leaseTimers, business.metrics(), authSessions,
+          pending.worker, pending.timers(), business.metrics(), authSessions,
           business.txnReads()::invalidateAuthorization);
       leaseService = new LeaseService(leaseGateway.grantHandler(),
           leaseGateway.timeToLiveHandler(), leaseGateway.leasesHandler(),
@@ -877,7 +870,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       var expiryWorker = new LeaseExpiryWorker(plan.source().tableGroupId(), authorization,
           plan.system().saltProfile().bucketCount(), 30_000,
           stores.control(), stores.records(), owner, localExpiryRelay, identity, lease.time(), budgets,
-          LeaseBudgetProfile.EXPIRY_WORKER_MEMORY, pending.worker, pending.leaseTimers, Clock.systemUTC(),
+          LeaseBudgetProfile.EXPIRY_WORKER_MEMORY, pending.worker, pending.timers(), Clock.systemUTC(),
           business.metrics());
       pending.startExpiryWorker(expiryWorker);
       var backfillPreparation = new EventBackfillPreparation(new LeaseAuxiliaryMutationPreparation(
@@ -904,15 +897,15 @@ public final class M3TableGroupRuntime implements AutoCloseable {
             eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records()),
             new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), budgets, GcCheckpointCycle.MEMORY,
             plan.system().saltProfile().bucketCount(), GC_PAGE_RECORDS, business.metrics());
-        pending.installGcWorker(new GcCheckpointWorker(pending.worker, pending.leaseTimers,
+        pending.installGcWorker(new GcCheckpointWorker(pending.worker, pending.timers(),
             Duration.ofMillis(GC_TIMEOUT_MILLIS), gcCycle::run, business.metrics()));
       }
       pending.installEventHistoryWorker(new EventHistoryWorker(
-          pending.leaseTimers, owner::currentToken, history::run, business.metrics()));
+          pending.timers(), owner::currentToken, history::run, business.metrics()));
       var selectedEvents = new SelectedSequenceReader(pending.eventPins, stores.control(),
           stores.decisions(), stores.manifestRepository(), stores.eventIndexes());
       var watchGateway = new WatchGateway(plan.source().tableGroupId(), pending,
-          stores.control(), budgets, pending.worker, pending.leaseTimers,
+          stores.control(), budgets, pending.worker, pending.timers(),
           stores.clusterId(), activation.memberIdBits(), limits.maxRpcBytes(), pending.eventPins,
           selectedEvents, authorization, business.metrics(), identity, authSessions,
           business.txnReads()::invalidateAuthorization);
@@ -933,11 +926,38 @@ public final class M3TableGroupRuntime implements AutoCloseable {
             authSessions, connections, stores, pending, owner, physicalHistory)), leaseService, watchService, authService);
   }
 
+  private static Optional<CompactGateway.PhysicalCompletion> assembleHistoryGc(M3TableGroupPlan plan,
+      M3RuntimeConfiguration activation, RuntimeConfiguration.ResourceBudgets limits,
+      HBaseConnectionFactory connections, AuthorizedBackendIdentity identity, BudgetManager budgets,
+      Pending pending, TableGroupStores stores, M3OwnerLease owner, RequestMetrics metrics,
+      RequestScope startup) throws Exception {
+    if (!stores.records().supportsCompaction()) return Optional.empty();
+    var enumerator = await(io.etcdhbase.hbase.storage.HBaseHistoryKeyEnumerator.open(connections,
+        identity, plan.system(), plan.primary(), plan.current(), startup), startup);
+    var collector = await(io.etcdhbase.hbase.storage.HBaseHistoryCollector.open(connections,
+        identity, plan.system(), plan.primary(), plan.current(), activation.pinConfiguration(), startup), startup);
+    int buckets = plan.primary().codec().saltProfile().bucketCount();
+    var checkpoints = new io.etcdhbase.core.commit.HistoryGcCheckpointStore(stores.records(),
+        plan.source().tableGroupId(), plan.system().profileFingerprint(), stores.pins().registryIdentity(),
+        buckets, plan.primary().codec()::bucket);
+    var compactions = new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(), Clock.systemUTC());
+    var coordinator = new io.etcdhbase.core.commit.GcCoordinator(stores.control(), compactions, stores.pins(), Clock.systemUTC());
+    var cycle = new HistoryGcCycle(plan.source().tableGroupId(), owner::currentToken, stores.control(),
+        coordinator, checkpoints, enumerator, collector, budgets,
+        new BudgetManager.Reservation(64L << 10, collector.maximumPageReadBytes(), 1L << 20, 0, 0), metrics, buckets);
+    var completion = new PhysicalCompactionWaiter(plan.source().tableGroupId(), budgets,
+        pending.timers(), pending.worker, Duration.ofMillis(limits.requestDeadlineMs()),
+        () -> new HistoryGcCompletionScan(checkpoints, buckets)::readNext);
+    pending.installHistoryMaintenance(new GcCheckpointWorker(pending.worker, pending.timers(),
+        Duration.ofMillis(GC_TIMEOUT_MILLIS), cycle::run, metrics), completion);
+    return Optional.of(completion);
+  }
+
   private static CompactGateway assembleCompactGateway(M3TableGroupPlan plan,
       M3RuntimeConfiguration activation, AuthorizedBackendIdentity identity, ByteKey authorization,
       AuthSessionService authSessions, HBaseConnectionFactory connections, TableGroupStores stores,
       Pending pending, M3OwnerLease owner,
-      java.util.Optional<CompactGateway.HistoryCollection> physicalHistory) {
+      java.util.Optional<CompactGateway.PhysicalCompletion> physicalHistory) {
     var compactTables = new java.util.ArrayList<org.apache.hadoop.hbase.TableName>();
     compactTables.add(plan.system().table());
     compactTables.add(plan.primary().table());
@@ -948,8 +968,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         stores.control(), stores.records(), Clock.systemUTC());
     return new CompactGateway(compactAuthorization,
         stores.clusterId(), activation.memberIdBits(),
-        compactions, new io.etcdhbase.core.commit.GcCoordinator(
-            stores.control(), compactions, stores.pins(), Clock.systemUTC()),
+        compactions,
         (bytes, requestScope, work) -> pending.queue.submit(bytes, requestScope, work),
         owner::currentToken,
         requestScope -> stores.control().read(requestScope).thenApply(found ->
@@ -1076,11 +1095,13 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     private RangeReadCache cache;
     private volatile EventHistoryPinManager eventPins;
     private volatile GcCheckpointWorker gcWorker;
+    private volatile GcCheckpointWorker historyGcWorker;
+    private volatile PhysicalCompactionWaiter physicalCompletion;
     private volatile BudgetManager.Account eventTailerMemory;
     private volatile SharedEventTailer eventTailer;
     private CompletableFuture<SharedEventTailer> eventTailerReady = new CompletableFuture<>();
-    private ScheduledExecutorService leaseTimers;
-    private ScheduledThreadPoolExecutor ownedLeaseTimers;
+    private ScheduledExecutorService runtimeTimers;
+    private ScheduledThreadPoolExecutor ownedRuntimeTimers;
     private volatile LeaseExpiryWorker expiryWorker;
     private volatile EventHistoryWorker eventHistoryWorker;
     private volatile boolean leaseEnabled;
@@ -1092,7 +1113,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
 
     Pending(RequestScope startup, ScheduledExecutorService leaseTimers, boolean leaseEnabled) {
       this.startup = startup;
-      this.leaseTimers = leaseTimers;
+      this.runtimeTimers = leaseTimers;
       this.leaseEnabled = leaseEnabled;
     }
 
@@ -1109,16 +1130,22 @@ public final class M3TableGroupRuntime implements AutoCloseable {
           recoveryScope, Optional.of(proof));
     }
 
+    private synchronized ScheduledExecutorService timers() {
+      if (closing.get() || ownerLost) throw new IllegalStateException("runtime timer owner has stopped");
+      if (runtimeTimers == null) {
+        ownedRuntimeTimers = new ScheduledThreadPoolExecutor(1,
+            Thread.ofPlatform().daemon().name("m3-runtime-timer-", 0).factory());
+        ownedRuntimeTimers.setRemoveOnCancelPolicy(true);
+        ownedRuntimeTimers.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        runtimeTimers = ownedRuntimeTimers;
+      }
+      return runtimeTimers;
+    }
+
     private void initialize(M3TableGroupPlan plan, M3RuntimeConfiguration activation,
         RuntimeConfiguration.ResourceBudgets limits, BudgetManager budgets) throws BackendFailure {
       leaseEnabled = activation.m4LeaseApiEnabled();
-      if (activation.m4LeaseApiEnabled() && leaseTimers == null) {
-        ownedLeaseTimers = new ScheduledThreadPoolExecutor(1,
-            Thread.ofPlatform().daemon().name("m4-lease-ready-timeout-", 0).factory());
-        ownedLeaseTimers.setRemoveOnCancelPolicy(true);
-        ownedLeaseTimers.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
-        leaseTimers = ownedLeaseTimers;
-      }
+      if (activation.m4LeaseApiEnabled()) timers();
       var account = budgets.admit(plan.source().tableGroupId(), recoveryScope, RECOVERY_MEMORY);
       var slot = account.tryAcquire(new BudgetManager.Work(0, 1, 0, 1, 0))
           .orElseThrow(() -> new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
@@ -1161,6 +1188,32 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       }
       expiryWorker = worker;
       worker.start();
+    }
+
+    synchronized void installHistoryMaintenance(GcCheckpointWorker worker, PhysicalCompactionWaiter completion) {
+      Objects.requireNonNull(worker, "worker");
+      Objects.requireNonNull(completion, "completion");
+      if (closing.get() || ownerLost || historyGcWorker != null || physicalCompletion != null) {
+        throw new IllegalStateException("history GC cannot be installed now");
+      }
+      historyGcWorker = worker;
+      physicalCompletion = completion;
+      worker.start();
+    }
+
+    private void stopHistoryMaintenance() {
+      Throwable failure = null;
+      try { if (historyGcWorker != null) historyGcWorker.stop(); }
+      catch (RuntimeException | Error problem) { failure = problem; }
+      try { if (physicalCompletion != null) physicalCompletion.close(); }
+      catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
+      if (failure != null) throw new java.util.concurrent.CompletionException(failure);
+    }
+
+    private CompletableFuture<Void> historyMaintenanceDrained() {
+      return CompletableFuture.allOf(
+          historyGcWorker == null ? CompletableFuture.completedFuture(null) : historyGcWorker.drained(),
+          physicalCompletion == null ? CompletableFuture.completedFuture(null) : physicalCompletion.drained());
     }
 
     synchronized void installGcWorker(GcCheckpointWorker worker) {
@@ -1258,17 +1311,22 @@ public final class M3TableGroupRuntime implements AutoCloseable {
 
     synchronized void ownerLost() {
       ownerLost = true;
-      LeaseExpiryWorker current = expiryWorker;
-      if (current != null) current.stop();
-      EventHistoryWorker history = eventHistoryWorker;
-      if (history != null) history.stop();
-      GcCheckpointWorker gc = gcWorker;
-      if (gc != null) gc.stop();
-      SharedEventTailer tailer = eventTailer;
-      if (tailer != null) tailer.close();
-      else eventTailerReady.completeExceptionally(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
-      SerialMutationQueue currentQueue = queue;
-      if (currentQueue != null) currentQueue.close();
+      Throwable failure = null;
+      // One failed stop must not leave another writer or a physical waiter active after fencing.
+      for (Runnable stop : java.util.List.<Runnable>of(
+          () -> { if (expiryWorker != null) expiryWorker.stop(); },
+          () -> { if (eventHistoryWorker != null) eventHistoryWorker.stop(); },
+          this::stopHistoryMaintenance,
+          () -> { if (gcWorker != null) gcWorker.stop(); },
+          () -> {
+            if (eventTailer != null) eventTailer.close();
+            else eventTailerReady.completeExceptionally(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+          },
+          () -> { if (queue != null) queue.close(); })) {
+        try { stop.run(); }
+        catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
+      }
+      if (failure != null) throw new java.util.concurrent.CompletionException(failure);
     }
 
     private boolean isReady() {
@@ -1294,6 +1352,8 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         } catch (RuntimeException | Error failure) {
           shutdownFailure = merge(shutdownFailure, failure);
         }
+        try { stopHistoryMaintenance(); }
+        catch (RuntimeException | Error failure) { shutdownFailure = merge(shutdownFailure, failure); }
         try {
           if (gcWorker != null) gcWorker.stop();
         } catch (RuntimeException | Error failure) {
@@ -1325,6 +1385,8 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       try {
         if (eventHistoryWorker != null) eventHistoryWorker.drained().join();
       } catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
+      try { historyMaintenanceDrained().join(); }
+      catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
       try {
         if (gcWorker != null) gcWorker.drained().join();
       } catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
@@ -1367,10 +1429,10 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         CompletableFuture.allOf(recoveryScope.cleanupCompletion().toCompletableFuture(),
             recoveryScope.physicalProducersCompletion().toCompletableFuture()).join();
       } catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
-      if (ownedLeaseTimers != null) {
-        ownedLeaseTimers.shutdown();
+      if (ownedRuntimeTimers != null) {
+        ownedRuntimeTimers.shutdown();
         try {
-          while (!ownedLeaseTimers.awaitTermination(30, TimeUnit.SECONDS)) {
+          while (!ownedRuntimeTimers.awaitTermination(30, TimeUnit.SECONDS)) {
             /* wait for owned response timeout tasks to stop */
           }
         } catch (InterruptedException interrupted) {

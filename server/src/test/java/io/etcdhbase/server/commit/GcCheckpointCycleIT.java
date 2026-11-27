@@ -77,11 +77,11 @@ class GcCheckpointCycleIT {
       };
       var first = cycle(environment, checkpoints, budgets, metrics, releasing);
       var boundary = new CountDownLatch(1);
-      var completed = new AtomicReference<GcCheckpointCycle.Outcome>();
+      var completed = new AtomicReference<GcCheckpointWorker.Outcome>();
       var worker = new GcCheckpointWorker(Runnable::run, timer, Duration.ofSeconds(20), scope ->
           first.run(scope).thenApply(outcome -> {
             completed.set(outcome);
-            if (outcome == GcCheckpointCycle.Outcome.IDLE) boundary.countDown();
+            if (outcome == GcCheckpointWorker.Outcome.IDLE) boundary.countDown();
             return outcome;
           }), metrics);
       try {
@@ -91,7 +91,7 @@ class GcCheckpointCycleIT {
         worker.stop();
         worker.drained().get(30, TimeUnit.SECONDS);
       }
-      assertEquals(GcCheckpointCycle.Outcome.IDLE, completed.get());
+      assertEquals(GcCheckpointWorker.Outcome.IDLE, completed.get());
       assertEquals(0, metrics.gc().failures());
       for (var event : events) {
         assertTrue(records.read(SystemRecordType.EVENT, event.systemIdentity(), fixtureScope).join().isPresent());
@@ -112,12 +112,12 @@ class GcCheckpointCycleIT {
       pin.close();
       pin.releaseCompletion().toCompletableFuture().get(10, TimeUnit.SECONDS);
       var restarted = cycle(environment, checkpoints, budgets, metrics);
-      GcCheckpointCycle.Outcome outcome;
+      GcCheckpointWorker.Outcome outcome;
       int pages = 0;
       do {
         outcome = run(restarted);
         assertTrue(++pages < 30, "restart must make bounded progress from durable shards");
-      } while (outcome != GcCheckpointCycle.Outcome.IDLE);
+      } while (outcome != GcCheckpointWorker.Outcome.IDLE);
       for (var event : events) {
         assertTrue(records.read(SystemRecordType.EVENT, event.systemIdentity(), fixtureScope).join().isEmpty());
         var lateCreate = assertThrows(java.util.concurrent.CompletionException.class,
@@ -155,7 +155,7 @@ class GcCheckpointCycleIT {
         GcCheckpointCycle.MEMORY, 2, 1, metrics);
   }
 
-  private static GcCheckpointCycle.Outcome run(GcCheckpointCycle cycle) throws Exception {
+  private static GcCheckpointWorker.Outcome run(GcCheckpointCycle cycle) throws Exception {
     var scope = RequestScope.withTimeout(Duration.ofSeconds(20));
     try { return cycle.run(scope).get(20, TimeUnit.SECONDS); }
     finally {

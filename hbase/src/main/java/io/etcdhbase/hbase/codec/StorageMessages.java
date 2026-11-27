@@ -12,7 +12,7 @@ import java.util.Optional;
 public final class StorageMessages {
   public static final int FORMAT_VERSION = 1;
   public static final int MAX_VALUE_BYTES = 4 * 1024 * 1024;
-  private static final int MAX_METADATA_BYTES = 4096;
+  public static final int MAX_METADATA_BYTES = 4096;
 
   private StorageMessages() {}
 

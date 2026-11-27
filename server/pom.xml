@@ -33,7 +33,11 @@
             <configuration>
               <skipITs>false</skipITs>
               <failIfNoTests>true</failIfNoTests>
-              <includes><include>**/GcCheckpointCycleIT.java</include></includes>
+              <includes>
+                <include>**/GcCheckpointCycleIT.java</include>
+                <include>**/J52PhysicalCompactIT.java</include>
+              </includes>
+              <reuseForks>false</reuseForks>
             </configuration>
           </plugin>
         </plugins>

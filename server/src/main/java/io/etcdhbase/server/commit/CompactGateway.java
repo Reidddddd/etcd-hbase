@@ -6,8 +6,6 @@ import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitState;
 import io.etcdhbase.core.commit.CompactionOperation;
 import io.etcdhbase.core.commit.CompactionService;
-import io.etcdhbase.core.commit.GcCoordinator;
-import io.etcdhbase.core.commit.HistoryGcPermit;
 import io.etcdhbase.core.commit.InvocationBinding;
 import io.etcdhbase.core.commit.InvocationId;
 import io.etcdhbase.core.commit.TransactionId;
@@ -26,7 +24,6 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
@@ -36,8 +33,9 @@ import java.util.function.Supplier;
  * with publication or recovery.
  *
  * <p>The logical boundary is the control-row CAS. {@code physical} additionally waits for the
- * bounded KV history pages this call deletes. It does not claim HFile release and does not wait for
- * event, decision, or result closure that J52 has not implemented.
+ * selected target's durable KV-history completion receipt outside the mutation lane. This slice does
+ * not confirm internal-record reclamation or the complete J52 physical contract. Maintenance
+ * continues independently when the caller stops waiting; HFile release remains asynchronous.
  */
 public final class CompactGateway
     implements BiConsumer<Rpc.CompactionRequest, StreamObserver<Rpc.CompactionResponse>> {
@@ -52,18 +50,17 @@ public final class CompactGateway
   }
 
   CompactGateway(CompactRequestAuthorization authorizations, long clusterId, long memberId,
-      CompactionService compactions, GcCoordinator gc,
+      CompactionService compactions,
       LaneSubmitter lane,
       Supplier<java.util.Optional<CommitOwnerService.OwnerToken>> owner,
       java.util.function.Function<RequestScope, CompletableFuture<CommitState>> controlState,
-      java.util.Optional<HistoryCollection> collection) {
+      java.util.Optional<PhysicalCompletion> physicalCompletion) {
     this.authorizations = Objects.requireNonNull(authorizations, "authorizations");
     this.compactions = Objects.requireNonNull(compactions, "compactions");
-    this.gc = Objects.requireNonNull(gc, "gc");
     this.lane = Objects.requireNonNull(lane, "lane");
     this.owner = Objects.requireNonNull(owner, "owner");
     this.controlState = Objects.requireNonNull(controlState, "controlState");
-    this.collection = Objects.requireNonNull(collection, "collection");
+    this.physicalCompletion = Objects.requireNonNull(physicalCompletion, "physicalCompletion");
     if (clusterId == 0 || memberId == 0) {
       throw new IllegalArgumentException("invalid Compact gateway identity");
     }
@@ -75,11 +72,10 @@ public final class CompactGateway
   private final long clusterId;
   private final long memberId;
   private final CompactionService compactions;
-  private final GcCoordinator gc;
   private final LaneSubmitter lane;
   private final Supplier<java.util.Optional<CommitOwnerService.OwnerToken>> owner;
   private final java.util.function.Function<RequestScope, CompletableFuture<CommitState>> controlState;
-  private final java.util.Optional<HistoryCollection> collection;
+  private final java.util.Optional<PhysicalCompletion> physicalCompletion;
 
   @Override
   public void accept(Rpc.CompactionRequest request, StreamObserver<Rpc.CompactionResponse> observer) {
@@ -99,6 +95,7 @@ public final class CompactGateway
       // Proto3 omits default fields, so a valid Compact(0) still needs one admission unit.
       lane.submit(Math.max(1, request.getSerializedSize()), scope,
               laneScope -> execute(request, token, laneScope))
+          .thenCompose(selected -> awaitPhysical(request.getPhysical(), selected, scope))
           .whenComplete((selected, failure) -> {
             try {
               // The queue receipt includes service-scope cleanup, while delivery belongs to the RPC.
@@ -131,27 +128,22 @@ public final class CompactGateway
       return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
     }
     return controlState.apply(scope).thenCompose(state -> {
-      CompactionCommand command = command(request, state, identity.authorizationDigest());
+      InvocationBinding binding = binding(request, state, identity.authorizationDigest());
       var proof = authorizations.captureProof(identity, state.authorizationBarrierGeneration());
-      return compactions.compact(command.revision(), command.binding(), currentOwner.orElseThrow(),
-              proof, scope)
-          .thenCompose(selected -> collect(command, selected, scope));
+      return compactions.compact(request.getRevision(), binding, currentOwner.orElseThrow(), proof, scope);
     });
   }
 
-  private CompletableFuture<CompactionOperation> collect(CompactionCommand command,
+  private CompletableFuture<CompactionOperation> awaitPhysical(boolean physical,
       CompactionOperation selected, RequestScope scope) {
-    if (!command.physical() || selected.stage() != CompactionOperation.Stage.LOGICAL) {
+    if (!physical || selected.stage() != CompactionOperation.Stage.LOGICAL) {
       return CompletableFuture.completedFuture(selected);
     }
-    if (collection.isEmpty()) {
-      // The logical boundary is already durable; only the physical completion is unavailable.
+    if (physicalCompletion.isEmpty()) {
+      // The durable logical selection survives failure to establish its physical waiter.
       return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
     }
-    return gc.authorizeHistory(owner.get().orElseThrow(() ->
-            new CompletionException(new BackendFailure(BackendFailure.Category.UNAVAILABLE))), scope)
-        .thenCompose(permit ->
-        collection.orElseThrow().collect(permit, scope).thenApply(deleted -> selected));
+    return physicalCompletion.orElseThrow().awaitCompletion(selected, scope).thenApply(ignored -> selected);
   }
 
   private void deliver(StreamObserver<Rpc.CompactionResponse> observer, AtomicBoolean terminal,
@@ -189,26 +181,19 @@ public final class CompactGateway
     observer.onCompleted();
   }
 
-  private CompactionCommand command(
+  private InvocationBinding binding(
       Rpc.CompactionRequest request, CommitState state, ByteKey authorization) {
     InvocationId invocation = InvocationId.create();
-    InvocationBinding binding = InvocationBinding.begin(invocation,
+    return InvocationBinding.begin(invocation,
         requestDigest(request.getRevision(), request.getPhysical()), authorization,
         TransactionId.create(), Math.max(1, state.ownerEpoch()), state.publishedSequence(),
         Math.max(1, state.publishedRevision()));
-    return new CompactionCommand(binding, request.getRevision(), request.getPhysical());
   }
 
-  private record CompactionCommand(InvocationBinding binding, long revision, boolean physical) {}
-
-  /**
-   * Deletes this call's bounded KV history pages. There is deliberately no no-op implementation:
-   * {@code physical=true} without enumeration and durable checkpoints must fail closed rather than
-   * report a logical CAS as physical completion.
-   */
+  /** Waits for durable completion of this exact target; the background worker owns all deletion. */
   @FunctionalInterface
-  interface HistoryCollection {
-    CompletableFuture<Integer> collect(HistoryGcPermit permit, RequestScope scope);
+  interface PhysicalCompletion {
+    CompletableFuture<Void> awaitCompletion(CompactionOperation target, RequestScope scope);
   }
 
   private static void signalError(StreamObserver<Rpc.CompactionResponse> observer,

@@ -63,7 +63,7 @@ class GcCheckpointCycleTest {
             0, 0, Optional.empty(), true)));
     when(checkpoints.advance(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(true));
     var scope = scope();
-    assertEquals(GcCheckpointCycle.Outcome.PROGRESSED, cycle(budgets(256L << 20)).run(scope).join());
+    assertEquals(GcCheckpointWorker.Outcome.PROGRESSED, cycle(budgets(256L << 20)).run(scope).join());
     scope.close();
     scope.cleanupOutcomeCompletion().toCompletableFuture().join();
     verify(closure).fence(eq(SystemRecordClosure.Domain.INVOCATION), eq(0), eq(Optional.empty()), eq(1), same(permit), same(scope));
@@ -130,7 +130,7 @@ class GcCheckpointCycleTest {
   void nonOwnerNeverAdmitsOrTouchesStorage() throws Exception {
     owner.set(Optional.empty());
     try (var scope = scope()) {
-      assertEquals(GcCheckpointCycle.Outcome.IDLE, cycle(budgets(256L << 20)).run(scope).join());
+      assertEquals(GcCheckpointWorker.Outcome.IDLE, cycle(budgets(256L << 20)).run(scope).join());
     }
     verifyNoInteractions(control, coordinator, checkpoints, closure);
   }
@@ -142,7 +142,7 @@ class GcCheckpointCycleTest {
         Optional.of(new ControlSnapshot(state, new byte[] {1}))));
     var budgets = budgets(256L << 20);
     var scope = scope();
-    assertEquals(GcCheckpointCycle.Outcome.IDLE, cycle(budgets).run(scope).join());
+    assertEquals(GcCheckpointWorker.Outcome.IDLE, cycle(budgets).run(scope).join());
     scope.close();
     scope.cleanupOutcomeCompletion().toCompletableFuture().join();
     assertEquals(0, budgets.snapshot().requests());
@@ -153,7 +153,7 @@ class GcCheckpointCycleTest {
   void regularAdmissionFailureYieldsAndRecordsGcBacklogWithoutUsingReserve() throws Exception {
     var budgets = budgets(1);
     var scope = scope();
-    assertEquals(GcCheckpointCycle.Outcome.BACKLOG, cycle(budgets).run(scope).join());
+    assertEquals(GcCheckpointWorker.Outcome.BACKLOG, cycle(budgets).run(scope).join());
     scope.close();
     scope.cleanupOutcomeCompletion().toCompletableFuture().join();
     assertEquals(1, metrics.gc().backlog());
