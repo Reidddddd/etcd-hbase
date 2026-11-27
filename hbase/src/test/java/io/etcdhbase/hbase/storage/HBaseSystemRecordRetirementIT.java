@@ -63,6 +63,50 @@ class HBaseSystemRecordRetirementIT {
   private static final ByteKey AUTHORIZATION_DIGEST = ByteKey.copyOf(new byte[32]);
 
   @Test
+  void descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var table = createRetirementCapableSystemTable(environment);
+      var store = HBaseSystemRecordStore.open(environment.factory(), environment.identity(), table, scope).join();
+      var permit = permit(store, scope);
+      var fenceTarget = ByteKey.copyOf(new byte[] {94});
+      var retireTarget = ByteKey.copyOf(new byte[] {95});
+      var value = ByteKey.copyOf(new byte[] {96});
+      store.createIfAbsent(SystemRecordType.WORKSET, fenceTarget, value, scope).join();
+      store.createIfAbsent(SystemRecordType.WORKSET, retireTarget, value, scope).join();
+      var admin = environment.connection().getAdmin();
+      var valid = admin.getDescriptor(table.table()).join();
+      var invalid = java.util.List.of(
+          TableDescriptorBuilder.newBuilder(valid).removeValue("etcdhbase.m5.gc-fence-format").build(),
+          TableDescriptorBuilder.newBuilder(valid).setValue("etcdhbase.m5.gc-fence-format", "2").build(),
+          TableDescriptorBuilder.newBuilder(valid).setValue("etcdhbase.m5.gc-fence-format", "broken").build(),
+          TableDescriptorBuilder.newBuilder(valid).removeColumnFamily(SystemTableBinding.GC_FENCE_FAMILY).build(),
+          TableDescriptorBuilder.newBuilder(valid).modifyColumnFamily(ColumnFamilyDescriptorBuilder
+              .newBuilder(SystemTableBinding.GC_FENCE_FAMILY).setMaxVersions(2).build()).build(),
+          TableDescriptorBuilder.newBuilder(valid).modifyColumnFamily(ColumnFamilyDescriptorBuilder
+              .newBuilder(SystemTableBinding.GC_FENCE_FAMILY).setTimeToLive(60).build()).build(),
+          TableDescriptorBuilder.newBuilder(valid).removeValue("etcdhbase.m5.compaction-format").build());
+      var backend = environment.connection().getTable(table.table());
+      for (var descriptor : invalid) {
+        admin.modifyTable(descriptor).join();
+        assertAll(
+            () -> assertThrows(CompletionException.class, () -> store.fenceForGc(
+                SystemRecordType.WORKSET, fenceTarget, permit, scope).join()),
+            () -> assertThrows(CompletionException.class, () -> store.retire(SystemRecordType.WORKSET,
+                retireTarget, value, permit, SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join()),
+            () -> assertEquals(1, backend.get(new org.apache.hadoop.hbase.client.Get(
+                table.row(SystemRecordType.WORKSET, fenceTarget))).join().size(), "no maintenance write"),
+            () -> assertEquals(Optional.of(value), store.read(SystemRecordType.WORKSET, retireTarget, scope).join()),
+            () -> assertTrue(store.readTombstone(SystemRecordType.WORKSET, retireTarget, scope).join().isEmpty()));
+        admin.modifyTable(valid).join();
+      }
+      store.fenceForGc(SystemRecordType.WORKSET, fenceTarget, permit, scope).join();
+      assertTrue(store.retire(SystemRecordType.WORKSET, retireTarget, value, permit,
+          SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join().retiredNow());
+    }
+  }
+
+  @Test
   void legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation() throws Exception {
     try (var environment = M1TestEnvironment.start(1);
         var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {

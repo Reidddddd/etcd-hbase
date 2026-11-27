@@ -487,6 +487,7 @@ J52_REQUIRED_TESTS = {
         'byteLimitedPageDoesNotEndCollectionBeforeTheContinuation',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
+        'descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations',
         'legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation',
         'fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts',
         'lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard',

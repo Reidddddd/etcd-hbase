@@ -50,7 +50,9 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 未知 fence ACK 不推进游标；重读确认同一 fence 后可有界重做。损坏、缺页、scope 关闭或较高 fence 均不能被解释为已完成。业务 point/scan 只请求原 payload family，live 仍是唯一 `r`，retired 仍是 `r`/`t`；业务条件写也不覆盖维护 family。GC 独立读取并严格校验 `gc:g`，退休请求读回已退休行时核对 Compact generation，两个 family 的退休条件仍在同一 HBase 行上原子执行。维护字段不进入旧 reader 的 Get/Scan 投影，也不是 KV revision。
 
-GC 要求持久 descriptor 声明 `etcdhbase.m5.gc-fence-format=1`，并存在非过期、单版本的 `gc` family。family 数量、名称、格式或保留策略不符会拒绝绑定；仅有原 Compact 能力时，普通记录仍可读取，但 GC closure、退休入口及配置了 Compact 的 M4 运行时拒绝激活 GC，不自动增加 family 或改写 descriptor。未声明 Compact 的 M4 表不启动这个 worker。
+GC 要求持久 descriptor 声明 `etcdhbase.m5.gc-fence-format=1`，并存在非过期、单版本的 `gc` family。family 数量、名称、格式或保留策略不符会拒绝绑定；仅有原 Compact 能力时，普通记录仍可读取，但 GC closure、退休入口及配置了 Compact 的 M4 运行时拒绝激活 GC，不自动增加 family 或改写 descriptor。未声明 Compact 的 M4 表不启动这个 worker。启动时的能力快照只作初始门禁；每次 GC 权威核验及 fence 写入入口还从实际 HBase Admin 重读当前 descriptor，观察到 marker 缺失、未知/损坏版本、缺少 family、错误保留策略或 Compact 能力撤销时，拒绝扫描与维护 mutation。该读取绑定 RequestScope 的取消和真实 producer 排空，不以旧缓存继续写入。
+
+当前 descriptor 读取不是 DDL 与数据行的跨操作事务。schema 变更前仍须停止并排空维护 writer；不支持一边修改 descriptor、一边让已经获准的维护请求继续执行。
 
 该 descriptor 由独立的 provisioning helper 显式构造，本 PR 没有在线 schema 升级或回退命令。已启动旧 reader 继续使用原 family，真实基线 reader 的读取和扫描已单独验证；旧二进制的新启动会因 descriptor 不再是单 family 而拒绝绑定。不能靠删除 `gc` family、去掉 marker 或运行旧维护 writer 实现在线回退；启用及后续迁移须停止旧维护 writer，不支持混跑不检查同行 fence 的维护实现。J55 的受控迁移与真实目标环境的滚动升级/回退验收仍未交付。
 

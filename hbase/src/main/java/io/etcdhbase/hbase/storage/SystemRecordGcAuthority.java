@@ -31,7 +31,7 @@ final class SystemRecordGcAuthority {
   CompletableFuture<List<SnapshotGcBoundary.Protection>> validate(
       SystemRecordRetirement.Permit permit, RequestScope scope) {
     permit.requireUsable(records.profileFingerprint(), scope);
-    return control.read(scope).thenCompose(found -> {
+    return records.requireCurrentGcFencing(scope).thenCompose(ignored -> control.read(scope)).thenCompose(found -> {
       var state = found.orElseThrow(() -> new IllegalStateException("missing GC control")).state();
       requireControl(state, permit);
       return records.read(SystemRecordType.COMPACTION, ByteKey.copyOf(permit.operationId().bytes()), scope)

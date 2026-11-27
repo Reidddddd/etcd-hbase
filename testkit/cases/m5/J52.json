@@ -298,6 +298,7 @@
       "kind": "failsafe",
       "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT",
       "methods": [
+        "descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations",
         "legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation",
         "fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts",
         "lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard",

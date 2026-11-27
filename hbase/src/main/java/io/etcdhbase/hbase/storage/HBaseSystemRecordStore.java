@@ -99,6 +99,17 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     if (!gcFencingSupported) throw new IllegalStateException("system table requires isolated GC fence capability");
   }
 
+  /** Re-reads mutable administrative metadata before starting GC work in this scope. */
+  CompletableFuture<Void> requireCurrentGcFencing(RequestScope scope) {
+    requireGcFencing();
+    return HBaseRequestCompletion.startRequest(scope, binding.table().getName().length,
+        () -> connection.getAdmin().getDescriptor(binding.table())).thenAccept(descriptor -> {
+          if (!binding.supportsGcFencing(descriptor)) {
+            throw new IllegalStateException("current system descriptor does not authorize GC fencing");
+          }
+        }).exceptionallyCompose(failure -> CompletableFuture.failedFuture(HBaseFailures.classify(failure)));
+  }
+
   @Override
   public int bucket(SystemRecordType type, ByteKey identity) {
     requireTypeSupported(type);
@@ -649,7 +660,8 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
   CompletableFuture<Void> fenceForGc(SystemRecordType type, ByteKey identity, Permit permit, RequestScope scope) {
     requireTypeSupported(type);
     requireGcFencing();
-    return new HBaseSystemRecordGcMutations(this, binding).prepareFence(type, identity, permit, scope);
+    return requireCurrentGcFencing(scope).thenCompose(ignored ->
+        new HBaseSystemRecordGcMutations(this, binding).prepareFence(type, identity, permit, scope));
   }
 
   Filter liveValueCondition(byte[] expected) {
