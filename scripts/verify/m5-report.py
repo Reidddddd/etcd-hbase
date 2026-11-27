@@ -447,6 +447,7 @@ J52_REQUIRED_TESTS = {
         'rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.J52HistoryCollectionIT'): {
+        'activeReadPinPreventsDeletionUntilReleaseInBothLayouts',
         'enumeratesEveryKeyWithBucketLocalExclusiveResumePoints',
         'boundsKeyEnumerationToOneDurableBucketInBothLayouts',
         'doesNotEndEnumerationInsideAHighChurnKey',

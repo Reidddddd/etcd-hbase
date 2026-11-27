@@ -225,7 +225,8 @@
         "enumeratesEveryKeyWithBucketLocalExclusiveResumePoints",
         "doesNotEndEnumerationInsideAHighChurnKey",
         "resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder",
-        "boundsKeyEnumerationToOneDurableBucketInBothLayouts"
+        "boundsKeyEnumerationToOneDurableBucketInBothLayouts",
+        "activeReadPinPreventsDeletionUntilReleaseInBothLayouts"
       ]
     },
     {
