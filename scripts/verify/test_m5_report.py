@@ -376,6 +376,24 @@ class J51RegistryTest(unittest.TestCase):
 
 
 class M5J52ReportTest(unittest.TestCase):
+    def test_storage_gate_requires_retention_descriptor_suite_and_each_method(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        m5_report._validate_task(original, path, repo)
+        suite_name = "io.etcdhbase.hbase.storage.J52RetentionDescriptorTest"
+        suite = next(test for test in original["tests"] if test["class"] == suite_name)
+        for method in [None, *suite["methods"]]:
+            with self.subTest(method=method):
+                task = json.loads(json.dumps(original))
+                mutated = next(test for test in task["tests"] if test["class"] == suite_name)
+                if method is None:
+                    task["tests"].remove(mutated)
+                else:
+                    mutated["methods"].remove(method)
+                with self.assertRaises(m5_report.ReportError):
+                    m5_report._validate_task(task, path, repo)
+
     def test_storage_gate_requires_active_read_pin_collection_and_exact_retirement(self) -> None:
         repo = Path(__file__).parents[2]
         path = repo / "testkit/cases/m5/J52.json"

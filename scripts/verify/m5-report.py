@@ -377,6 +377,12 @@ def _validate_j51(task: dict[str, object], repo: Path) -> None:
 
 
 J52_REQUIRED_TESTS = {
+    ("hbase", "surefire", "io.etcdhbase.hbase.storage.J52RetentionDescriptorTest"): {
+        "rejectsFiniteTtlForEveryLayout",
+        "rejectsSingleVersionForNativeLayout",
+        "historyDescriptorDefaultsToOneVersionAndForeverTtl",
+        "nativeDescriptorDefaultsTo64AndAccepts128Versions",
+    },
     ("core", "surefire", "io.etcdhbase.core.commit.CommitStateTest"): {
         "authorizationBarrierAdvancesMonotonicallyWithoutReplacingSelectedPublication",
         "ownerEpochFencesOldOwnersAndExpiredLeaseCanBeClaimed",

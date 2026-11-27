@@ -523,6 +523,17 @@
         "missingOwnerFailsClosedWithoutAttemptingAControlWrite",
         "cancelledRequestDoesNotSendAResponse"
       ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.J52RetentionDescriptorTest",
+      "methods": [
+        "rejectsFiniteTtlForEveryLayout",
+        "rejectsSingleVersionForNativeLayout",
+        "historyDescriptorDefaultsToOneVersionAndForeverTtl",
+        "nativeDescriptorDefaultsTo64AndAccepts128Versions"
+      ]
     }
   ]
 }
