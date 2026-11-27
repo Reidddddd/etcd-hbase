@@ -35,6 +35,14 @@ public final class HistoryGcPermit {
   public long safeRevision() { return safeRevision; }
   public long safeSequence() { return safeSequence; }
 
+  /** Resumes a persisted sweep without widening the bounds under already-processed keys. */
+  public HistoryGcPermit restrictTo(long revision, long sequence) {
+    if (revision < 0 || sequence < 0 || revision > safeRevision || sequence > safeSequence) {
+      throw new IllegalArgumentException("history GC restriction widens its authority");
+    }
+    return new HistoryGcPermit(profile, registryIdentity, operationId, generation, revision, sequence, scope);
+  }
+
   /** A permit cannot outlive the collection scope or be reused for a different table group. */
   public void requireUsable(ByteKey expectedProfile, RequestScope executionScope) {
     if (!profile.equals(expectedProfile) || scope != executionScope || scope.isClosed()

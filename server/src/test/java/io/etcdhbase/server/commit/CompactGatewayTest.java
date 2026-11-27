@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -19,8 +20,6 @@ import io.etcdhbase.core.commit.CommitOwnerService;
 import io.etcdhbase.core.commit.CommitState;
 import io.etcdhbase.core.commit.CompactionOperation;
 import io.etcdhbase.core.commit.CompactionService;
-import io.etcdhbase.core.commit.GcCoordinator;
-import io.etcdhbase.core.commit.HistoryGcPermit;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.spi.identity.AuthenticationScope;
@@ -85,9 +84,9 @@ class CompactGatewayTest {
   @Test
   void dispatchedServiceScopeCannotSendSuccessAfterTheRpcScopeIsCancelled() throws Exception {
     var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
-    var collection = new CompletableFuture<Integer>();
+    var collection = new CompletableFuture<Void>();
     var started = new CountDownLatch(1);
-    fixture.collection = (permit, serviceScope) -> {
+    fixture.completion = (target, serviceScope) -> {
       started.countDown();
       return collection;
     };
@@ -97,7 +96,7 @@ class CompactGatewayTest {
       fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
       assertTrue(started.await(5, TimeUnit.SECONDS));
       scope.cancel();
-      collection.complete(1);
+      collection.complete(null);
       queue.close();
       queue.drained().get(5, TimeUnit.SECONDS);
       observer.terminal.get(5, TimeUnit.SECONDS);
@@ -105,7 +104,7 @@ class CompactGatewayTest {
       assertEquals(Status.Code.CANCELLED,
           assertInstanceOf(StatusRuntimeException.class, observer.failure.get()).getStatus().getCode());
     } finally {
-      collection.complete(1);
+      collection.complete(null);
       closeQueue(queue);
     }
   }
@@ -124,10 +123,11 @@ class CompactGatewayTest {
     var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
     var cleanup = new CompletableFuture<Void>();
     var cleanupStarted = new CountDownLatch(1);
-    fixture.collection = (permit, serviceScope) -> {
+    doAnswer(call -> {
+      RequestScope serviceScope = call.getArgument(4);
       serviceScope.registerScopedCleanup(cleanupStarted::countDown, cleanup);
-      return CompletableFuture.completedFuture(1);
-    };
+      return CompletableFuture.completedFuture(fixture.operation);
+    }).when(fixture.compactions).compact(anyLong(), any(), any(), any(), any());
     var queue = queue(fixture);
     try (var scope = fixture.scope()) {
       var observer = new RecordingObserver();
@@ -167,15 +167,35 @@ class CompactGatewayTest {
     assertEquals(MEMBER, observer.last.get().getHeader().getMemberId());
     assertTrue(observer.completed.get());
     assertNull(observer.failure.get());
-    assertEquals(0, fixture.collections.get(), "logical-only Compact performs no history deletion");
+    assertEquals(0, fixture.completionWaits.get(), "logical-only Compact performs no history deletion");
+  }
+
+  @Test
+  void physicalWaitDoesNotHoldTheOwnerLane() throws Exception {
+    var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
+    var completed = new CompletableFuture<Void>();
+    var laneReleased = new AtomicBoolean();
+    fixture.lane = (bytes, scope, work) -> work.apply(scope)
+        .whenComplete((receipt, failure) -> laneReleased.set(true));
+    fixture.completion = (target, scope) -> completed;
+    var observer = new RecordingObserver();
+    try (var scope = fixture.scope()) {
+      try {
+        fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
+        assertTrue(laneReleased.get(), "physical completion must wait outside the mutation owner lane");
+        assertEquals(0, observer.responses.get());
+      } finally {
+        completed.complete(null);
+      }
+    }
   }
 
   @Test
   void physicalCompactWaitsForItsOwnBoundedHistoryDeletion() throws Exception {
     var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
-    var collect = new CompletableFuture<Integer>();
-    fixture.collection = (permit, scope) -> {
-      fixture.collections.incrementAndGet();
+    var collect = new CompletableFuture<Void>();
+    fixture.completion = (target, scope) -> {
+      fixture.completionWaits.incrementAndGet();
       return collect;
     };
     var observer = new RecordingObserver();
@@ -183,18 +203,18 @@ class CompactGatewayTest {
     try (var scope = fixture.scope()) {
       fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
       assertEquals(0, observer.responses.get(), "physical must not answer before its pages finish");
-      collect.complete(3);
+      collect.complete(null);
     }
 
     assertEquals(1, observer.responses.get(),
-        "collect=" + fixture.collections.get() + " " + describe(observer.failure.get()));
-    assertEquals(1, fixture.collections.get());
+        "collect=" + fixture.completionWaits.get() + " " + describe(observer.failure.get()));
+    assertEquals(1, fixture.completionWaits.get());
   }
 
   @Test
   void physicalCompactReportsFailureWhenHistoryDeletionFails() throws Exception {
     var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
-    fixture.collection = (permit, scope) -> CompletableFuture.failedFuture(
+    fixture.completion = (target, scope) -> CompletableFuture.failedFuture(
         new BackendFailure(BackendFailure.Category.UNAVAILABLE));
     var observer = new RecordingObserver();
 
@@ -285,14 +305,14 @@ class CompactGatewayTest {
   @Test
   void cancelledRequestDoesNotSendAResponse() throws Exception {
     var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
-    var collect = new CompletableFuture<Integer>();
-    fixture.collection = (permit, scope) -> collect;
+    var collect = new CompletableFuture<Void>();
+    fixture.completion = (target, scope) -> collect;
     var observer = new RecordingObserver();
 
     try (var scope = fixture.scope()) {
       fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
       scope.cancel();
-      collect.complete(1);
+      collect.complete(null);
     }
 
     assertEquals(0, observer.responses.get(), "a cancelled request never receives Compact success");
@@ -325,18 +345,17 @@ class CompactGatewayTest {
 
   private static final class Fixture {
     private final CompactionService compactions = mock(CompactionService.class);
-    private final GcCoordinator gc = mock(GcCoordinator.class);
-    private final AtomicInteger collections = new AtomicInteger();
-    private volatile CompactGateway.HistoryCollection collection = (permit, scope) -> {
-      collections.incrementAndGet();
-      return CompletableFuture.completedFuture(0);
+    private final CompactionOperation operation = mock(CompactionOperation.class);
+    private final AtomicInteger completionWaits = new AtomicInteger();
+    private volatile CompactGateway.PhysicalCompletion completion = (target, scope) -> {
+      completionWaits.incrementAndGet();
+      return CompletableFuture.completedFuture(null);
     };
     private volatile boolean collectorWired = true;
     private volatile boolean ownerPresent = true;
     private CompactGateway.LaneSubmitter lane = (bytes, scope, work) -> work.apply(scope);
 
     private Fixture(CompactionOperation.Stage stage, long responseRevision) {
-      var operation = mock(CompactionOperation.class);
       when(operation.stage()).thenReturn(stage);
       when(operation.responseRevision()).thenReturn(responseRevision);
       when(compactions.compact(anyLong(), any(), any(), any(), any())).thenAnswer(call ->
@@ -344,8 +363,7 @@ class CompactGatewayTest {
               ? CompletableFuture.completedFuture(operation)
               : CompletableFuture.failedFuture(
                   new BackendFailure(BackendFailure.Category.CANCELLED)));
-      var permit = mock(HistoryGcPermit.class);
-      when(gc.authorizeHistory(any(), any())).thenReturn(CompletableFuture.completedFuture(permit));
+
     }
 
     private RequestScope scope() {
@@ -356,7 +374,7 @@ class CompactGatewayTest {
       var authorization = new CompactRequestAuthorization(GROUP, IDENTITY, AUTHORIZATION, null,
           mock(io.etcdhbase.hbase.api.HBaseConnectionFactory.class),
           java.util.List.of(org.apache.hadoop.hbase.TableName.valueOf("compact-test")));
-      return new CompactGateway(authorization, CLUSTER, MEMBER, compactions, gc,
+      return new CompactGateway(authorization, CLUSTER, MEMBER, compactions,
           lane, () -> {
             return ownerPresent ? java.util.Optional.of(OWNER) : java.util.Optional.empty();
           },
@@ -364,7 +382,7 @@ class CompactGatewayTest {
               CommitState.restore(ByteKey.copyOf(new byte[32]), java.util.Optional.of("owner-instance"),
                   4, Long.MAX_VALUE, 2, 2, 12, 2, 12, java.util.Optional.empty(), 0)),
           collectorWired
-              ? java.util.Optional.of((permit, scope) -> collection.collect(permit, scope))
+              ? java.util.Optional.of((target, scope) -> completion.awaitCompletion(target, scope))
               : java.util.Optional.empty());
     }
   }

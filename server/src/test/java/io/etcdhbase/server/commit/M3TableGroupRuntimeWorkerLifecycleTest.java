@@ -16,6 +16,45 @@ import org.junit.jupiter.api.Test;
 
 class M3TableGroupRuntimeWorkerLifecycleTest {
   @Test
+  void historyMaintenanceRunsWithoutLeaseAndOwnerLossRejectsLateInstallation() {
+    try (var scope = RequestScope.withoutDeadline()) {
+      var pending = new M3TableGroupRuntime.Pending(scope, null, false);
+      var history = mock(GcCheckpointWorker.class);
+      var completion = mock(PhysicalCompactionWaiter.class);
+      pending.installHistoryMaintenance(history, completion);
+      verify(history).start();
+      pending.ownerLost();
+      verify(history).stop();
+      verify(completion).close();
+      var late = mock(GcCheckpointWorker.class);
+      assertThrows(IllegalStateException.class,
+          () -> pending.installHistoryMaintenance(late, mock(PhysicalCompactionWaiter.class)));
+      verify(late, never()).start();
+    }
+  }
+
+  @Test
+  void failedHistoryStopStillClosesWaitersSystemGcAndTailerOnOwnerLoss() {
+    try (var scope = RequestScope.withoutDeadline()) {
+      var pending = new M3TableGroupRuntime.Pending(scope, null, true);
+      var history = mock(GcCheckpointWorker.class);
+      var completion = mock(PhysicalCompactionWaiter.class);
+      var system = mock(GcCheckpointWorker.class);
+      var tailer = mock(SharedEventTailer.class);
+      pending.installHistoryMaintenance(history, completion);
+      pending.installGcWorker(system);
+      pending.installEventTailer(tailer);
+      org.mockito.Mockito.doThrow(new IllegalStateException("stop failed")).when(history).stop();
+
+      assertThrows(java.util.concurrent.CompletionException.class, pending::ownerLost);
+
+      verify(completion).close();
+      verify(system).stop();
+      verify(tailer).close();
+    }
+  }
+
+  @Test
   void ownerLossStopsInstalledGcAndRejectsReplacement() {
     try (var scope = RequestScope.withoutDeadline()) {
       var pending = new M3TableGroupRuntime.Pending(scope, null, true);

@@ -27,7 +27,6 @@ import io.etcdhbase.core.commit.CommitState;
 import io.etcdhbase.core.commit.CompactionOperation;
 import io.etcdhbase.core.commit.CompactionService;
 import io.etcdhbase.core.commit.ControlSnapshot;
-import io.etcdhbase.core.commit.GcCoordinator;
 import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.grpc.service.AuthService;
@@ -334,7 +333,7 @@ class CompactGatewayAuthorizationTest {
       var authorization = new CompactRequestAuthorization(GROUP, SERVICE,
           AuthorizationScopeDigest.fromIdentity(SERVICE), authenticated ? sessions : null, connections, TABLES);
       return new CompactGateway(authorization, 7, 9, new CompactionService(control, records, Clock.systemUTC()),
-          mock(GcCoordinator.class), (bytes, scope, work) -> work.apply(scope),
+          (bytes, scope, work) -> work.apply(scope),
           () -> Optional.of(new CommitOwnerService.OwnerToken("owner", 4)),
           scope -> CompletableFuture.completedFuture(state.get()), Optional.empty());
     }

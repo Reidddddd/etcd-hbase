@@ -466,6 +466,21 @@ class M5J52ReportTest(unittest.TestCase):
         with self.assertRaises(m5_report.ReportError):
             m5_report._validate_task(task, path, repo)
 
+    def test_bucket_local_history_enumeration_is_required(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for method in (
+                "enumeratesEveryKeyWithBucketLocalExclusiveResumePoints",
+                "doesNotEndEnumerationInsideAHighChurnKey",
+                "resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder"):
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"]
+                         if test["class"].endswith("J52HistoryCollectionIT"))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method), self.assertRaises(m5_report.ReportError):
+                m5_report._validate_task(task, path, repo)
+
     def test_compact_authorization_suite_and_critical_boundaries_are_required(self) -> None:
         repo = Path(__file__).parents[2]
         path = repo / "testkit/cases/m5/J52.json"
@@ -486,6 +501,79 @@ class M5J52ReportTest(unittest.TestCase):
             suite["methods"].remove(method)
             with self.subTest(missing=method), self.assertRaises(m5_report.ReportError):
                 m5_report._validate_task(task, path, repo)
+
+    def test_durable_kv_completion_cannot_omit_a_suite_or_critical_boundary(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        required = {
+            "HistoryGcCheckpointStoreTest": "aNewOwnerFencesOldProgressButKeepsTheConfirmedCursor",
+            "HistoryGcCycleTest": "unknownDeletionCannotAdvanceTheDurableVersionCursor",
+            "HistoryGcCompletionScanTest": "conservativePinBoundsDoNotCompleteTheRequestedTarget",
+            "PhysicalCompactionWaiterTest": "cancellationDetachesTheRpcButRetainsAdmissionUntilTheRealReadDrains",
+            "CompactGatewayTest": "physicalWaitDoesNotHoldTheOwnerLane",
+            "J52PhysicalCompactIT": "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration",
+        }
+        m5_report._validate_task(original, path, repo)
+        for class_name, method in required.items():
+            for remove_suite in (False, True):
+                task = json.loads(json.dumps(original))
+                if remove_suite:
+                    task["tests"] = [test for test in task["tests"]
+                                     if not test["class"].endswith("." + class_name)]
+                else:
+                    suite = next(test for test in task["tests"]
+                                 if test["class"].endswith("." + class_name))
+                    suite["methods"].remove(method)
+                with self.subTest(suite=class_name, remove_suite=remove_suite):
+                    with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
+                        m5_report._validate_task(task, path, repo)
+
+    def test_zero_completion_and_real_pin_rpc_cannot_be_omitted(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for class_name, method in (
+                ("HistoryGcCompletionScanTest", "defaultZeroCountersAreNotACompletedZeroRevisionSweep"),
+                ("J52PhysicalCompactIT", "physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts"),
+                ("J52HistoryCollectionIT", "boundsKeyEnumerationToOneDurableBucketInBothLayouts")):
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"] if test["class"].endswith(class_name))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method):
+                with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
+                    m5_report._validate_task(task, path, repo)
+
+    def test_runtime_profile_requires_real_physical_rpc_and_kerberos_jvm_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            pom = repo / "server/pom.xml"
+            pom.parent.mkdir(parents=True)
+            original = (Path(__file__).parents[2] / "server/pom.xml").read_text(encoding="utf-8")
+            pom.write_text(original, encoding="utf-8")
+            m5_report._validate_maven_profile(repo, "server", "m5-j52-public")
+            for invalid in (
+                    original.replace("**/J52PhysicalCompactIT.java", "**/MissingIT.java"),
+                    original.replace("<reuseForks>false</reuseForks>", "")):
+                pom.write_text(invalid, encoding="utf-8")
+                with self.subTest(profile=invalid), self.assertRaises(m5_report.ReportError):
+                    m5_report._validate_maven_profile(repo, "server", "m5-j52-public")
+
+    def test_zero_revision_requires_no_scan_worker_and_real_nonempty_rpc_regressions(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        m5_report._validate_task(original, path, repo)
+        for class_name, method in (
+                ("HistoryGcCycleTest", "zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket"),
+                ("HistoryGcCycleTest", "ownerLossBeforeZeroRevisionClaimReturnsCannotPublishCompletion"),
+                ("J52PhysicalCompactIT", "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts")):
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"] if test["class"].endswith("." + class_name))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method):
+                with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
+                    m5_report._validate_task(task, path, repo)
 
     def test_runtime_profile_cannot_skip_or_omit_the_real_worker_integration_suite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

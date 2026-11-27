@@ -17,13 +17,14 @@ import org.slf4j.LoggerFactory;
 
 /** Schedules one GC page at a time and owns cancellation through physical and cleanup settlement. */
 final class GcCheckpointWorker {
+  enum Outcome { PROGRESSED, IDLE, BACKLOG }
   private static final Logger LOG = LoggerFactory.getLogger(GcCheckpointWorker.class);
   private static final Executor CLEANUP = task -> Thread.ofVirtual().name("gc-cleanup").start(task);
   private final Object lock = new Object();
   private final Executor executor;
   private final ScheduledExecutorService timer;
   private final Duration timeout;
-  private final Function<RequestScope, CompletableFuture<GcCheckpointCycle.Outcome>> cycle;
+  private final Function<RequestScope, CompletableFuture<Outcome>> cycle;
   private final RequestMetrics metrics;
   private final CompletableFuture<Void> drained = new CompletableFuture<>();
   private ScheduledFuture<?> scheduled;
@@ -34,7 +35,7 @@ final class GcCheckpointWorker {
   private boolean running;
 
   GcCheckpointWorker(Executor executor, ScheduledExecutorService timer, Duration timeout,
-      Function<RequestScope, CompletableFuture<GcCheckpointCycle.Outcome>> cycle, RequestMetrics metrics) {
+      Function<RequestScope, CompletableFuture<Outcome>> cycle, RequestMetrics metrics) {
     this.executor = Objects.requireNonNull(executor, "executor");
     this.timer = Objects.requireNonNull(timer, "timer");
     this.timeout = Objects.requireNonNull(timeout, "timeout");
@@ -97,11 +98,11 @@ final class GcCheckpointWorker {
   }
 
   private void run(RequestScope scope) {
-    CompletableFuture<GcCheckpointCycle.Outcome> operation;
+    CompletableFuture<Outcome> operation;
     try {
       synchronized (lock) {
         if (!running) {
-          settle(scope, GcCheckpointCycle.Outcome.IDLE, null);
+          settle(scope, Outcome.IDLE, null);
           return;
         }
       }
@@ -115,7 +116,7 @@ final class GcCheckpointWorker {
     operation.whenComplete((outcome, failure) -> settle(scope, outcome, failure));
   }
 
-  private void settle(RequestScope scope, GcCheckpointCycle.Outcome outcome, Throwable failure) {
+  private void settle(RequestScope scope, Outcome outcome, Throwable failure) {
     try { scope.closeAsync(CLEANUP); }
     catch (RuntimeException | Error cleanup) { failure = append(failure, cleanup); }
     Throwable primary = failure;
@@ -130,7 +131,7 @@ final class GcCheckpointWorker {
     });
   }
 
-  private void finish(RequestScope scope, GcCheckpointCycle.Outcome outcome, Throwable failure,
+  private void finish(RequestScope scope, Outcome outcome, Throwable failure,
       Throwable releaseFailure) {
     synchronized (lock) {
       if (active != scope) throw new IllegalStateException("GC scope settled twice");
@@ -140,8 +141,8 @@ final class GcCheckpointWorker {
       if (!running) { completeDrain(); return; }
       if (failure != null) recordFailure(failure);
       else lastFailure = null;
-      schedule(failure != null || outcome == GcCheckpointCycle.Outcome.BACKLOG ? 1000
-          : outcome == GcCheckpointCycle.Outcome.PROGRESSED ? 20 : 1000);
+      schedule(failure != null || outcome == Outcome.BACKLOG ? 1000
+          : outcome == Outcome.PROGRESSED ? 20 : 1000);
     }
   }
 
@@ -149,7 +150,7 @@ final class GcCheckpointWorker {
     Throwable cause = unwrap(failure);
     var category = cause instanceof BackendFailure backend ? backend.category() : BackendFailure.Category.UNKNOWN;
     metrics.recordGcFailure();
-    if (lastFailure != category) LOG.warn("System-record GC paused for retry: {}", category);
+    if (lastFailure != category) LOG.warn("GC page paused for retry: {}", category);
     lastFailure = category;
   }
 

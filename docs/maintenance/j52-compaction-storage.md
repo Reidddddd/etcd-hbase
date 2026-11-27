@@ -2,9 +2,11 @@
 
 ## 1. 交付范围
 
-本次提供内部逻辑 Compact 选择器、KV 历史回收许可、系统记录引用闭包和 HBase 精确退休原语。`CompactionService` 复用现有控制行与 system 记录，`GcCoordinator` 复用持久 snapshot pin 注册表。`KV.Compact` 已通过 `CompactGateway` 装配到既有 owner lane，与发布和恢复串行执行；J52 保持进行中。
+本次提供内部逻辑 Compact 选择器、KV 历史回收许可、系统记录引用闭包和 HBase 精确退休原语。`CompactionService` 复用现有控制行与 system 记录，`GcCoordinator` 复用持久 snapshot pin 注册表。`KV.Compact` 的授权及逻辑选择通过 `CompactGateway` 装配到既有 owner lane，与发布和恢复串行执行；完成等待在离开该 lane 后执行。独立后台 worker 持续回收 KV 历史，J52 保持进行中。
 
-`physical=false` 返回本次逻辑选择结果。当前运行时已装配系统记录分片检查点，但 KV 历史枚举与整体完成水位尚未装配，`physical=true` 在逻辑选择成功后返回 `UNAVAILABLE`；该错误不撤销已持久化的逻辑压缩边界，也不表示物理回收完成。请求取消或超时后不返回成功响应。
+本 PR 按[范围评审结论](https://github.com/Reidddddd/etcd-hbase/pull/68#issuecomment-7210841766)交付 KV 历史实现切片。当前 `physical=true` RPC 的受限投影只确认本次目标所需的 KV 历史回收及 KV/辅助 pin 保护排空，不等待事件、决定、结果等内部记录域完成。因此，该成功响应不满足[完整设计 §6.1](../specs/2026-11-20-m5-auth-gc-lifecycle-design.md#61-逻辑确认与物理完成)，也不代表整个后端物理完成或 J52 完成。HFile 空间归还仍由 HBase compaction 异步执行。
+
+`physical=false` 在逻辑边界与选定操作身份持久化后返回；`COMPACTION` 记录和控制行的选定身份共同登记可恢复工作，各 bucket 检查点由后台延迟创建。`physical=true` 在请求自己的目标 revision 和 baseSequence 均被所有 KV bucket 的持久完成水位覆盖后返回。取消或超时只结束本次等待，不撤销逻辑边界或后台任务；原操作继续执行，同一 revision 重试仍返回 `ErrCompacted`。更强的后续 Compact 任务可以覆盖旧目标，但不能仅凭更高逻辑边界报告旧目标物理完成。
 
 启用会话认证时，网关从当前 RPC 的 token 解析用户身份。创建 COMPACTION 记录前和逻辑边界 CAS 前，均复核同一会话及授权代次，并使用该用户的真实 HBase 连接检查表组内 system、history/native 和 current 表的 `ADMIN` 权限。缺失、无效或已撤销的会话，以及管理权限不足的请求，在准入时不创建操作记录，也不改变控制行；权限检查不受支持或不可用时同样拒绝执行。会话认证关闭时，配置的后端身份仍须通过相同的 `ADMIN` 检查，不因使用服务身份而豁免。
 
@@ -12,7 +14,7 @@
 
 新的操作先以 `COMPACTION` 类别持久保存请求身份、授权范围、目标 revision 和完整控制状态摘要，再用控制行 CAS 选择逻辑边界。控制行的 `compact_operation_id` 使丢失 ACK 的操作可以按原身份恢复；替换该身份前，必须先持久确认前一操作的逻辑结论。逻辑压缩不增加 KV revision 或 sequence。控制状态未启用授权发布屏障时拒绝选择；控制行含 Compact 身份但 descriptor 未声明能力时拒绝读取。
 
-初始 `Compact(0)` 与已压缩到零不同。固定 etcd v3.5.23 的原生对照覆盖初始零、负数、重复、未来 revision，以及 Compact 后 Range/Watch 的 C−1、C、C+1 边界。重复与未来 revision 在网关中投影为 `OUT_OF_RANGE`。Go 测试目前只提供原生行为依据，不代表 Java Compact RPC 已互通。
+初始 `Compact(0)` 与已压缩到零不同。固定 etcd v3.5.23 的原生对照覆盖初始零、负数、重复、未来 revision，以及 Compact 后 Range/Watch 的 C−1、C、C+1 边界。重复与未来 revision 在网关中投影为 `OUT_OF_RANGE`。Go 测试提供原生行为依据；Java RPC 另有真实 Kerberos MiniCluster 验证，尚不代表完整 Java/Go 客户端互操作验收。
 
 `Compact(0, physical=false)` 的 protobuf 编码可以为空，网关仍以一个最小计量单位提交 owner lane。队列因关闭或容量限制拒绝请求时，网关会投影该错误。已派发工作使用队列拥有的服务 scope 完成；成功响应等待该 scope 清理结束，清理失败不会被投影为成功。是否可以返回成功仍由原 RPC scope 决定，客户端取消或清理失败不等于回滚已选择的逻辑边界。
 
@@ -26,7 +28,13 @@ HISTORY 每个 key 保留 safe revision 处的最后基线、墓碑和更高版�
 
 NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，并用最新 fence 的完整内容 CAS 安装维护代次。并发新写先获胜时重新读取并计算计划；ACK 丢失先强读，不给旧计划换条件重发。取消结束调用结果，在途 HBase producer 仍须排空；本页未确认时调用方不能推进游标。
 
-每次 HISTORY 页最多处理 64 个版本，NATIVE 页最多删除 64 个版本。当前入口处理显式枚举的单个 key；持久 bucket/key 检查点、后台调度和预算准入仍待装配。保留的最小 guard 会持续占用空间，不能把它描述为常数磁盘容量。
+每次 HISTORY 页最多处理 64 个版本，NATIVE 页最多删除 64 个版本。Native 选页前读取 descriptor 允许的全部 metadata/fence 版本，内存预留按实际版本上限计算。枚举每次只寻找一个 bucket 内的下一个 key，不读取业务 value；游标排除该 key 的完整物理前缀，不跨 salt bucket 比较逻辑 key。
+
+后台每轮只推进一个持久 key 意图、一个版本页或一次 bucket EOF，随后轮转 bucket，并使用独立的维护 scope、deadline 和常规预算。没有 Lease 运行时也会在启用 Compact 能力时装配 KV worker。删除前持久保存 active key，删除及强读确认后才用精确旧值 CAS 推进版本游标；key 完整处理前不能越过它。owner 接管保留已确认游标，并以 owner epoch 与操作代次约束后续进度；未知结果下一轮重读，不推断成功。
+
+检查点分别保存本轮冻结的 safe revision/sequence 和已完成 revision/sequence。旧 pin 导致的保守低水位只表示部分回收，不能完成更高请求目标；安全边界扩大后，下一轮从 bucket 开始重新检查。只有后端 EOF 且所有 key 页确认后才发布该轮完成水位。正的 completed generation 证明至少完成过一轮，默认 `0/0` 计数不能证明 `Compact(0)` 已完成。本轮冻结的 safe revision 为零时，没有可删除的 KV 版本，各 bucket 直接持久确认空 sweep，保留 sequence 和正完成代次校验，不逐 key 枚举非空业务表。较强任务开始时保留旧完成回执，取消、进程终止和 owner 接管均不清除它。
+
+请求等待方以有界 point read 检查各 bucket；等待不占用 owner lane，pin 尚未解除时 Put 仍能执行。请求与后台独立，取消后等待方仍持有准入和实际读取资源直至 producer 排空，成功响应还须等待清理结果。运行时关闭或失去 owner 时停止 worker 和等待方，排空后再释放底层连接及自有 timer。保留的最小 guard 会持续占用空间，不能把它描述为常数磁盘容量。
 
 ## 3. 系统记录退休与结果窗口
 
@@ -64,15 +72,15 @@ GC 要求持久 descriptor 声明 `etcdhbase.m5.gc-fence-format=1`，并存在�
 
 以下内容属于已批准的 J52，当前仍需实现：
 
-- 跨副本 owner RPC 转发、前后台身份与调度生命周期，以及真实目标环境的管理权限验收。
+- 跨副本 Compact owner RPC 转发、完整记录域的调度生命周期，以及真实目标环境的管理权限验收。
 - invocation 结果窗口的运行时关闭、在途结果查询的持久保护，以及不可重放的最小证明。
-- KV 历史的持久 bucket/key 检查点及后台调度，以及 `physical=false` 的工作登记和 `physical=true` 的完成等待、超时后后台继续。
+- 把事件、决定、结果等内部记录的精确删除、引用解除及保护排空纳入同一目标的持久完成证明。现有系统 GC sweep EOF 不能独立证明该闭包已排空。
 
-因此，本次不设置物理完成水位，不将逻辑 CAS 或 KV 页删除解释为完整 physical 完成，也不宣称 J52 验收通过。批准设计中的 physical 投影仍要求全部应回收记录完成精确删除和强读确认；HFile 空间释放另由 HBase compaction 完成。
+本次只设置 KV 历史完成水位，不将它解释为完整 physical 完成，也不宣称 J52 验收通过。完整设计仍要求全部应回收记录完成精确删除和强读确认；本 PR 的受限 RPC 行为及其偏差见第 1 节。
 
 ## 6. 格式与验证入口
 
-GC 检查点值使用格式 2，分别编码 fence/扫描游标及明确的 phase；格式 1 会被严格拒绝，不自动回退或丢弃旧进度。新旧维护格式的受控升级仍待 J55。
+系统记录 GC 检查点值使用格式 2，分别编码 fence/扫描游标及明确的 phase；格式 1 会被严格拒绝，不自动回退或丢弃旧进度。新旧维护格式的受控升级仍待 J55。KV 历史检查点使用独立的 `RECOVERY_CHECKPOINT` 身份 `HGC/1` 和值 `HGV/1`，不复用系统记录扫描游标；编码绑定 profile、16 字节 pin 注册表身份、owner epoch、操作代次、bucket 拓扑和完成回执。
 
 system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compaction-format=1`。没有该能力的 store 拒绝读写 Compact 记录或安装控制身份。系统记录 GC 还要求第 4 节的独立维护 family 和持久 fence 能力；不将原 Compact 标记解释为可直接写入新的维护布局。已有控制格式增加 optional `compact_operation_id`；旧版严格解码器会拒绝该字段，不能把启用后的 writer 回退称为兼容。J55 仍需接入受控升级与启动能力校验。
 
@@ -82,7 +90,7 @@ system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compactio
 scripts/verify/m5.sh --scope public --task J52 --artifact-root .artifacts/m5/j52-storage-run
 ```
 
-入口运行确定性逻辑/pin/许可及扫描单测、HISTORY/NATIVE MiniCluster、系统记录与结果窗口 MiniCluster，以及固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。门禁构建至 `server`，保留原有 HBase 集成套件，并增加 GC 生命周期、检查点及真实双 bucket 重启回收验证。它登记在 M5 CI 中，运行报告明确保留第 5 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
+入口运行确定性逻辑/pin/许可及扫描单测、HISTORY/NATIVE MiniCluster、系统记录与结果窗口 MiniCluster，以及固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。门禁构建至 `server`，保留原有 HBase 集成套件，并覆盖 GC 生命周期、KV 与系统记录检查点及真实双 bucket 重启回收。`J52PhysicalCompactIT` 使用实际管理身份、生产 runtime 和 gRPC，分别验证两种布局下旧 pin 阻塞、owner lane 可继续写入、全部目标版本精确删除及基线保留，以及取消后强杀 owner JVM、接管继续原任务和逻辑请求登记后台工作。测试门禁要求这些方法实际执行，且 Kerberos 测试按 JVM 隔离。它登记在 M5 CI 中，运行报告明确保留第 5 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
 
 J52 专属门禁在实际执行的 `server` reactor 中登记 `CompactGatewayAuthorizationTest`，覆盖请求身份、每张目标表的 `ADMIN` 权限、真实 gRPC token 传递、CAS 前失效及取消排空；任一授权套件或关键方法缺失均不能通过报告校验。J09 仍执行完整 server 构建，J52 同时保留 GC worker 的真实执行套件。真实 Kerberos/HBase 的 `ADMIN` 授予与撤销反例属于 J04 的安全后端集成测试；替身网关测试和实际后端 ACL 测试各自保留验证范围。
 

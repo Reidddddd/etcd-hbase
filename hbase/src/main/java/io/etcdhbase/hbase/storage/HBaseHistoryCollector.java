@@ -15,6 +15,8 @@ import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.hbase.api.HBaseConnectionFactory;
 import io.etcdhbase.hbase.codec.RevisionTimestamp;
 import io.etcdhbase.hbase.codec.RowFenceMessages;
+import io.etcdhbase.hbase.codec.StorageMessages;
+import org.apache.hadoop.hbase.HConstants;
 import io.etcdhbase.spi.identity.AuthorizedBackendIdentity;
 import java.io.IOException;
 import java.util.Arrays;
@@ -62,6 +64,17 @@ public final class HBaseHistoryCollector {
             .thenCompose(records -> SnapshotPinManager.open(records, pinConfiguration, scope))
             .thenApply(pins -> new HBaseHistoryCollector(rows, primary, system.profileFingerprint(),
                 pins.registryIdentity())));
+  }
+
+  /** Bounds retained wire/results and value verification buffers for this validated descriptor. */
+  public long maximumPageReadBytes() {
+    long versions = primary.layout() == StorageTableBinding.Layout.NATIVE
+        ? rows.nativeVersionLimit() : MAX_HISTORY_PAGE + 1L;
+    long cellBytes = HConstants.MAX_ROW_LENGTH + (long) primary.family().length
+        + Math.max(StorageMessages.MAX_METADATA_BYTES, RowFenceMessages.MAX_BYTES) + 128;
+    // Native reads all retained metadata/fences before selecting a bounded delete page. Each cell
+    // repeats the row key; the provisioned native version limit can exceed the 64-delete budget.
+    return 2 * (2 * versions) * cellBytes + 4L * StorageMessages.MAX_VALUE_BYTES + (1L << 20);
   }
 
   /**

@@ -14,6 +14,7 @@ import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import io.etcdhbase.server.observability.RequestMetrics;
+import io.etcdhbase.server.commit.GcCheckpointWorker.Outcome;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -21,7 +22,6 @@ import java.util.function.Supplier;
 
 /** Performs at most one durable bucket page per invocation, outside the mutation owner lane. */
 final class GcCheckpointCycle {
-  enum Outcome { PROGRESSED, IDLE, BACKLOG }
   static final BudgetManager.Reservation MEMORY = new BudgetManager.Reservation(64L << 10, 16L << 20,
       2 * ManifestCatalog.maximumProofReadPageBytes(), 16L << 20, 16L << 20);
   private static final SystemRecordClosure.Domain[] DOMAINS = SystemRecordClosure.Domain.values();
@@ -67,9 +67,8 @@ final class GcCheckpointCycle {
     if (token.isEmpty()) return CompletableFuture.completedFuture(Outcome.IDLE);
     BudgetManager.Account account;
     try {
-      account = budgets.admit(group, scope, reservation,
+      account = GcPageAdmission.admit(budgets, group, scope, reservation,
           new BudgetManager.ReadLimits(65_536, 512L << 20, 16_384, 16_384, 16_384));
-      holdUntilPhysicalDrain(account, scope);
     } catch (BackendFailure rejected) {
       if (rejected.category() != BackendFailure.Category.RESOURCE_LIMIT) {
         return CompletableFuture.failedFuture(rejected);
@@ -131,15 +130,4 @@ final class GcCheckpointCycle {
     }
   }
 
-  /** Coarse GC I/O admission remains occupied after cancellation until actual backend RPCs drain. */
-  private static void holdUntilPhysicalDrain(BudgetManager.Account account, RequestScope scope)
-      throws BackendFailure {
-    var slot = account.tryAcquire(new BudgetManager.Work(0, 1, 1, 1, 0))
-        .orElseThrow(() -> new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
-    var released = new CompletableFuture<Void>();
-    scope.registerScopedCleanup(() -> scope.physicalProducersCompletion().whenComplete((ignored, failure) -> {
-      try { slot.close(); released.complete(null); }
-      catch (RuntimeException | Error cleanup) { released.completeExceptionally(cleanup); }
-    }), released);
-  }
 }

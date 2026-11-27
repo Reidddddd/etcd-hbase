@@ -447,6 +447,10 @@ J52_REQUIRED_TESTS = {
         'rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.J52HistoryCollectionIT'): {
+        'enumeratesEveryKeyWithBucketLocalExclusiveResumePoints',
+        'boundsKeyEnumerationToOneDurableBucketInBothLayouts',
+        'doesNotEndEnumerationInsideAHighChurnKey',
+        'resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder',
         'cancellationRetainsPhysicalProducerUntilLateDeleteDrains',
         'preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts',
         'rejectsPermissionFromAnotherPinRegistryBeforeDeletingData',
@@ -548,6 +552,8 @@ J52_REQUIRED_TESTS = {
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.M3TableGroupRuntimeWorkerLifecycleTest'): {
         'ownerLossStopsInstalledGcAndRejectsReplacement',
+        'historyMaintenanceRunsWithoutLeaseAndOwnerLossRejectsLateInstallation',
+        'failedHistoryStopStillClosesWaitersSystemGcAndTailerOnOwnerLoss',
     },
     ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.SystemRecordGcFenceTest'): {
         'newerOwnerDominatesEveryOlderCompactGeneration',
@@ -567,6 +573,62 @@ J52_REQUIRED_TESTS = {
         'cancellationRetainsUserBorrowUntilLatePermissionRpcDrains',
         'rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity',
     },
+    ('core', 'surefire', 'io.etcdhbase.core.commit.HistoryGcCheckpointStoreTest'): {
+        'encodingDistinguishesAnEmptyBusinessKeyFromAnAbsentCursor',
+        'rejectsTruncatedOversizedAndTrailingCheckpointBytes',
+        'restartResumesTheExactActiveVersionPageAfterAnUnknownIntentAcknowledgement',
+        'incompleteVersionsCannotAdvanceTheKeyOrPublishCompletion',
+        'aNewOwnerFencesOldProgressButKeepsTheConfirmedCursor',
+        'strongerFloorsWaitForTheNextSweepAndKeepThePreviousCompletionReceipt',
+        'foreignBucketKeysCannotBecomeDurableWorkOrCompletion',
+        'permitRestrictionCannotWidenBoundsOrEscapeItsScope',
+        'aDifferentProfileOrPinRegistryCannotClaimHistoryProgress',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.HistoryGcCycleTest'): {
+        'zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket',
+        'ownerLossBeforeZeroRevisionClaimReturnsCannotPublishCompletion',
+        'persistsActiveKeyIntentBeforeAnyDeletionCanStart',
+        'resumesOnlyOneConfirmedVersionPageUnderTheFrozenSafeBounds',
+        'unknownDeletionCannotAdvanceTheDurableVersionCursor',
+        'onlyBackendEofAfterTheLastCompleteKeyPublishesTheBucketWatermark',
+        'ownerLossBeforeDeleteReadbackCannotPublishProgress',
+        'maintenanceAdmissionDoesNotReleaseUntilTheActualProducerDrains',
+        'unavailableMaintenanceCapacityStartsNoStorageWork',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.HistoryGcCompletionScanTest'): {
+        'conservativePinBoundsDoNotCompleteTheRequestedTarget',
+        'defaultZeroCountersAreNotACompletedZeroRevisionSweep',
+        'bothRevisionAndSequenceAndEveryBucketMustBeConfirmed',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.PhysicalCompactionWaiterTest'): {
+        'waitsForDurableProgressAndGivesEachCallerAnIndependentScan',
+        'cancellationDetachesTheRpcButRetainsAdmissionUntilTheRealReadDrains',
+        'deadlineTerminatesEvenWhenTheReadFutureNeverResponds',
+        'successWaitsForCleanupAndCleanupFailureCannotFollowASuccessResponse',
+        'shutdownRejectsWaitersAndPreventsQueuedPollsFromStartingStorageWork',
+    },
+    ('server', 'failsafe', 'io.etcdhbase.server.J52PhysicalCompactIT'): {
+        'zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts',
+        'physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts',
+        'cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.CompactGatewayTest'): {
+        'emptyEncodedZeroRequestCanEnterTheRealOwnerLane',
+        'realLaneRejectionReturnsAnErrorInsteadOfHanging',
+        'dispatchedServiceScopeCannotSendSuccessAfterTheRpcScopeIsCancelled',
+        'realLaneSuccessWaitsForServiceCleanup',
+        'realLaneCleanupFailureCannotFollowAnAlreadySentSuccess',
+        'logicalSelectionReturnsTheResponseRevisionAndItsServingHeader',
+        'physicalWaitDoesNotHoldTheOwnerLane',
+        'physicalCompactWaitsForItsOwnBoundedHistoryDeletion',
+        'physicalCompactReportsFailureWhenHistoryDeletionFails',
+        'physicalCompactFailsClosedWhenNoHistoryCollectorIsWired',
+        'logicalCompactStillSucceedsWithoutAHistoryCollector',
+        'repeatedCompactIsReportedAsCompactedRatherThanSucceeding',
+        'futureCompactIsRejectedWithoutAdvancingTheBoundary',
+        'missingOwnerFailsClosedWithoutAttemptingAControlWrite',
+        'cancelledRequestDoesNotSendAResponse',
+    },
 
 }
 
@@ -581,6 +643,9 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "durable-system-retirement-and-reference-closure",
         "invocation-window-close-before-result-retirement",
         "bucket-checkpoint-restart-pin-retention-and-physical-drain",
+        "durable-kv-bucket-version-progress-and-target-completion",
+        "physical-rpc-old-pin-owner-lane-and-exact-delete",
+        "cancelled-rpc-owner-process-death-and-logical-only-resume",
     }
     scenarios = task.get("scenarios", [])
     if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)
@@ -686,7 +751,7 @@ def _validate_maven_profile(repo: Path, module: str, profile_id: str) -> None:
         ("m5-j50-public", "hbase"): {"**/HBaseAuthControlIT.java"},
         ("m5-j50-public", "server"): {"**/M5AuthProcessIT.java", "**/M5AuthenticateGatewayProcessIT.java"},
         ("m5-j51-public", "server"): {"**/M5AuthenticateGatewayProcessIT.java"},
-        ("m5-j52-public", "server"): {"**/GcCheckpointCycleIT.java"},
+        ("m5-j52-public", "server"): {"**/GcCheckpointCycleIT.java", "**/J52PhysicalCompactIT.java"},
         ("m5-j52-public", "hbase"): {
             "**/J52HistoryCollectionIT.java", "**/HBaseSystemRecordRetirementIT.java",
             "**/HBaseSystemRecordClosureIT.java", "**/InvocationWindowCloserIT.java",
@@ -694,7 +759,7 @@ def _validate_maven_profile(repo: Path, module: str, profile_id: str) -> None:
     }.get((profile_id, module), set())
     if not required.issubset(includes):
         raise ReportError(f"execution profile does not include required IT: {module}/{profile_id}")
-    if (module == "server" and profile_id in {"m5-j50-public", "m5-j51-public"}
+    if (module == "server" and profile_id in {"m5-j50-public", "m5-j51-public", "m5-j52-public"}
             and configuration.findtext("m:reuseForks", namespaces=namespace) != "false"):
         raise ReportError(f"{profile_id[3:6].upper()} server profile must isolate Kerberos MiniKDC tests by JVM")
 
@@ -810,9 +875,9 @@ def init_run(repo: Path, task_id: str, scope: str, artifact_root: Path) -> None:
         ]
     if task_id == "J52":
         run["unverified"] = [
-            "Compact RPC owner routing, real management authorization and background assembly",
-            "physical=true durable completion, timeout continuation and restart recovery",
-            "event/index/manifest/decision/result closure and result-window protection",
+            "cross-replica Compact owner routing and target-environment management authorization",
+            "full-record physical=true completion beyond the KV-history-only RPC projection",
+            "runtime result-window protection and all-record protection drain/completion",
             "target-environment acceptance and HFile space reclamation",
         ]
     _write_json(artifact_root / "run.json", run)

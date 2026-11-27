@@ -78,6 +78,115 @@ class J52HistoryCollectionIT {
   @AfterAll static void stop() throws Exception { if (environment != null) environment.close(); }
 
   @Test
+  void enumeratesEveryKeyWithBucketLocalExclusiveResumePoints() throws Exception {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var group = group(StorageTableBinding.Layout.HISTORY, scope);
+      var keys = List.of(ByteKey.copyOf(new byte[] {1}), ByteKey.copyOf(new byte[] {2}),
+          ByteKey.copyOf(new byte[] {3}));
+      for (var key : keys) {
+        for (int version = 0; version < 4; version++) group.append(false, scope, key);
+      }
+      group.compact(4, scope);
+      var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
+          Clock.systemUTC()).authorizeHistory(OWNER, scope));
+      var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
+          environment.identity(), group.system, group.primary, group.current, scope));
+      var all = new java.util.HashSet<ByteKey>();
+      for (int bucket = 0; bucket < SALT.profile().bucketCount(); bucket++) {
+        Optional<ByteKey> after = Optional.empty();
+        while (true) {
+          var next = await(enumerator.nextKey(permit, bucket, after, scope));
+          if (next.isEmpty()) break;
+          assertTrue(all.add(next.orElseThrow()), "each complete key is visited exactly once");
+          assertEquals(bucket, group.primary.codec().bucket(next.orElseThrow()));
+          after = next;
+        }
+      }
+      assertEquals(new java.util.HashSet<>(keys), all);
+    }
+  }
+
+  @Test
+  void doesNotEndEnumerationInsideAHighChurnKey() throws Exception {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var group = group(StorageTableBinding.Layout.HISTORY, scope);
+      var keys = java.util.stream.IntStream.range(1, 256)
+          .mapToObj(value -> ByteKey.copyOf(new byte[] {(byte) value}))
+          .filter(key -> group.primary.codec().bucket(key) == 0).limit(2).toList();
+      assertEquals(2, keys.size());
+      for (int version = 0; version < 40; version++) group.append(false, scope, keys.getFirst());
+      group.append(false, scope, keys.getLast());
+      group.compact(42, scope);
+      var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
+          Clock.systemUTC()).authorizeHistory(OWNER, scope));
+      var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
+          environment.identity(), group.system, group.primary, group.current, scope));
+      var first = await(enumerator.nextKey(permit, 0, Optional.empty(), scope));
+      assertEquals(Optional.of(keys.getFirst()), first);
+      var second = await(enumerator.nextKey(permit, 0, first, scope));
+      assertEquals(Optional.of(keys.getLast()), second, "all 40 versions of the prior key must be skipped");
+      assertTrue(await(enumerator.nextKey(permit, 0, second, scope)).isEmpty());
+    }
+  }
+
+  @Test
+  void resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder() throws Exception {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var group = group(StorageTableBinding.Layout.HISTORY, scope);
+      var candidates = java.util.stream.IntStream.range(1, 256)
+          .mapToObj(value -> ByteKey.copyOf(new byte[] {(byte) value})).toList();
+      var firstKey = candidates.stream().filter(key -> group.primary.codec().bucket(key) == 0)
+          .reduce((left, right) -> right).orElseThrow();
+      var nextKey = candidates.stream().filter(key -> group.primary.codec().bucket(key) == 3)
+          .findFirst().orElseThrow();
+      assertTrue(firstKey.compareTo(nextKey) > 0);
+      group.append(false, scope, firstKey);
+      group.append(false, scope, nextKey);
+      group.compact(3, scope);
+      var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
+          Clock.systemUTC()).authorizeHistory(OWNER, scope));
+      var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
+          environment.identity(), group.system, group.primary, group.current, scope));
+      var first = await(enumerator.nextKey(permit, 0, Optional.empty(), scope));
+      assertEquals(Optional.of(firstKey), first);
+      assertTrue(await(enumerator.nextKey(permit, 0, first, scope)).isEmpty());
+      assertEquals(Optional.of(nextKey), await(enumerator.nextKey(permit, 3, Optional.empty(), scope)),
+          "the next bucket begins with its own exclusive cursor");
+      assertThrows(IllegalArgumentException.class, () -> enumerator.nextKey(permit, 3, first, scope));
+    }
+  }
+
+  @Test
+  void boundsKeyEnumerationToOneDurableBucketInBothLayouts() throws Exception {
+    for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
+      try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+        var group = group(layout, scope);
+        var candidates = java.util.stream.IntStream.range(1, 256)
+            .mapToObj(value -> ByteKey.copyOf(new byte[] {(byte) value})).toList();
+        var inBucket = candidates.stream().filter(key -> group.primary.codec().bucket(key) == 0)
+            .limit(2).toList();
+        var other = candidates.stream().filter(key -> group.primary.codec().bucket(key) == 1)
+            .findFirst().orElseThrow();
+        for (var key : inBucket) group.append(false, scope, key);
+        group.append(false, scope, other);
+        group.compact(4, scope);
+        var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
+            Clock.systemUTC()).authorizeHistory(OWNER, scope));
+        var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
+            environment.identity(), group.system, group.primary, group.current, scope));
+        var first = await(enumerator.nextKey(permit, 0, Optional.empty(), scope));
+        assertEquals(Optional.of(inBucket.getFirst()), first);
+        var second = await(enumerator.nextKey(permit, 0, first, scope));
+        assertEquals(Optional.of(inBucket.getLast()), second);
+        assertTrue(await(enumerator.nextKey(permit, 0, second, scope)).isEmpty());
+        assertEquals(Optional.of(other), await(enumerator.nextKey(permit, 1, Optional.empty(), scope)));
+        assertThrows(IllegalArgumentException.class,
+            () -> enumerator.nextKey(permit, 0, Optional.of(other), scope));
+      }
+    }
+  }
+
+  @Test
   void preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts() throws Exception {
     for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
       try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3));
@@ -327,13 +436,20 @@ class J52HistoryCollectionIT {
       compactions = new CompactionService(control, records, Clock.systemUTC());
     }
     PreparedCandidate append(boolean tombstone, RequestScope scope) throws Exception {
+      return append(tombstone, scope, key);
+    }
+
+    PreparedCandidate append(boolean tombstone, RequestScope scope, ByteKey selectedKey)
+        throws Exception {
       var observed = await(control.read(scope)).orElseThrow();
       var state = observed.state();
       long revision = state.publishedRevision() + 1;
       byte[] value = {(byte) revision};
       var metadata = new StorageMetadata(2, revision, revision - 1, 0,
           tombstone ? StorageMetadata.State.TOMBSTONE : StorageMetadata.State.LIVE, tombstone ? 0 : 1);
-      var record = tombstone ? StoredRecord.metadataOnly(key, metadata) : StoredRecord.live(key, metadata, value);
+      var record = tombstone
+          ? StoredRecord.metadataOnly(selectedKey, metadata)
+          : StoredRecord.live(selectedKey, metadata, value);
       var candidate = new PreparedCandidate(TransactionId.create(), OWNER.epoch(),
           state.publishedSequence(), state.publishedRevision(), record);
       CommitDecision decision = decision(candidate);
