@@ -447,6 +447,9 @@ J52_REQUIRED_TESTS = {
         'rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.J52HistoryCollectionIT'): {
+        'enumeratesEveryKeyInBoundedPagesThatPhysicalCompactCanDrain',
+        'doesNotEndEnumerationInsideAHighChurnKey',
+        'resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder',
         'cancellationRetainsPhysicalProducerUntilLateDeleteDrains',
         'preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts',
         'rejectsPermissionFromAnotherPinRegistryBeforeDeletingData',
@@ -553,6 +556,9 @@ J52_REQUIRED_TESTS = {
         'newerOwnerDominatesEveryOlderCompactGeneration',
         'rejectsCorruptDuplicateOrUnknownMaintenanceCells',
         'payloadReaderKeepsTheBaseLayoutAndRejectsInlineFences',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.PhysicalHistoryCollectionTest'): {
+        'drainsEveryVersionPageBeforeReportingAKeyComplete',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.CompactGatewayAuthorizationTest'): {
         'missingAndInvalidTokensCannotCreateOperationsOrAdvanceControl',

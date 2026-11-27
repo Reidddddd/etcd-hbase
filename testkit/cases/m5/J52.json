@@ -218,7 +218,10 @@
         "resolvesLostDeleteAcknowledgementAndReplansWhenANewerNativeWriteWins",
         "cancellationRetainsPhysicalProducerUntilLateDeleteDrains",
         "rejectsPermissionFromAnotherPinRegistryBeforeDeletingData",
-        "rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization"
+        "rejectsCompactControlWithoutDescriptorCapabilityAndDuringInitialization",
+        "enumeratesEveryKeyInBoundedPagesThatPhysicalCompactCanDrain",
+        "doesNotEndEnumerationInsideAHighChurnKey",
+        "resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder"
       ]
     },
     {
@@ -426,6 +429,14 @@
         "cancellationRetainsUserBorrowUntilLateConnectionDrains",
         "cancellationRetainsUserBorrowUntilLatePermissionRpcDrains",
         "rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.PhysicalHistoryCollectionTest",
+      "methods": [
+        "drainsEveryVersionPageBeforeReportingAKeyComplete"
       ]
     }
   ]

@@ -466,6 +466,26 @@ class M5J52ReportTest(unittest.TestCase):
         with self.assertRaises(m5_report.ReportError):
             m5_report._validate_task(task, path, repo)
 
+    def test_physical_history_enumeration_and_full_version_drain_are_required(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for method in (
+                "enumeratesEveryKeyInBoundedPagesThatPhysicalCompactCanDrain",
+                "doesNotEndEnumerationInsideAHighChurnKey",
+                "resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder"):
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"]
+                         if test["class"].endswith("J52HistoryCollectionIT"))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method), self.assertRaises(m5_report.ReportError):
+                m5_report._validate_task(task, path, repo)
+        task = json.loads(json.dumps(original))
+        task["tests"] = [test for test in task["tests"]
+                         if not test["class"].endswith("PhysicalHistoryCollectionTest")]
+        with self.assertRaises(m5_report.ReportError):
+            m5_report._validate_task(task, path, repo)
+
     def test_compact_authorization_suite_and_critical_boundaries_are_required(self) -> None:
         repo = Path(__file__).parents[2]
         path = repo / "testkit/cases/m5/J52.json"

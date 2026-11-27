@@ -116,6 +116,53 @@ class J52HistoryCollectionIT {
   }
 
   @Test
+  void doesNotEndEnumerationInsideAHighChurnKey() throws Exception {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var group = group(StorageTableBinding.Layout.HISTORY, scope);
+      var keys = java.util.stream.IntStream.range(1, 256)
+          .mapToObj(value -> ByteKey.copyOf(new byte[] {(byte) value}))
+          .filter(key -> group.primary.codec().bucket(key) == 0).limit(2).toList();
+      assertEquals(2, keys.size());
+      for (int version = 0; version < 40; version++) group.append(false, scope, keys.getFirst());
+      group.append(false, scope, keys.getLast());
+      group.compact(42, scope);
+      var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
+          Clock.systemUTC()).authorizeHistory(OWNER, scope));
+      var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
+          environment.identity(), group.system, group.primary, group.current, scope));
+      var first = await(enumerator.nextKeys(permit, Optional.empty(), 2, scope));
+      if (first.keys().size() < keys.size()) {
+        assertFalse(first.exhausted(), "a row window cannot prove the following key is absent");
+      }
+    }
+  }
+
+  @Test
+  void resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder() throws Exception {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var group = group(StorageTableBinding.Layout.HISTORY, scope);
+      var candidates = java.util.stream.IntStream.range(1, 256)
+          .mapToObj(value -> ByteKey.copyOf(new byte[] {(byte) value})).toList();
+      var firstKey = candidates.stream().filter(key -> group.primary.codec().bucket(key) == 0)
+          .reduce((left, right) -> right).orElseThrow();
+      var nextKey = candidates.stream().filter(key -> group.primary.codec().bucket(key) == 3)
+          .findFirst().orElseThrow();
+      assertTrue(firstKey.compareTo(nextKey) > 0);
+      group.append(false, scope, firstKey);
+      group.append(false, scope, nextKey);
+      group.compact(3, scope);
+      var permit = await(new GcCoordinator(group.control, group.compactions, group.pins,
+          Clock.systemUTC()).authorizeHistory(OWNER, scope));
+      var enumerator = await(HBaseHistoryKeyEnumerator.open(environment.factory(),
+          environment.identity(), group.system, group.primary, group.current, scope));
+      var first = await(enumerator.nextKeys(permit, Optional.empty(), 1, scope));
+      assertEquals(List.of(firstKey), first.keys());
+      var second = await(enumerator.nextKeys(permit, first.lastKey(), 1, scope));
+      assertEquals(List.of(nextKey), second.keys(), "salt order is independent of logical key order");
+    }
+  }
+
+  @Test
   void preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts() throws Exception {
     for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
       try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3));

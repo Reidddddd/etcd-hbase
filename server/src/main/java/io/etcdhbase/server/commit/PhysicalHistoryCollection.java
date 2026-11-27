@@ -3,7 +3,6 @@ package io.etcdhbase.server.commit;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.HistoryGcPermit;
 import io.etcdhbase.core.error.BackendFailure;
-import io.etcdhbase.core.error.CompletionFailures;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.hbase.storage.HBaseHistoryCollector;
 import io.etcdhbase.hbase.storage.HBaseHistoryKeyEnumerator;
@@ -63,16 +62,17 @@ final class PhysicalHistoryCollection implements CompactGateway.HistoryCollectio
 
   private CompletableFuture<Integer> deleteKey(HistoryGcPermit permit, ByteKey key,
       RequestScope scope) {
-    return collector.collectKey(permit, key, 0, MAX_KEYS_PER_ROUND, scope)
-        .thenCompose(page -> page.deletedVersions() > 0 || page.exhausted()
-            ? CompletableFuture.completedFuture(page.deletedVersions())
-            // One bounded page may not finish a key with many versions; continue from its cursor.
-            : collector.collectKey(permit, key, page.lastRevision(), MAX_KEYS_PER_ROUND, scope)
-                .thenApply(next -> page.deletedVersions() + next.deletedVersions()));
+    return deleteVersions(permit, key, 0, 0, scope);
   }
 
-  static CompactGateway.HistoryCollection unavailable() {
-    return (permit, scope) -> CompletableFuture.failedFuture(
-        new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+  private CompletableFuture<Integer> deleteVersions(HistoryGcPermit permit, ByteKey key,
+      long afterRevision, int deletedSoFar, RequestScope scope) {
+    return collector.collectKey(permit, key, afterRevision, MAX_KEYS_PER_ROUND, scope)
+        .thenCompose(page -> {
+          int deleted = Math.addExact(deletedSoFar, page.deletedVersions());
+          return page.exhausted() ? CompletableFuture.completedFuture(deleted)
+              : deleteVersions(permit, key, page.lastRevision(), deleted, scope);
+        });
   }
+
 }
