@@ -664,6 +664,14 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
         new HBaseSystemRecordGcMutations(this, binding).prepareFence(type, identity, permit, scope));
   }
 
+  CompletableFuture<Boolean> closeInvocationWindow(ByteKey identity, ByteKey expected,
+      ByteKey replacement, Permit permit, RequestScope scope) {
+    requireGcFencing();
+    return requireCurrentGcFencing(scope).thenCompose(ignored ->
+        new HBaseSystemRecordGcMutations(this, binding).closeInvocationWindow(
+            identity, expected, replacement, permit, scope));
+  }
+
   Filter liveValueCondition(byte[] expected) {
     var value = new SingleColumnValueFilter(binding.family(), VALUE,
         CompareOperator.EQUAL, new BinaryComparator(expected));

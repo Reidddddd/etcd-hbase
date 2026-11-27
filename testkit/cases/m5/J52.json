@@ -319,7 +319,9 @@
         "bucketScanAdvancesAcrossTombstonesAndReturnsFollowingLiveRecord",
         "permitIsUnusableAfterItsScopeClosesAndForAnotherProfile",
         "staleOwnerCannotRetireOrCloseAnInvocationWindow",
-        "durableRegistryDamageRejectsAnAlreadyIssuedPermit"
+        "durableRegistryDamageRejectsAnAlreadyIssuedPermit",
+        "successorRowFenceRejectsAnAlreadyDispatchedWindowClose",
+        "lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding"
       ]
     },
     {
@@ -339,7 +341,10 @@
       "methods": [
         "closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay",
         "anUnresolvedInvocationIsRetainedRatherThanClosed",
-        "closingAWindowRetainsAResultStillReferencedByAManifest"
+        "retainsResolvedWindowsAtTheTerminalCounters",
+        "closingAWindowRetainsAResultStillReferencedByAManifest",
+        "runtimeClosureWaitsForADurableResultQueryThenKeepsTheNonReplayBinding",
+        "closesAFinalizedSealedInvocationWithoutRequiringAClientReplay"
       ]
     },
     {
@@ -533,6 +538,25 @@
         "rejectsSingleVersionForNativeLayout",
         "historyDescriptorDefaultsToOneVersionAndForeverTtl",
         "nativeDescriptorDefaultsTo64AndAccepts128Versions"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.InvocationResultResolverTest",
+      "methods": [
+        "resolvesLostTransitionAcknowledgementAndReplaysTheSamePersistedBytes",
+        "refusesMissingResultWrongAuthorizationAndClosedQueryWindow",
+        "replaysTheSameNoChangeResultWithoutReadingACommitDecision",
+        "resolvesEitherDurableInvocationOutcomeForProtocolProjection",
+        "noChangeReplayRejectsMissingPagesAndAWindowClosedDuringLoad",
+        "transactionResolutionDistinguishesNoChangeFromMetadataOnlyPublication",
+        "selectedAndNoChangeQueriesHoldDurableFloorsUntilMaterialization",
+        "gcWinningEitherRegistrationFloorPreventsAnyResultRead",
+        "resultQueryProtectionAcceptsTerminalRevisionAndSequence",
+        "expiredOrRevokedQueryCannotDeliverMaterializedBytes",
+        "cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops",
+        "failedProducerDrainKeepsThePinAndSurfacesCleanupFailure"
       ]
     }
   ]

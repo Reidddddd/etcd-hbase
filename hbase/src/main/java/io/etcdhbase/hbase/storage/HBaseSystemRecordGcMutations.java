@@ -54,6 +54,31 @@ final class HBaseSystemRecordGcMutations {
         .thenCompose(ignored -> retireValue(type, identity, expected, permit, reason, scope));
   }
 
+  /** Closes a window under the same row fence used for retirement; stale passes cannot mutate it. */
+  CompletableFuture<Boolean> closeInvocationWindow(ByteKey identity, ByteKey expected,
+      ByteKey replacement, Permit permit, RequestScope scope) {
+    var type = SystemRecordType.INVOCATION;
+    var authority = new SystemRecordGcAuthority(records);
+    return authority.validate(permit, scope)
+        .thenCompose(ignored -> prepareFence(type, identity, permit, scope))
+        .thenCompose(ignored -> authority.validate(permit, scope))
+        .thenCompose(ignored -> {
+          byte[] row = binding.row(type, identity);
+          var fence = new SingleColumnValueFilter(SystemTableBinding.GC_FENCE_FAMILY,
+              SystemRecordGcFence.COLUMN, CompareOperator.EQUAL,
+              new BinaryComparator(SystemRecordGcFence.from(permit).encode()));
+          fence.setFilterIfMissing(true);
+          var condition = new FilterList(FilterList.Operator.MUST_PASS_ALL,
+              records.liveValueCondition(expected.bytes()), fence);
+          var put = new Put(row).setDurability(Durability.SYNC_WAL)
+              .addColumn(binding.family(), VALUE, replacement.bytes());
+          var mutation = CheckAndMutate.newBuilder(row).ifMatches(condition).build(put);
+          return records.execute(scope, records.logicalMutationPayloadBytes(row,
+              (long) expected.length() + replacement.length() + SystemRecordGcFence.BYTES),
+              table -> table.checkAndMutate(mutation)).thenApply(result -> result.isSuccess());
+        });
+  }
+
   /** The caller has validated this page's authority; a late older pass cannot lower a row fence. */
   CompletableFuture<Void> prepareFence(SystemRecordType type, ByteKey identity, Permit permit, RequestScope scope) {
     permit.requireUsable(binding.profileFingerprint(), scope);

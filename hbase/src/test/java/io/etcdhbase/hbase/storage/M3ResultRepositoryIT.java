@@ -30,6 +30,8 @@ import io.etcdhbase.core.commit.ResultPage;
 import io.etcdhbase.core.commit.ResultPreparation;
 import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.commit.SystemRecordType;
+import io.etcdhbase.core.commit.SnapshotPinManager;
+import io.etcdhbase.core.commit.SnapshotPinConfiguration;
 import io.etcdhbase.core.commit.TableGroupIdentityService;
 import io.etcdhbase.core.commit.TransactionId;
 import io.etcdhbase.core.error.BackendFailure;
@@ -110,7 +112,8 @@ class M3ResultRepositoryIT {
     var decisions = new HBaseCommitDecisionRepository(records);
     var resolver = new InvocationResultResolver(new HBaseInvocationRepository(records),
         new CommitOutcomeResolver(control, decisions), new ManifestCatalog(new HBaseManifestRepository(records)),
-        prepared.results());
+        prepared.results(), SnapshotPinManager.initializeFresh(records,
+            new SnapshotPinConfiguration(1, 16, Duration.ofMinutes(1)), scope).join());
     var limits = new BudgetManager.Limits(2, 0, 2, 1, 1, 0, 2_000_000);
     var budgets = new BudgetManager(limits, Map.of("group", limits), limits);
     try (var account = budgets.admit("group", scope, new BudgetManager.Reservation(0, 1, 1_000_000, 100));
@@ -335,7 +338,9 @@ class M3ResultRepositoryIT {
     var reopenedResults = new ResultCatalog(new HBaseResultRepository(records));
     var reopened = new InvocationResultResolver(new HBaseInvocationRepository(records),
         new CommitOutcomeResolver(control, new HBaseCommitDecisionRepository(records)),
-        new ManifestCatalog(new HBaseManifestRepository(records)), reopenedResults);
+        new ManifestCatalog(new HBaseManifestRepository(records)), reopenedResults,
+        SnapshotPinManager.initializeFresh(records,
+            new SnapshotPinConfiguration(1, 16, Duration.ofMinutes(1)), scope).join());
     var limits = new BudgetManager.Limits(2, 0, 2, 1, 1, 0, 2_000_000);
     var budgets = new BudgetManager(limits, Map.of("group", limits), limits);
     BudgetManager.Account account;

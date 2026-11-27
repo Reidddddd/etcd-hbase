@@ -141,26 +141,48 @@ public final class SnapshotPinManager implements ReadViewPinRegistry {
   }
 
   CompletableFuture<PinLease> registerProtected(long revision, long sequence, ByteKey digest,
-      Optional<TransactionId> transaction, Optional<ByteKey> eventRoot,
-      Optional<ByteKey> eventRootDigest, RequestScope scope) {
+      Optional<TransactionId> transaction, Optional<ByteKey> rootIdentity,
+      Optional<ByteKey> rootDigest, RequestScope scope) {
     Objects.requireNonNull(scope, "scope");
     if (!active(scope)) return failed(inactive(scope));
     if (revision <= 0 || sequence <= 0 || digest == null || digest.length() != 32
-        || transaction == null || eventRoot == null || eventRootDigest == null
-        || transaction.isPresent() != eventRoot.isPresent()
-        || eventRoot.isPresent() != eventRootDigest.isPresent()
-        || eventRoot.filter(root -> root.length() == 0 || root.length() > 1024).isPresent()
-        || eventRootDigest.filter(value -> value.length() != 32).isPresent()) {
-      return failed(new IllegalArgumentException("invalid event history pin requirement"));
+        || transaction == null || rootIdentity == null || rootDigest == null
+        || transaction.isPresent() != rootIdentity.isPresent()
+        || rootIdentity.isPresent() != rootDigest.isPresent()
+        || rootIdentity.filter(root -> root.length() == 0 || root.length() > 1024).isPresent()
+        || rootDigest.filter(value -> value.length() != 32).isPresent()) {
+      return failed(new IllegalArgumentException("invalid protected history pin requirement"));
     }
     return registerRequirement(new PinRequirement(revision, sequence, digest, transaction,
-        eventRoot, eventRootDigest), scope);
+        rootIdentity, rootDigest), scope);
   }
 
   private CompletableFuture<PinLease> registerRequirement(PinRequirement requirement, RequestScope scope) {
     ByteKey pinId = ByteKey.copyOf(TransactionId.create().bytes());
     int shard = shardFor(pinId);
     return registerAttempt(shard, pinId, requirement, scope, 0);
+  }
+
+  /**
+   * Protects an invocation before reading its decision, manifest or result. Both independent
+   * floors keep its window open; a GC pass that won admission first rejects this registration.
+   */
+  CompletableFuture<PinLease> registerResultQuery(InvocationBinding binding, RequestScope scope) {
+    Objects.requireNonNull(binding, "binding");
+    ByteKey digest = ManifestDigest.sha256(output -> {
+      ManifestDigest.writeBytes(output, binding.invocationId().bytes());
+      ManifestDigest.writeBytes(output, binding.transactionId().bytes());
+      ManifestDigest.writeBytes(output, binding.requestDigest().bytes());
+      ManifestDigest.writeBytes(output, binding.authorizationScopeDigest().bytes());
+      output.writeLong(binding.preparedOwnerEpoch());
+      output.writeLong(binding.baseRevision());
+      output.writeLong(binding.baseSequence());
+    });
+    // At the counter limit no later GC boundary can close this window.
+    long revision = binding.baseRevision() == Long.MAX_VALUE ? Long.MAX_VALUE : binding.baseRevision() + 1;
+    long sequence = binding.baseSequence() == Long.MAX_VALUE ? Long.MAX_VALUE : binding.baseSequence() + 1;
+    return registerProtected(revision, sequence, digest, Optional.empty(),
+        Optional.empty(), Optional.empty(), scope);
   }
 
   /**

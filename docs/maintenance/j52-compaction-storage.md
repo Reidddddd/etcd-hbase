@@ -4,7 +4,7 @@
 
 本次提供内部逻辑 Compact 选择器、KV 历史回收许可、系统记录引用闭包和 HBase 精确退休原语。`CompactionService` 复用现有控制行与 system 记录，`GcCoordinator` 复用持久 snapshot pin 注册表。`KV.Compact` 的授权及逻辑选择通过 `CompactGateway` 装配到既有 owner lane，与发布和恢复串行执行；完成等待在离开该 lane 后执行。独立后台 worker 持续回收 KV 历史，J52 保持进行中。
 
-本 PR 按[范围评审结论](https://github.com/Reidddddd/etcd-hbase/pull/68#issuecomment-7210841766)交付 KV 历史实现切片。当前 `physical=true` RPC 的受限投影只确认本次目标所需的 KV 历史回收及 KV/辅助 pin 保护排空，不等待事件、决定、结果等内部记录域完成。因此，该成功响应不满足[完整设计 §6.1](../specs/2026-11-20-m5-auth-gc-lifecycle-design.md#61-逻辑确认与物理完成)，也不代表整个后端物理完成或 J52 完成。HFile 空间归还仍由 HBase compaction 异步执行。
+既有 KV 历史切片按[范围评审结论](https://github.com/Reidddddd/etcd-hbase/pull/68#issuecomment-7210841766)交付 KV 历史实现切片。当前 `physical=true` RPC 的受限投影只确认本次目标所需的 KV 历史回收及 KV/辅助 pin 保护排空，不等待事件、决定、结果等内部记录域完成。因此，该成功响应不满足[完整设计 §6.1](../specs/2026-11-20-m5-auth-gc-lifecycle-design.md#61-逻辑确认与物理完成)，也不代表整个后端物理完成或 J52 完成。HFile 空间归还仍由 HBase compaction 异步执行。
 
 `physical=false` 在逻辑边界与选定操作身份持久化后返回；`COMPACTION` 记录和控制行的选定身份共同登记可恢复工作，各 bucket 检查点由后台延迟创建。`physical=true` 在请求自己的目标 revision 和 baseSequence 均被所有 KV bucket 的持久完成水位覆盖后返回。取消或超时只结束本次等待，不撤销逻辑边界或后台任务；原操作继续执行，同一 revision 重试仍返回 `ErrCompacted`。更强的后续 Compact 任务可以覆盖旧目标，但不能仅凭更高逻辑边界报告旧目标物理完成。
 
@@ -42,7 +42,11 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 `HBaseSystemRecordClosure` 绑定实际 store 及其路由，保留 invocation 的不可重放证明。其余域按真实身份解码，检查存活 invocation、decision、事件 revision 索引、manifest root/directory/page 和 result directory 的引用；PREPARING/SEALED 事务在后续引用写出前也受保护。确切 pin 根和事务独立于两个 floor 保留。证明扫描完整分页，损坏或超出扫描、行数及字节预算时返回失败，不发布可恢复的成功游标。分页沿实际 HBase 行序推进，墓碑与 lookahead 仍计入物理工作量。
 
-`InvocationWindowCloser` 使用同一 store 的实际 invocation repository。它先核验许可、边界及确切保护，再用 CAS 关闭结果窗口；保留摘要及不可重放绑定，随后通过引用闭包处理 RESULT。仍被 manifest 或其他目录引用的结果继续保留，不能因窗口已关闭就直接删除。
+`InvocationResultResolver` 在读取可回收的决定、manifest 或结果前，先通过同一 `SnapshotPinManager` 注册持久查询保护，再重读绑定。保护使用独立的 `baseRevision + 1` 和 `baseSequence + 1` 下界（到达计数上限时取 `Long.MAX_VALUE`），阻止 GC 在查询期间关闭该窗口；不引入另一套 pin 格式。注册与 GC floor 推进竞争同一分片 CAS，GC 先推进时，低于任一 floor 的新查询即不能进入可保护窗口，即使后台尚未写入 `WINDOW_CLOSED`，也拒绝读取旧结果。
+
+完整结果加载到受预算约束的内存后，查询用 pin 完成 CAS 核实该代次仍有效，再交付字节；已过期或被撤销的查询不能返回成功。此后传输只依赖内存，不再持有存储视图。失败查询的保护归请求 scope 所有；取消后等实际后端 producer 排空才释放，不能以可取消 future 已结束代替物理排空。
+
+`HBaseSystemRecordClosure` 的 INVOCATION 页调用 `InvocationWindowCloser`，先核验许可、边界及确切保护，再以完整绑定值、墓碑缺失和当前 `gc:g` 的同行条件关闭结果窗口。仍处于 PREPARING 或无法确认提交结果的绑定继续保留；已收尾但仍停在 SEALED 的绑定先从实际决定及 manifest 确认结果。关闭保留摘要及不可重放绑定，未知 ACK 可在下一次扫描重读确认。该页只推进窗口，RESULT 页另行通过引用闭包回收正文；仍被 manifest 或其他目录引用的结果继续保留。
 
 退休用同一 `CheckAndMutate(RowMutations)` 比较完整旧值和墓碑缺失，移除旧 value，并保留 `r={0}` guard 与严格编码的 `t` 墓碑。两者使用保留的内部 timestamp `Long.MAX_VALUE - 1`，使迟到的旧 absent-CAS 不能让记录复活；它不是 KV revision 或应用墙钟。目标 HBase 的 future timestamp 策略必须允许该保留值；拒绝时退休失败，不声明已删除。MiniCluster 覆盖此协议，真实目标环境的 timestamp 配置尚未验收。
 
@@ -68,15 +72,16 @@ GC 要求持久 descriptor 声明 `etcdhbase.m5.gc-fence-format=1`，并存在�
 
 每页有记录数、扫描字节、引用证明及总时长上限，并保留整轮粗粒度 I/O、scanner、清理和内存额度。取消后额度继续占用到实际 producer 排空，调度器还等待清理结果；排队任务在停止后不再启动回收。当前不是逐条 HBase RPC 的完整费用核算，也未交付 GC 导致的前台尾延迟和长期空间收敛验收。
 
+J52.2a 的运行时结果窗口保护与关闭已实现，当前版本仍待 CI 和正式 review。
+
 ## 5. 尚未交付的完整 Compact 能力
 
 以下内容属于已批准的 J52，当前仍需实现：
 
 - 跨副本 Compact owner RPC 转发、完整记录域的调度生命周期，以及真实目标环境的管理权限验收。
-- invocation 结果窗口的运行时关闭、在途结果查询的持久保护，以及不可重放的最小证明。
 - 把事件、决定、结果等内部记录的精确删除、引用解除及保护排空纳入同一目标的持久完成证明。现有系统 GC sweep EOF 不能独立证明该闭包已排空。
 
-本次只设置 KV 历史完成水位，不将它解释为完整 physical 完成，也不宣称 J52 验收通过。完整设计仍要求全部应回收记录完成精确删除和强读确认；本 PR 的受限 RPC 行为及其偏差见第 1 节。
+当前只设置 KV 历史完成水位，不将它解释为完整 physical 完成，也不宣称 J52 验收通过。完整设计仍要求全部应回收记录完成精确删除和强读确认；本 PR 的受限 RPC 行为及其偏差见第 1 节。
 
 ## 6. 格式与验证入口
 

@@ -130,8 +130,14 @@ class HBaseSystemRecordClosureTest {
   void aFullLastBucketCanStillBeExhausted() {
     try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
       var records = mock(SystemRecordStore.class);
+      var binding = InvocationBinding.begin(InvocationId.create(), DIGEST, DIGEST,
+          TransactionId.create(), 1, 0, 1);
+      var identity = ByteKey.copyOf(binding.invocationId().bytes());
+      var encoded = ByteKey.copyOf(InvocationMessages.encode(binding));
+      when(records.read(SystemRecordType.INVOCATION, identity, scope))
+          .thenReturn(CompletableFuture.completedFuture(Optional.of(encoded)));
       when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 1, 8L << 20, scope))
-          .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(key(1), key(2)))));
+          .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(identity, encoded))));
       var page = closure(records, mock(HBaseSystemRecordStore.class), DIGEST, 1)
           .collect(SystemRecordClosure.Domain.INVOCATION, 0, Optional.empty(), 1, permit(scope), scope).join();
       assertEquals(1, page.examined());
@@ -158,7 +164,7 @@ class HBaseSystemRecordClosureTest {
   void lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative() {
     try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
       var records = mock(SystemRecordStore.class);
-      var entry = new SystemRecordEntry(key(1), key(2));
+      var entry = preparingInvocation(records, scope);
       when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 1, 8L << 20, scope))
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(entry),
               Optional.of(entry.identity()), false, 2, 2, 1)));
@@ -195,8 +201,8 @@ class HBaseSystemRecordClosureTest {
   void byteLimitedPageDoesNotEndCollectionBeforeTheContinuation() {
     try (var scope = RequestScope.withTimeout(Duration.ofMinutes(1))) {
       var records = mock(SystemRecordStore.class);
-      var first = new SystemRecordEntry(key(1), key(2));
-      var second = new SystemRecordEntry(key(3), key(4));
+      var first = preparingInvocation(records, scope);
+      var second = preparingInvocation(records, scope);
       when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 16, 8L << 20, scope))
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(first),
               Optional.of(first.identity()), false, 2, 2, 1)));
@@ -212,6 +218,16 @@ class HBaseSystemRecordClosureTest {
 
   private static StoredRecord storedValue() {
     return StoredRecord.live(key(2), new StorageMetadata(2, 2, 1, 0, StorageMetadata.State.LIVE, 1), new byte[] {1});
+  }
+
+  private static SystemRecordEntry preparingInvocation(SystemRecordStore records, RequestScope scope) {
+    var binding = InvocationBinding.begin(InvocationId.create(), DIGEST, DIGEST,
+        TransactionId.create(), 1, 0, 1);
+    var identity = ByteKey.copyOf(binding.invocationId().bytes());
+    var encoded = ByteKey.copyOf(InvocationMessages.encode(binding));
+    when(records.read(SystemRecordType.INVOCATION, identity, scope))
+        .thenReturn(CompletableFuture.completedFuture(Optional.of(encoded)));
+    return new SystemRecordEntry(identity, encoded);
   }
 
   private static SystemRecordRetirement.Permit permit(RequestScope scope) {

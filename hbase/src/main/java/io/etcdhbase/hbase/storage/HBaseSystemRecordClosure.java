@@ -96,31 +96,19 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
         }));
   }
 
-  enum ResultCollection { ABSENT, REFERENCED, RETIRED, CHANGED }
-
-  CompletableFuture<ResultCollection> collectResult(ByteKey identity, SystemRecordRetirement.Permit permit,
-      RequestScope scope) {
-    return authority.validate(permit, scope).thenCompose(ignored ->
-        records.read(SystemRecordType.RESULT, identity, scope)).thenCompose(found -> {
-      if (found.isEmpty()) return CompletableFuture.completedFuture(ResultCollection.ABSENT);
-      var entry = new SystemRecordEntry(identity, found.orElseThrow());
-      return isReferenced(Domain.RESULT, entry, permit, new ProofBudget(), scope).thenCompose(referenced -> {
-        if (referenced) return CompletableFuture.completedFuture(ResultCollection.REFERENCED);
-        return retirement.retire(SystemRecordType.RESULT, identity, entry.value(), permit,
-            SystemRecordRetirement.Reason.CLOSED_INVOCATION_WINDOW, scope)
-            .thenApply(outcome -> outcome.retiredNow() || outcome.alreadyRetired()
-                ? ResultCollection.RETIRED : ResultCollection.CHANGED);
-      });
-    });
-  }
-
   private CompletableFuture<Void> retireUnreferenced(Domain domain, SystemRecordPage page,
       Progress progress, SystemRecordRetirement.Permit permit, RequestScope scope) {
+    var windows = new InvocationWindowCloser(records, retirement, authority);
     CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
     for (var entry : page.entries()) {
       chain = chain.thenCompose(ignored -> {
         requireActive(scope);
         progress.examined++;
+        if (domain == Domain.INVOCATION) {
+          // Keep the binding permanently; only its result-query window may advance.
+          return windows.close(entry.identity(), permit, scope)
+              .thenAccept(outcome -> {});
+        }
         return isReferenced(domain, entry, permit, progress.proof, scope).thenCompose(referenced -> {
           if (referenced) return CompletableFuture.completedFuture(null);
           return retirement.retire(domain.recordType(), entry.identity(), entry.value(), permit,

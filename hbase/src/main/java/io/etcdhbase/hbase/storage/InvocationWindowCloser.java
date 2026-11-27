@@ -1,46 +1,52 @@
 package io.etcdhbase.hbase.storage;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.commit.CommitDecision;
+import io.etcdhbase.core.commit.CommitOutcomeResolver;
 import io.etcdhbase.core.commit.InvocationBinding;
-import io.etcdhbase.core.commit.InvocationService;
-import io.etcdhbase.core.commit.ResultDirectory;
-import io.etcdhbase.core.commit.ResultIdentity;
 import io.etcdhbase.core.commit.SystemRecordRetirement;
+import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.commit.SystemRecordType;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.hbase.codec.InvocationMessages;
+import io.etcdhbase.hbase.codec.ManifestMessages;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
-/** Closes a protected result window before collecting its result through the actual reference graph. */
+/** Closes eligible query windows while preserving durable invocation identities against replay. */
 public final class InvocationWindowCloser {
-  private final HBaseSystemRecordStore records;
-  private final InvocationService invocations;
+  private final SystemRecordStore records;
+  private final HBaseSystemRecordStore retirement;
   private final SystemRecordGcAuthority authority;
-  private final HBaseSystemRecordClosure closure;
 
   public InvocationWindowCloser(HBaseSystemRecordStore records) {
+    this(records, records, new SystemRecordGcAuthority(records));
+    records.requireGcFencing();
+  }
+
+  InvocationWindowCloser(SystemRecordStore records, HBaseSystemRecordStore retirement,
+      SystemRecordGcAuthority authority) {
     this.records = Objects.requireNonNull(records, "records");
-    invocations = new InvocationService(new HBaseInvocationRepository(records));
-    authority = new SystemRecordGcAuthority(records);
-    closure = new HBaseSystemRecordClosure(records);
+    this.retirement = Objects.requireNonNull(retirement, "retirement");
+    this.authority = Objects.requireNonNull(authority, "authority");
   }
 
   public enum Skip {
-    STILL_PREPARING, ALREADY_CLOSED, NO_RESULT_REFERENCE, STILL_PROTECTED,
-    RESULT_STILL_REFERENCED, RESULT_CHANGED
+    UNRESOLVED, ALREADY_CLOSED, STILL_PROTECTED, ROW_CHANGED
   }
 
   public sealed interface Outcome permits Closed, Retained {
     ByteKey invocation();
   }
 
-  /** The binding retains the non-replay proof, even if another durable reference keeps the result. */
-  public record Closed(ByteKey invocation, boolean resultRetired) implements Outcome {}
+  /** The result is collected separately through the actual reference graph. */
+  public record Closed(ByteKey invocation) implements Outcome {}
 
-  /** RESULT skips retain the payload after closing the window; other skips leave the binding unchanged. */
+  /** An unresolved, protected or concurrently changed binding is retained unchanged. */
   public record Retained(ByteKey invocation, Skip skip) implements Outcome {}
 
+  /** The checkpoint worker visits RESULT separately, keeping each invocation page bounded. */
   public CompletableFuture<Outcome> close(ByteKey identity, SystemRecordRetirement.Permit permit,
       RequestScope scope) {
     Objects.requireNonNull(identity, "identity");
@@ -52,32 +58,61 @@ public final class InvocationWindowCloser {
       var binding = InvocationMessages.decode(found.orElseThrow().bytes());
       SystemRecordReferences.requireIdentity(identity, ByteKey.copyOf(binding.invocationId().bytes()));
       if (binding.state() == InvocationBinding.State.WINDOW_CLOSED) return retained(identity, Skip.ALREADY_CLOSED);
-      if (binding.state() == InvocationBinding.State.PREPARING || binding.state() == InvocationBinding.State.SEALED) {
-        return retained(identity, Skip.STILL_PREPARING);
+      if (binding.state() == InvocationBinding.State.PREPARING) {
+        return retained(identity, Skip.UNRESOLVED);
       }
-      if (binding.resultReference().isEmpty()) return retained(identity, Skip.NO_RESULT_REFERENCE);
-      return closeAndCollect(identity, binding, permit, scope);
+      return closeBinding(identity, binding, permit, scope);
     });
   }
 
-  private CompletableFuture<Outcome> closeAndCollect(ByteKey identity, InvocationBinding binding,
+  private CompletableFuture<Outcome> closeBinding(ByteKey identity, InvocationBinding binding,
       SystemRecordRetirement.Permit permit, RequestScope scope) {
     return authority.validate(permit, scope).thenCompose(protections -> {
-      if (Math.addExact(binding.baseRevision(), 1) >= permit.safeRevision()
-          || Math.addExact(binding.baseSequence(), 1) >= permit.safeSequence()
+      if (binding.baseRevision() >= permit.safeRevision() - 1
+          || binding.baseSequence() >= permit.safeSequence() - 1
           || protections.stream().anyMatch(protection -> protection.transactionId()
               .filter(binding.transactionId()::equals).isPresent())) {
         return retained(identity, Skip.STILL_PROTECTED);
       }
-      // The CAS keeps the digest/non-replay binding before any result can disappear.
-      return invocations.transition(binding, binding.closeQueryWindow(), scope).thenCompose(closed ->
-          closure.collectResult(ResultDirectory.systemIdentity(ResultIdentity.from(binding)), permit, scope)
-              .thenApply(result -> (Outcome) switch (result) {
-                case ABSENT -> new Closed(identity, false);
-                case RETIRED -> new Closed(identity, true);
-                case REFERENCED -> new Retained(identity, Skip.RESULT_STILL_REFERENCED);
-                case CHANGED -> new Retained(identity, Skip.RESULT_CHANGED);
-              }));
+      return resolvedWindow(binding, scope).thenCompose(resolved -> {
+        if (resolved.isEmpty()) return retained(identity, Skip.UNRESOLVED);
+        // Compare the original bytes even when a finalized SEALED attempt was resolved above.
+        return retirement.closeInvocationWindow(identity, ByteKey.copyOf(InvocationMessages.encode(binding)),
+            ByteKey.copyOf(InvocationMessages.encode(resolved.orElseThrow().closeQueryWindow())), permit, scope)
+            .thenApply(closed -> closed ? new Closed(identity) : new Retained(identity, Skip.ROW_CHANGED));
+      });
+    });
+  }
+
+  private CompletableFuture<Optional<InvocationBinding>> resolvedWindow(
+      InvocationBinding binding, RequestScope scope) {
+    if (binding.state() != InvocationBinding.State.SEALED) {
+      return CompletableFuture.completedFuture(Optional.of(binding));
+    }
+    var outcomes = new CommitOutcomeResolver(retirement.controlStore(), new HBaseCommitDecisionRepository(records));
+    return outcomes.resolve(binding, scope).thenCompose(outcome -> switch (outcome.state()) {
+      case SELECTED_FINALIZED -> selectedWindow(binding, outcome.decision().orElseThrow(), scope)
+          .thenApply(Optional::of);
+      case NOT_SELECTED -> CompletableFuture.completedFuture(
+          Optional.of(binding.notSelected(outcome.notSelectedProof().orElseThrow())));
+      default -> CompletableFuture.completedFuture(Optional.empty());
+    });
+  }
+
+  private CompletableFuture<InvocationBinding> selectedWindow(
+      InvocationBinding binding, CommitDecision decision, RequestScope scope) {
+    return records.read(SystemRecordType.MANIFEST, decision.manifestRoot(), scope).thenApply(found -> {
+      var root = ManifestMessages.decodeRoot(found.orElseThrow(
+          () -> new IllegalStateException("finalized result manifest is missing")).bytes());
+      var reference = root.resultReference().orElseThrow(
+          () -> new IllegalStateException("finalized invocation has no result reference"));
+      if (!root.systemIdentity().equals(decision.manifestRoot()) || !root.digest().equals(decision.manifestDigest())
+          || !root.transactionId().equals(binding.transactionId()) || root.ownerEpoch() != binding.preparedOwnerEpoch()
+          || root.baseSequence() != binding.baseSequence() || root.baseRevision() != binding.baseRevision()
+          || !reference.identity().matches(binding)) {
+        throw new IllegalStateException("finalized result manifest differs from invocation");
+      }
+      return binding.selected(reference.token());
     });
   }
 

@@ -377,6 +377,20 @@ def _validate_j51(task: dict[str, object], repo: Path) -> None:
 
 
 J52_REQUIRED_TESTS = {
+    ('core', 'surefire', 'io.etcdhbase.core.commit.InvocationResultResolverTest'): {
+        'resultQueryProtectionAcceptsTerminalRevisionAndSequence',
+        'failedProducerDrainKeepsThePinAndSurfacesCleanupFailure',
+        'resolvesLostTransitionAcknowledgementAndReplaysTheSamePersistedBytes',
+        'refusesMissingResultWrongAuthorizationAndClosedQueryWindow',
+        'replaysTheSameNoChangeResultWithoutReadingACommitDecision',
+        'resolvesEitherDurableInvocationOutcomeForProtocolProjection',
+        'noChangeReplayRejectsMissingPagesAndAWindowClosedDuringLoad',
+        'transactionResolutionDistinguishesNoChangeFromMetadataOnlyPublication',
+        'selectedAndNoChangeQueriesHoldDurableFloorsUntilMaterialization',
+        'gcWinningEitherRegistrationFloorPreventsAnyResultRead',
+        'expiredOrRevokedQueryCannotDeliverMaterializedBytes',
+        'cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops',
+    },
     ("hbase", "surefire", "io.etcdhbase.hbase.storage.J52RetentionDescriptorTest"): {
         "rejectsFiniteTtlForEveryLayout",
         "rejectsSingleVersionForNativeLayout",
@@ -498,6 +512,8 @@ J52_REQUIRED_TESTS = {
         'byteLimitedPageDoesNotEndCollectionBeforeTheContinuation',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
+        'lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding',
+        'successorRowFenceRejectsAnAlreadyDispatchedWindowClose',
         'descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations',
         'legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation',
         'fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts',
@@ -519,6 +535,9 @@ J52_REQUIRED_TESTS = {
         'manifestPagesAndRootsProtectRealCandidateEventAndResultRecords',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.InvocationWindowCloserIT'): {
+        'retainsResolvedWindowsAtTheTerminalCounters',
+        'runtimeClosureWaitsForADurableResultQueryThenKeepsTheNonReplayBinding',
+        'closesAFinalizedSealedInvocationWithoutRequiringAClientReplay',
         'closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay',
         'anUnresolvedInvocationIsRetainedRatherThanClosed',
         'closingAWindowRetainsAResultStillReferencedByAManifest',
