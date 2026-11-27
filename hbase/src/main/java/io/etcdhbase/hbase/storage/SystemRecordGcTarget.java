@@ -65,8 +65,9 @@ record SystemRecordGcTarget(TransactionId transaction, long revision, long seque
     return prepared(identity.transactionId(), identity.baseRevision(), identity.baseSequence());
   }
 
-  private static SystemRecordGcTarget prepared(TransactionId transaction, long revision, long sequence) {
-    return new SystemRecordGcTarget(transaction, Math.addExact(revision, 1), Math.addExact(sequence, 1));
+  static SystemRecordGcTarget prepared(TransactionId transaction, long revision, long sequence) {
+    return new SystemRecordGcTarget(transaction, revision == Long.MAX_VALUE ? revision : revision + 1,
+        sequence == Long.MAX_VALUE ? sequence : sequence + 1);
   }
 
   static void requireSequenceIdentity(ByteKey identity, long sequence) {

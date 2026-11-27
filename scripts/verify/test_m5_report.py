@@ -558,6 +558,26 @@ class M5J52ReportTest(unittest.TestCase):
                     with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
                         m5_report._validate_task(task, path, repo)
 
+    def test_system_completion_requires_pending_drain_and_durable_reference_regressions(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        required = {
+            "GcCheckpointStoreTest": "pendingPrefixSurvivesTakeoverAndCleanEofDoesNotPublishCompletion",
+            "GcCheckpointCycleTest": "failedProducerOrCleanupCannotPublishCheckpointProgress",
+            "HBaseSystemRecordClosureTest": "exactRootProtectionCountsAsPendingEvenAboveNumericFloors",
+            "HBaseSystemRecordRetirementIT": "retirementAcknowledgementRequiresStrongTombstoneReadbackBeforeSuccess",
+            "GcCheckpointCycleIT": "durableCompletionNeedsAnotherSweepAfterTheReferenceChainDrains",
+        }
+        m5_report._validate_task(original, path, repo)
+        for class_name, method in required.items():
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"] if test["class"].endswith("." + class_name))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method):
+                with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
+                    m5_report._validate_task(task, path, repo)
+
     def test_zero_completion_and_real_pin_rpc_cannot_be_omitted(self) -> None:
         repo = Path(__file__).parents[2]
         path = repo / "testkit/cases/m5/J52.json"

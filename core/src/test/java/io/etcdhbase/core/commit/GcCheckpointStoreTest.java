@@ -18,7 +18,94 @@ import org.junit.jupiter.api.Test;
 class GcCheckpointStoreTest {
   private static final String GROUP = "gc-group";
   private static final InvocationId OPERATION = InvocationId.create();
-  private static final GcCheckpoint.Plan PLAN = new GcCheckpoint.Plan(OPERATION, 5, 20, 16);
+  private static final GcCheckpoint.RegistryBinding REGISTRIES = new GcCheckpoint.RegistryBinding(
+      ByteKey.copyOf(new byte[32]), ByteKey.copyOf(new byte[16]),
+      ByteKey.copyOf(new byte[16]), ByteKey.copyOf(new byte[16]));
+  private static final GcCheckpoint.Plan PLAN = new GcCheckpoint.Plan(OPERATION, 5, 20, 16, REGISTRIES);
+
+  @Test
+  void pendingPrefixSurvivesTakeoverAndCleanEofDoesNotPublishCompletion() {
+    var store = new GcCheckpointStore(new MemoryRecords());
+    try (var scope = scope()) {
+      var first = claim(store, proposal(2, 1, PLAN), scope);
+      assertFalse(first.checkpoint().completion().covers(0, 0));
+      var pending = new SystemRecordClosure.Page(first.checkpoint().domain(), 1, 0,
+          Optional.of(key(7)), false, 1);
+      assertTrue(store.advance(first, pending, scope).join());
+      var takeover = claim(store, proposal(3, 1, PLAN), scope);
+      assertEquals(1, takeover.checkpoint().pendingRecords());
+      assertTrue(store.advance(takeover, page(true), scope).join());
+      var incomplete = store.read(GROUP, first.checkpoint().domain(), 0, scope).join().orElseThrow();
+      assertTrue(incomplete.exhausted());
+      assertEquals(GcCheckpoint.Completion.none(), incomplete.completion());
+      var retry = claim(store, proposal(3, 1, PLAN), scope);
+      assertEquals(0, retry.checkpoint().pendingRecords());
+      assertTrue(store.advance(retry, page(true), scope).join());
+      var complete = store.read(GROUP, first.checkpoint().domain(), 0, scope).join().orElseThrow();
+      assertEquals(new GcCheckpoint.Completion(16, 20, 5), complete.completion());
+    }
+  }
+
+  @Test
+  void completionSurvivesRestartStrongerCompactAndOwnerTakeover() {
+    var store = new GcCheckpointStore(new MemoryRecords());
+    try (var scope = scope()) {
+      var first = claim(store, proposal(2, 1, PLAN), scope);
+      assertTrue(store.advance(first, page(true), scope).join());
+      var stronger = new GcCheckpoint.Plan(InvocationId.create(), 6, 30, 25, REGISTRIES);
+      var takeover = claim(store, proposal(3, 1, stronger), scope);
+      assertEquals(new GcCheckpoint.Completion(16, 20, 5), takeover.checkpoint().completion());
+      assertTrue(takeover.checkpoint().completion().covers(16, 20));
+      assertFalse(takeover.checkpoint().completion().covers(17, 20));
+      assertEquals(takeover.checkpoint(), GcCheckpoint.decode(takeover.checkpoint().encode()));
+    }
+  }
+
+  @Test
+  void zeroBoundsNeedAPositiveCompletedGeneration() {
+    var zero = new GcCheckpoint.Plan(OPERATION, 5, 0, 0, REGISTRIES);
+    var checkpoint = proposal(2, 1, zero);
+    assertFalse(checkpoint.completion().covers(0, 0));
+    var empty = new SystemRecordClosure.Page(checkpoint.domain(), 0, 0, Optional.empty(), true, 0);
+    checkpoint = checkpoint.after(empty).after(empty);
+    assertTrue(checkpoint.completion().covers(0, 0));
+    assertEquals(5, checkpoint.completion().generation());
+  }
+
+  @Test
+  void rejectsChangedRegistryBindingAndReusedGeneration() {
+    var store = new GcCheckpointStore(new MemoryRecords());
+    try (var scope = scope()) {
+      store.claim(proposal(2, 1, PLAN), scope).join();
+      for (int part = 0; part < 4; part++) {
+        var bindings = new ByteKey[] {REGISTRIES.profile(), REGISTRIES.kvIdentity(),
+            REGISTRIES.eventIdentity(), REGISTRIES.eventNamespace()};
+        var changed = bindings[part].bytes();
+        changed[0] = 1;
+        bindings[part] = ByteKey.copyOf(changed);
+        var registries = new GcCheckpoint.RegistryBinding(bindings[0], bindings[1], bindings[2], bindings[3]);
+        var plan = new GcCheckpoint.Plan(OPERATION, 5, 20, 16, registries);
+        assertThrows(java.util.concurrent.CompletionException.class,
+            () -> store.claim(proposal(3, 1, plan), scope).join());
+      }
+      var reused = new GcCheckpoint.Plan(InvocationId.create(), 5, 20, 16, REGISTRIES);
+      assertThrows(java.util.concurrent.CompletionException.class,
+          () -> store.claim(proposal(3, 1, reused), scope).join());
+    }
+  }
+
+  @Test
+  void rejectsNegativePendingAndInvalidCompletionReceipts() {
+    byte[] valid = proposal(2, 1, PLAN).encode().bytes();
+    int pendingOffset = 4 + 4 + GROUP.length() + 3 * Integer.BYTES + 6 * Long.BYTES + 80 + 16;
+    long[][] malformed = {{-1, 0, 0, 0}, {0, -1, 0, 1}, {0, 0, -1, 1},
+        {0, 1, 0, 0}, {0, 17, 20, 5}, {0, 16, 21, 5}, {0, 16, 20, 6}};
+    for (var values : malformed) {
+      var changed = java.nio.ByteBuffer.wrap(valid.clone()).position(pendingOffset);
+      for (long value : values) changed.putLong(value);
+      assertThrows(IllegalArgumentException.class, () -> GcCheckpoint.decode(ByteKey.copyOf(changed.array())));
+    }
+  }
 
   @Test
   void durableScanAndFenceCursorsMustBelongToTheNamedBucket() {
@@ -29,7 +116,7 @@ class GcCheckpointStoreTest {
         var foreign = new GcCheckpoint.Position(Optional.of(key(255)));
         var checkpoint = new GcCheckpoint(GROUP, SystemRecordClosure.Domain.MANIFEST, 3, 0, 2, PLAN,
             phase == GcCheckpoint.Phase.SCANNING ? foreign : GcCheckpoint.Position.start(),
-            phase == GcCheckpoint.Phase.FENCING ? foreign : GcCheckpoint.Position.start(), phase, 1, 0, false);
+            phase == GcCheckpoint.Phase.FENCING ? foreign : GcCheckpoint.Position.start(), phase, 1, 0, false, 0, GcCheckpoint.Completion.none());
         records.createIfAbsent(SystemRecordType.RECOVERY_CHECKPOINT,
             GcCheckpoint.identity(GROUP, checkpoint.domain(), 0), checkpoint.encode(), scope).join();
         assertThrows(java.util.concurrent.CompletionException.class,
@@ -57,7 +144,7 @@ class GcCheckpointStoreTest {
       assertEquals(GcCheckpoint.Position.start(), next.checkpoint().fencePosition());
       assertFalse(store.advance(partial, page(true), scope).join());
       assertThrows(IllegalArgumentException.class, () -> store.advance(next,
-          new SystemRecordClosure.Page(proposed.domain(), 1, 1, Optional.of(key(7)), true), scope));
+          new SystemRecordClosure.Page(proposed.domain(), 1, 1, Optional.of(key(7)), true, 0), scope));
       assertTrue(store.advance(next, page(true), scope).join());
       var active = assertInstanceOf(GcCheckpointStore.Held.class, store.claim(proposal(3, 1, PLAN), scope).join());
       assertEquals(GcCheckpoint.Phase.SCANNING, active.checkpoint().phase());
@@ -72,7 +159,7 @@ class GcCheckpointStoreTest {
     try (var scope = scope()) {
       var first = claim(store, proposal(2, 1, PLAN), scope);
       assertTrue(store.advance(first, page(false), scope).join());
-      var wider = new GcCheckpoint.Plan(OPERATION, PLAN.generation(), PLAN.safeSequence() + 1, PLAN.safeRevision());
+      var wider = new GcCheckpoint.Plan(OPERATION, PLAN.generation(), PLAN.safeSequence() + 1, PLAN.safeRevision(), REGISTRIES);
       var resumed = claim(store, proposal(2, 1, wider), scope);
       assertEquals(Optional.of(key(7)), resumed.checkpoint().position().afterIdentity());
       assertEquals(PLAN, resumed.checkpoint().plan(), "one sweep keeps its conservative authorization bounds");
@@ -85,11 +172,11 @@ class GcCheckpointStoreTest {
     for (var domain : SystemRecordClosure.Domain.values()) {
       var checkpoint = new GcCheckpoint("g".repeat(255), domain, 3, 65_535, 65_536, PLAN,
           new GcCheckpoint.Position(Optional.of(ByteKey.copyOf(new byte[GcCheckpoint.MAX_CURSOR_BYTES]))),
-          GcCheckpoint.Position.start(), GcCheckpoint.Phase.SCANNING, 7, 2, true);
+          GcCheckpoint.Position.start(), GcCheckpoint.Phase.SCANNING, 7, 2, true, 0, GcCheckpoint.Completion.none());
       assertEquals(checkpoint, GcCheckpoint.decode(checkpoint.encode()));
       assertTrue(checkpoint.encode().length() <= GcCheckpoint.MAX_ENCODED_BYTES);
       var fencing = new GcCheckpoint(checkpoint.tableGroupId(), domain, 3, 65_535, 65_536, PLAN,
-          checkpoint.position(), checkpoint.position(), GcCheckpoint.Phase.FENCING, 7, 2, false);
+          checkpoint.position(), checkpoint.position(), GcCheckpoint.Phase.FENCING, 7, 2, false, 0, GcCheckpoint.Completion.none());
       assertEquals(GcCheckpoint.MAX_ENCODED_BYTES, fencing.encode().length());
       assertEquals(fencing, GcCheckpoint.decode(fencing.encode()));
     }
@@ -101,7 +188,10 @@ class GcCheckpointStoreTest {
   void rejectsUnknownPhaseMalformedCursorsUtf8AndTrailingBytes() {
     var checkpoint = proposal(3, 1, PLAN).after(page(false));
     byte[] valid = checkpoint.encode().bytes();
-    int cursorLength = 4 + 4 + GROUP.length() + 3 * Integer.BYTES + 6 * Long.BYTES + 16 + 2;
+    byte[] oldFormat = valid.clone();
+    oldFormat[3] = 2;
+    assertThrows(IllegalArgumentException.class, () -> GcCheckpoint.decode(ByteKey.copyOf(oldFormat)));
+    int cursorLength = 4 + 4 + GROUP.length() + 3 * Integer.BYTES + 10 * Long.BYTES + 80 + 16 + 2;
     for (int value : new int[] {0, 3, 255}) {
       byte[] invalid = valid.clone();
       invalid[cursorLength - 1] = (byte) value;
@@ -167,12 +257,12 @@ class GcCheckpointStoreTest {
       assertEquals(2, nextSweep.checkpoint().completedPages());
       assertFalse(store.advance(first, page(false), scope).join());
       assertTrue(store.advance(nextSweep, page(false), scope).join());
-      var wider = new GcCheckpoint.Plan(OPERATION, 5, 21, 16);
+      var wider = new GcCheckpoint.Plan(OPERATION, 5, 21, 16, REGISTRIES);
       var changed = claim(store, proposal(2, 1, wider), scope);
       assertEquals(1, changed.checkpoint().sweep());
       assertEquals(nextSweep.checkpoint().after(page(false)).position(), changed.checkpoint().position());
       assertEquals(PLAN, changed.checkpoint().plan());
-      var newCompact = new GcCheckpoint.Plan(InvocationId.create(), 6, 21, 17);
+      var newCompact = new GcCheckpoint.Plan(InvocationId.create(), 6, 21, 17, REGISTRIES);
       assertEquals(2, claim(store, proposal(2, 1, newCompact), scope).checkpoint().sweep());
       assertInstanceOf(GcCheckpointStore.Superseded.class, store.claim(proposal(2, 1, PLAN), scope).join());
     }
@@ -184,7 +274,7 @@ class GcCheckpointStoreTest {
     var store = new GcCheckpointStore(records);
     try (var scope = scope()) {
       var wrong = new GcCheckpoint("other", SystemRecordClosure.Domain.MANIFEST, 3, 0, 1,
-          PLAN, GcCheckpoint.Position.start(), GcCheckpoint.Position.start(), GcCheckpoint.Phase.FENCING, 0, 0, false);
+          PLAN, GcCheckpoint.Position.start(), GcCheckpoint.Position.start(), GcCheckpoint.Phase.FENCING, 0, 0, false, 0, GcCheckpoint.Completion.none());
       records.createIfAbsent(SystemRecordType.RECOVERY_CHECKPOINT,
           GcCheckpoint.identity(GROUP, wrong.domain(), 0), wrong.encode(), scope).join();
       assertThrows(java.util.concurrent.CompletionException.class,
@@ -196,7 +286,7 @@ class GcCheckpointStoreTest {
 
   private static GcCheckpoint proposal(long epoch, int buckets, GcCheckpoint.Plan plan) {
     return new GcCheckpoint(GROUP, SystemRecordClosure.Domain.MANIFEST, epoch, 0, buckets,
-        plan, GcCheckpoint.Position.start(), GcCheckpoint.Position.start(), GcCheckpoint.Phase.FENCING, 0, 0, false);
+        plan, GcCheckpoint.Position.start(), GcCheckpoint.Position.start(), GcCheckpoint.Phase.FENCING, 0, 0, false, 0, GcCheckpoint.Completion.none());
   }
 
   private static GcCheckpointStore.Held claim(GcCheckpointStore store, GcCheckpoint proposed,
@@ -204,7 +294,7 @@ class GcCheckpointStoreTest {
     var held = assertInstanceOf(GcCheckpointStore.Held.class, store.claim(proposed, scope).join());
     if (held.checkpoint().phase() == GcCheckpoint.Phase.FENCING) {
       assertTrue(store.advance(held, new SystemRecordClosure.Page(proposed.domain(), 0, 0,
-          Optional.empty(), true), scope).join());
+          Optional.empty(), true, 0), scope).join());
       held = assertInstanceOf(GcCheckpointStore.Held.class, store.claim(proposed, scope).join());
     }
     return held;
@@ -212,7 +302,7 @@ class GcCheckpointStoreTest {
 
   private static SystemRecordClosure.Page page(boolean exhausted) {
     return new SystemRecordClosure.Page(SystemRecordClosure.Domain.MANIFEST, 1, 0,
-        Optional.of(key(7)), exhausted);
+        Optional.of(key(7)), exhausted, 0);
   }
   private static ByteKey key(int value) { return ByteKey.copyOf(new byte[] {(byte) value}); }
   private static RequestScope scope() { return RequestScope.withTimeout(Duration.ofSeconds(5)); }

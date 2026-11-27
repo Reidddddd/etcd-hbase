@@ -64,6 +64,32 @@ class HBaseSystemRecordRetirementIT {
   private static final ByteKey AUTHORIZATION_DIGEST = ByteKey.copyOf(new byte[32]);
 
   @Test
+  void retirementAcknowledgementRequiresStrongTombstoneReadbackBeforeSuccess() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var actual = open(environment, scope);
+      var store = org.mockito.Mockito.spy(actual);
+      var identity = ByteKey.copyOf(new byte[] {97});
+      var value = ByteKey.copyOf(new byte[] {98});
+      actual.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      var permit = permit(actual, scope);
+      var failure = new BackendFailure(BackendFailure.Category.UNAVAILABLE);
+      org.mockito.Mockito.doReturn(CompletableFuture.failedFuture(failure)).when(store)
+          .readTombstone(SystemRecordType.WORKSET, identity, scope);
+      var observed = assertThrows(CompletionException.class, () -> store.retire(SystemRecordType.WORKSET,
+          identity, value, permit, SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join());
+      assertEquals(BackendFailure.Category.UNAVAILABLE,
+          assertInstanceOf(BackendFailure.class, CompletionFailures.unwrapCompletion(observed)).category());
+      assertTrue(actual.read(SystemRecordType.WORKSET, identity, scope).join().isEmpty(),
+          "the actual retirement committed before the failed proof read");
+      assertTrue(actual.readTombstone(SystemRecordType.WORKSET, identity, scope).join().isPresent());
+      org.mockito.Mockito.doCallRealMethod().when(store).readTombstone(SystemRecordType.WORKSET, identity, scope);
+      assertTrue(store.retire(SystemRecordType.WORKSET, identity, value, permit,
+          SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join().alreadyRetired());
+    }
+  }
+
+  @Test
   void descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations() throws Exception {
     try (var environment = M1TestEnvironment.start(1);
         var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {

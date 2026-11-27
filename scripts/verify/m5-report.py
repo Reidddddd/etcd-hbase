@@ -499,6 +499,10 @@ J52_REQUIRED_TESTS = {
         'publicStoreApiCannotBypassTheClosureDecision',
     },
     ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.HBaseSystemRecordClosureTest'): {
+        'newerManifestPagesUseRootOrPermanentInvocationBoundsWithoutBlockingOldCompletion',
+        'exactRootProtectionCountsAsPendingEvenAboveNumericFloors',
+        'changedRetirementOutcomeRemainsPending',
+        'terminalPreparedCountersRemainAtTheNonRetireableUpperBound',
         'retainsCandidateReferencedByManifestPage',
         'retainsEventReferencedByEventPage',
         'retainsResultReferencedByManifestRoot',
@@ -512,6 +516,7 @@ J52_REQUIRED_TESTS = {
         'byteLimitedPageDoesNotEndCollectionBeforeTheContinuation',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
+        'retirementAcknowledgementRequiresStrongTombstoneReadbackBeforeSuccess',
         'lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding',
         'successorRowFenceRejectsAnAlreadyDispatchedWindowClose',
         'descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations',
@@ -544,6 +549,11 @@ J52_REQUIRED_TESTS = {
     },
 
     ('core', 'surefire', 'io.etcdhbase.core.commit.GcCheckpointStoreTest'): {
+        'rejectsNegativePendingAndInvalidCompletionReceipts',
+        'pendingPrefixSurvivesTakeoverAndCleanEofDoesNotPublishCompletion',
+        'completionSurvivesRestartStrongerCompactAndOwnerTakeover',
+        'zeroBoundsNeedAPositiveCompletedGeneration',
+        'rejectsChangedRegistryBindingAndReusedGeneration',
         'durableScanAndFenceCursorsMustBelongToTheNamedBucket',
         'initialLeaseAndTakeoverRequireTheWholeDurableFencePass',
         'wideningBoundsDuringOneCompactDoesNotResetAnUnfinishedSweep',
@@ -555,6 +565,9 @@ J52_REQUIRED_TESTS = {
         'rejectsRowValueShardMismatchInClaimAndRead',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.GcCheckpointCycleTest'): {
+        'checkpointWaitsForPhysicalProducerAndCleanupBeforeMetadataCas',
+        'failedProducerOrCleanupCannotPublishCheckpointProgress',
+        'durableOwnerChangeDuringDrainCannotAdvanceEvenWithAnUnchangedLocalToken',
         'failedFencePageCannotAdvanceOrStartRetirement',
         'metadataLeaseRunsOnlyTheFencePhaseBeforeCollection',
         'resumedSweepUsesOnlyANarrowerDerivativeOfTheFreshAuthority',
@@ -574,6 +587,7 @@ J52_REQUIRED_TESTS = {
         'schedulerRejectionIsVisibleAndStopBeforeStartCannotResurrectWorker',
     },
     ('server', 'failsafe', 'io.etcdhbase.server.commit.GcCheckpointCycleIT'): {
+        'durableCompletionNeedsAnotherSweepAfterTheReferenceChainDrains',
         'realWorkerProtectsPinnedEventsThenRestartCollectsBothBucketsAndFencesOldCheckpoint',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.M3TableGroupRuntimeWorkerLifecycleTest'): {
@@ -669,6 +683,7 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "durable-system-retirement-and-reference-closure",
         "invocation-window-close-before-result-retirement",
         "bucket-checkpoint-restart-pin-retention-and-physical-drain",
+        "durable-system-domain-completion-and-drained-checkpoint",
         "durable-kv-bucket-version-progress-and-target-completion",
         "physical-rpc-old-pin-owner-lane-and-exact-delete",
         "cancelled-rpc-owner-process-death-and-logical-only-resume",

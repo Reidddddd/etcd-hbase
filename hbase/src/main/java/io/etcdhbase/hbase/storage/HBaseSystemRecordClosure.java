@@ -2,6 +2,7 @@ package io.etcdhbase.hbase.storage;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.InvocationBinding;
+import io.etcdhbase.core.commit.ManifestRecordFormat;
 import io.etcdhbase.core.commit.SystemRecordClosure.Domain;
 import io.etcdhbase.core.commit.SystemRecordClosure.Page;
 import io.etcdhbase.core.commit.SystemRecordEntry;
@@ -9,10 +10,12 @@ import io.etcdhbase.core.commit.SystemRecordPage;
 import io.etcdhbase.core.commit.SystemRecordRetirement;
 import io.etcdhbase.core.commit.SystemRecordStore;
 import io.etcdhbase.core.commit.SystemRecordType;
+import io.etcdhbase.core.commit.TransactionId;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.hbase.codec.CommitDecisionMessages;
 import io.etcdhbase.hbase.codec.EventRevisionIndexMessages;
 import io.etcdhbase.hbase.codec.InvocationMessages;
+import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -24,6 +27,7 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
   private final SystemRecordStore records;
   private final HBaseSystemRecordStore retirement;
   private final SystemRecordGcAuthority authority;
+  private final InvocationWindowCloser windows;
   private final ByteKey profile;
   private final int bucketCount;
 
@@ -37,6 +41,7 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
     this.authority = Objects.requireNonNull(authority, "authority");
     this.records = Objects.requireNonNull(records, "records");
     this.retirement = Objects.requireNonNull(retirement, "retirement");
+    windows = new InvocationWindowCloser(records, retirement, authority);
     this.profile = Objects.requireNonNull(profile, "profile");
     if (profile.length() != 32 || bucketCount < 1 || bucketCount > 65_536) {
       throw new IllegalArgumentException("invalid closure configuration");
@@ -55,7 +60,7 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
             chain = chain.thenCompose(ignored -> retirement.fenceForGc(domain.recordType(), entry.identity(), permit, scope));
           }
           return chain.thenApply(ignored -> new Page(domain, page.entries().size(), 0,
-              page.lastIdentity(), page.exhausted()));
+              page.lastIdentity(), page.exhausted(), 0));
         });
   }
 
@@ -67,7 +72,7 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
     return authority.validate(permit, scope).thenCompose(ignored ->
         collectBucket(domain, bucket, afterIdentity, progress, permit, scope))
         .thenApply(exhausted -> new Page(domain, progress.examined, progress.retired,
-            progress.lastIdentity, exhausted));
+            progress.lastIdentity, exhausted, progress.pending));
   }
 
   private void validatePage(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
@@ -88,7 +93,7 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
     requireActive(scope);
     if (progress.remainingRows == 0) return CompletableFuture.completedFuture(false);
     return records.scanBucket(domain.recordType(), bucket, after, progress.remainingRows, MAX_SCAN_BYTES, scope)
-        .thenComposeAsync(page -> retireUnreferenced(domain, page, progress, permit, scope).thenCompose(ignored -> {
+        .thenComposeAsync(page -> collectEntries(domain, page, progress, permit, scope).thenCompose(ignored -> {
           progress.remainingRows = Math.max(0, progress.remainingRows - Math.toIntExact(page.physicalRows()));
           page.lastIdentity().ifPresent(identity -> progress.lastIdentity = Optional.of(identity));
           return page.exhausted() ? CompletableFuture.completedFuture(true)
@@ -96,39 +101,99 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
         }));
   }
 
-  private CompletableFuture<Void> retireUnreferenced(Domain domain, SystemRecordPage page,
+  private CompletableFuture<Void> collectEntries(Domain domain, SystemRecordPage page,
       Progress progress, SystemRecordRetirement.Permit permit, RequestScope scope) {
-    var windows = new InvocationWindowCloser(records, retirement, authority);
     CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
     for (var entry : page.entries()) {
       chain = chain.thenCompose(ignored -> {
         requireActive(scope);
         progress.examined++;
         if (domain == Domain.INVOCATION) {
-          // Keep the binding permanently; only its result-query window may advance.
-          return windows.close(entry.identity(), permit, scope)
-              .thenAccept(outcome -> {});
+          return closeWindow(entry, progress, permit, scope);
         }
-        return isReferenced(domain, entry, permit, progress.proof, scope).thenCompose(referenced -> {
-          if (referenced) return CompletableFuture.completedFuture(null);
-          return retirement.retire(domain.recordType(), entry.identity(), entry.value(), permit,
-              SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).thenAccept(outcome -> {
-                if (outcome.retiredNow() || outcome.alreadyRetired()) progress.retired++;
-              });
-        });
+        return collectRecord(domain, entry, progress, permit, scope);
       });
     }
     return chain;
   }
 
-  private CompletableFuture<Boolean> isReferenced(Domain domain, SystemRecordEntry entry,
-      SystemRecordRetirement.Permit permit, ProofBudget budget, RequestScope scope) {
-    // The retained invocation binding is the non-replay proof, even after its query window closes.
-    if (domain == Domain.INVOCATION) return CompletableFuture.completedFuture(true);
-    var target = SystemRecordGcTarget.decode(domain.recordType(), entry);
-    if (target.revision() >= permit.safeRevision() || target.sequence() >= permit.safeSequence()) {
-      return CompletableFuture.completedFuture(true);
+  private CompletableFuture<Void> closeWindow(SystemRecordEntry entry, Progress progress,
+      SystemRecordRetirement.Permit permit, RequestScope scope) {
+    var binding = InvocationMessages.decode(entry.value().bytes());
+    SystemRecordReferences.requireIdentity(entry.identity(), ByteKey.copyOf(binding.invocationId().bytes()));
+    if (binding.state() == InvocationBinding.State.WINDOW_CLOSED
+        || binding.baseRevision() >= permit.safeRevision() - 1
+        || binding.baseSequence() >= permit.safeSequence() - 1) {
+      return CompletableFuture.completedFuture(null);
     }
+    return windows.close(entry.identity(), permit, scope)
+        .thenCompose(ignored -> records.read(SystemRecordType.INVOCATION, entry.identity(), scope))
+        .thenAccept(found -> {
+          var current = InvocationMessages.decode(found.orElseThrow(
+              () -> new IllegalStateException("invocation non-replay binding is missing")).bytes());
+          if (!current.sameAttempt(binding)) throw new IllegalStateException("invocation attempt changed during GC");
+          if (current.state() != InvocationBinding.State.WINDOW_CLOSED) progress.pending++;
+        });
+  }
+
+  private CompletableFuture<Void> collectRecord(Domain domain, SystemRecordEntry entry, Progress progress,
+      SystemRecordRetirement.Permit permit, RequestScope scope) {
+    return targetForCollection(domain, entry, progress.proof, scope).thenCompose(target -> {
+      if (target.revision() >= permit.safeRevision() || target.sequence() >= permit.safeSequence()) {
+        return CompletableFuture.completedFuture(null);
+      }
+      return isReferenced(domain, entry, target, permit, progress.proof, scope).thenCompose(referenced -> {
+        if (referenced) {
+          progress.pending++;
+          return CompletableFuture.completedFuture(null);
+        }
+        return retirement.retire(domain.recordType(), entry.identity(), entry.value(), permit,
+            SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).thenAccept(outcome -> {
+              if (outcome.retiredNow() || outcome.alreadyRetired()) progress.retired++;
+              else progress.pending++;
+            });
+      });
+    });
+  }
+
+  private CompletableFuture<SystemRecordGcTarget> targetForCollection(Domain domain, SystemRecordEntry entry,
+      ProofBudget budget, RequestScope scope) {
+    var target = SystemRecordGcTarget.decode(domain.recordType(), entry);
+    if (target.revision() != 0 || target.sequence() != 0) return CompletableFuture.completedFuture(target);
+    // Child pages have no counters. Their current immutable root or permanent invocation supplies
+    // the window; an unrelated, still-readable transaction must not block old-target completion.
+    var root = ByteKey.copyOf(ByteBuffer.allocate(17).put(target.transaction().bytes())
+        .put(ManifestRecordFormat.MANIFEST_ROOT).array());
+    return records.read(SystemRecordType.MANIFEST, root, scope).thenCompose(found -> found.isPresent()
+        ? CompletableFuture.completedFuture(SystemRecordGcTarget.decode(SystemRecordType.MANIFEST,
+            new SystemRecordEntry(root, found.orElseThrow())))
+        : invocationTarget(target.transaction(), 0, Optional.empty(), budget, scope)
+            .thenApply(bounds -> bounds.orElse(target)));
+  }
+
+  private CompletableFuture<Optional<SystemRecordGcTarget>> invocationTarget(TransactionId transaction,
+      int bucket, Optional<ByteKey> after, ProofBudget budget, RequestScope scope) {
+    requireActive(scope);
+    if (bucket == bucketCount) return CompletableFuture.completedFuture(Optional.empty());
+    budget.reserveScan();
+    return records.scanBucket(SystemRecordType.INVOCATION, bucket, after, 1024, MAX_SCAN_BYTES, scope)
+        .thenComposeAsync(page -> {
+          budget.charge(page);
+          for (var entry : page.entries()) {
+            var binding = InvocationMessages.decode(entry.value().bytes());
+            SystemRecordReferences.requireIdentity(entry.identity(), ByteKey.copyOf(binding.invocationId().bytes()));
+            if (binding.transactionId().equals(transaction)) {
+              return CompletableFuture.completedFuture(Optional.of(SystemRecordGcTarget.prepared(
+                  transaction, binding.baseRevision(), binding.baseSequence())));
+            }
+          }
+          return page.exhausted() ? invocationTarget(transaction, bucket + 1, Optional.empty(), budget, scope)
+              : invocationTarget(transaction, bucket, page.lastIdentity(), budget, scope);
+        });
+  }
+
+  private CompletableFuture<Boolean> isReferenced(Domain domain, SystemRecordEntry entry,
+      SystemRecordGcTarget target, SystemRecordRetirement.Permit permit, ProofBudget budget, RequestScope scope) {
     return authority.validate(permit, scope).thenCompose(protections -> {
       if (protections.stream().anyMatch(protection -> protection.transactionId()
           .filter(target.transaction()::equals).isPresent()
@@ -221,6 +286,7 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
     private Optional<ByteKey> lastIdentity;
     private int examined;
     private int retired;
+    private int pending;
 
     private Progress(int maximumRows, Optional<ByteKey> after) {
       remainingRows = maximumRows;

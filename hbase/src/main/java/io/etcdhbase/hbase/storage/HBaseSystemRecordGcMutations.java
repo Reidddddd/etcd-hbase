@@ -150,7 +150,11 @@ final class HBaseSystemRecordGcMutations {
     long bytes = records.logicalMutationPayloadBytes(row,
         (long) observed.length + encoded.length + RETIRED_VALUE_GUARD.length + SystemRecordGcFence.BYTES);
     return records.execute(scope, bytes, table -> table.checkAndMutate(mutation)).thenCompose(updated ->
-        updated.isSuccess() ? CompletableFuture.completedFuture(new Outcome(true, false, 0))
+        updated.isSuccess() ? records.readTombstone(type, identity, scope).thenApply(found -> {
+          requireSameRetirement(found.orElseThrow(
+              () -> new IllegalStateException("retirement acknowledgement has no durable tombstone")), tombstone);
+          return new Outcome(true, false, 0);
+        })
             : confirmUnapplied(type, identity, tombstone, scope));
   }
 
