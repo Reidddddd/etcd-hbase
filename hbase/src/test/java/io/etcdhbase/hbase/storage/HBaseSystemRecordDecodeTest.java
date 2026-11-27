@@ -18,6 +18,8 @@ class HBaseSystemRecordDecodeTest {
   @Test
   void rejectsOversizedCellBeforeCopyingItsValue() {
     var cell = mock(Cell.class);
+    when(cell.getFamilyArray()).thenReturn(new byte[] {'s'});
+    when(cell.getFamilyLength()).thenReturn((byte) 1);
     when(cell.getQualifierArray()).thenReturn(new byte[] {'r'});
     when(cell.getQualifierLength()).thenReturn(1);
     when(cell.getValueLength()).thenReturn(HBaseSystemRecordStore.MAX_RECORD_BYTES + 1);

@@ -78,6 +78,9 @@ import java.util.function.LongFunction;
 
 /** Owns the local KV runtime for one validated table group; the caller owns its HBase factory. */
 public final class M3TableGroupRuntime implements AutoCloseable {
+  /** One bounded GC page; the worker loops shards rather than enlarging a single page. */
+  private static final int GC_PAGE_RECORDS = 64;
+  private static final long GC_TIMEOUT_MILLIS = 30_000;
   private static final BudgetManager.Reservation REQUEST_MEMORY =
       M3MemoryReservations.REQUEST;
   // Lease requests retain proof-read headroom separately from ordinary KV requests.
@@ -878,6 +881,22 @@ public final class M3TableGroupRuntime implements AutoCloseable {
           owner::currentToken, stores, pending.eventPins, budgets, authorization,
           pending, business.metrics());
       var history = new EventHistoryCycle(backfill, tailer, business.metrics());
+      // Event/history collection authority. It raises the durable event floors and returns the
+      // boundary that system-record retirement may use; it never deletes on its own.
+      var eventRetention = new io.etcdhbase.core.commit.EventHistoryRetention(pending.eventPins,
+          stores.views(),
+          new io.etcdhbase.core.commit.EventIndexBackfillReader(stores.records(), stores.manifests()));
+      if (stores.records().supportsCompaction()) {
+        stores.records().requireGcFencing();
+        var compactions = new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(), Clock.systemUTC());
+        var gcCycle = new GcCheckpointCycle(plan.source().tableGroupId(), owner::currentToken, stores.control(),
+            new io.etcdhbase.core.commit.GcCoordinator(stores.control(), compactions, stores.pins(), Clock.systemUTC()),
+            eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records()),
+            new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), budgets, GcCheckpointCycle.MEMORY,
+            plan.system().saltProfile().bucketCount(), GC_PAGE_RECORDS, business.metrics());
+        pending.installGcWorker(new GcCheckpointWorker(pending.worker, pending.leaseTimers,
+            Duration.ofMillis(GC_TIMEOUT_MILLIS), gcCycle::run, business.metrics()));
+      }
       pending.installEventHistoryWorker(new EventHistoryWorker(
           pending.leaseTimers, owner::currentToken, history::run, business.metrics()));
       var selectedEvents = new SelectedSequenceReader(pending.eventPins, stores.control(),
@@ -1046,6 +1065,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
     private ThreadPoolExecutor worker;
     private RangeReadCache cache;
     private volatile EventHistoryPinManager eventPins;
+    private volatile GcCheckpointWorker gcWorker;
     private volatile BudgetManager.Account eventTailerMemory;
     private volatile SharedEventTailer eventTailer;
     private CompletableFuture<SharedEventTailer> eventTailerReady = new CompletableFuture<>();
@@ -1130,6 +1150,15 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         throw new IllegalStateException("Lease expiry worker cannot be installed now");
       }
       expiryWorker = worker;
+      worker.start();
+    }
+
+    synchronized void installGcWorker(GcCheckpointWorker worker) {
+      Objects.requireNonNull(worker, "worker");
+      if (closing.get() || ownerLost || gcWorker != null) {
+        throw new IllegalStateException("GC worker cannot be installed now");
+      }
+      gcWorker = worker;
       worker.start();
     }
 
@@ -1223,6 +1252,8 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       if (current != null) current.stop();
       EventHistoryWorker history = eventHistoryWorker;
       if (history != null) history.stop();
+      GcCheckpointWorker gc = gcWorker;
+      if (gc != null) gc.stop();
       SharedEventTailer tailer = eventTailer;
       if (tailer != null) tailer.close();
       else eventTailerReady.completeExceptionally(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
@@ -1253,6 +1284,11 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         } catch (RuntimeException | Error failure) {
           shutdownFailure = merge(shutdownFailure, failure);
         }
+        try {
+          if (gcWorker != null) gcWorker.stop();
+        } catch (RuntimeException | Error failure) {
+          shutdownFailure = merge(shutdownFailure, failure);
+        }
         if (eventTailer == null) {
           eventTailerReady.completeExceptionally(new BackendFailure(BackendFailure.Category.CANCELLED));
         }
@@ -1278,6 +1314,9 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       } catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
       try {
         if (eventHistoryWorker != null) eventHistoryWorker.drained().join();
+      } catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
+      try {
+        if (gcWorker != null) gcWorker.drained().join();
       } catch (RuntimeException | Error problem) { failure = merge(failure, problem); }
       try {
         SharedEventTailer tailer = eventTailer;

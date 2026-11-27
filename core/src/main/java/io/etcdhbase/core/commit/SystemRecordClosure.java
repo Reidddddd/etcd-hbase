@@ -1,18 +1,27 @@
 package io.etcdhbase.core.commit;
 
 import io.etcdhbase.core.bytes.ByteKey;
+import io.etcdhbase.core.request.RequestScope;
+import java.util.concurrent.CompletableFuture;
 import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Immutable domain and progress models for bounded system-record closure collection.
+ * Bucket-scoped execution port for bounded system-record closure collection.
  *
  * <p>§6.2 of the M5 design lists the retention rule for every domain. A domain becomes collectable
  * only after Compact, the protection floors, the exact root references and the remaining domains'
  * dependencies have all cleared. The storage adapter owns proof and retirement execution.
  */
-public final class SystemRecordClosure {
-  private SystemRecordClosure() {}
+public interface SystemRecordClosure {
+  /** Installs the current owner/Compact fence across one bounded physical shard page. */
+  CompletableFuture<Page> fence(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
+      int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope);
+
+  /** Collects only the named bucket; incoming-reference proofs still cover every bucket. */
+  CompletableFuture<Page> collect(Domain domain, int bucket,
+      Optional<ByteKey> afterIdentity, int maximumRecords, SystemRecordRetirement.Permit permit,
+      RequestScope scope);
 
   /** Record domains; each page independently checks the surviving reference graph. */
   public enum Domain {

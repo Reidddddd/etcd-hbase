@@ -19,7 +19,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Predicate;
 
 /** Enumerates bounded retirement pages and proves the complete surviving direct reference set. */
-public final class HBaseSystemRecordClosure {
+public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.SystemRecordClosure {
   private static final long MAX_SCAN_BYTES = 8L << 20;
   private final SystemRecordStore records;
   private final HBaseSystemRecordStore retirement;
@@ -29,6 +29,7 @@ public final class HBaseSystemRecordClosure {
 
   public HBaseSystemRecordClosure(HBaseSystemRecordStore store) {
     this(store, store, store.profileFingerprint(), store.bucketCount(), new SystemRecordGcAuthority(store));
+    store.requireGcFencing();
   }
 
   HBaseSystemRecordClosure(SystemRecordStore records, HBaseSystemRecordStore retirement,
@@ -37,29 +38,62 @@ public final class HBaseSystemRecordClosure {
     this.records = Objects.requireNonNull(records, "records");
     this.retirement = Objects.requireNonNull(retirement, "retirement");
     this.profile = Objects.requireNonNull(profile, "profile");
-    if (profile.length() != 32 || bucketCount < 1 || bucketCount > 1024) {
+    if (profile.length() != 32 || bucketCount < 1 || bucketCount > 65_536) {
       throw new IllegalArgumentException("invalid closure configuration");
     }
     this.bucketCount = bucketCount;
   }
 
+  @Override
+  public CompletableFuture<Page> fence(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
+      int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope) {
+    validatePage(domain, bucket, afterIdentity, maximumRecords, permit, scope);
+    return authority.validate(permit, scope).thenCompose(ignored -> records.scanBucket(domain.recordType(), bucket,
+        afterIdentity, maximumRecords, MAX_SCAN_BYTES, scope)).thenCompose(page -> {
+          CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
+          for (var entry : page.entries()) {
+            chain = chain.thenCompose(ignored -> retirement.fenceForGc(domain.recordType(), entry.identity(), permit, scope));
+          }
+          return chain.thenApply(ignored -> new Page(domain, page.entries().size(), 0,
+              page.lastIdentity(), page.exhausted()));
+        });
+  }
+
   /** Collects a bounded domain page, retaining records while any reference or protection holds. */
-  public CompletableFuture<Page> collect(Domain domain, Optional<ByteKey> afterIdentity,
+  public CompletableFuture<Page> collect(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
+      int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope) {
+    validatePage(domain, bucket, afterIdentity, maximumRecords, permit, scope);
+    var progress = new Progress(maximumRecords, afterIdentity);
+    return authority.validate(permit, scope).thenCompose(ignored ->
+        collectBucket(domain, bucket, afterIdentity, progress, permit, scope))
+        .thenApply(exhausted -> new Page(domain, progress.examined, progress.retired,
+            progress.lastIdentity, exhausted));
+  }
+
+  private void validatePage(Domain domain, int bucket, Optional<ByteKey> afterIdentity,
       int maximumRecords, SystemRecordRetirement.Permit permit, RequestScope scope) {
     Objects.requireNonNull(domain, "domain");
     Objects.requireNonNull(afterIdentity, "afterIdentity");
     Objects.requireNonNull(permit, "permit");
     Objects.requireNonNull(scope, "scope");
-    if (maximumRecords < 1 || maximumRecords > 1024) {
-      return CompletableFuture.failedFuture(new IllegalArgumentException("invalid closure page budget"));
+    if (maximumRecords < 1 || maximumRecords > 1024 || bucket < 0 || bucket >= bucketCount
+        || afterIdentity.filter(identity -> records.bucket(domain.recordType(), identity) != bucket).isPresent()) {
+      throw new IllegalArgumentException("invalid closure page or shard");
     }
     permit.requireUsable(profile, scope);
-    var progress = new Progress(maximumRecords, afterIdentity);
-    int start = afterIdentity.map(identity -> records.bucket(domain.recordType(), identity)).orElse(0);
-    return authority.validate(permit, scope).thenCompose(ignored ->
-        collectBucket(domain, start, afterIdentity, progress, permit, scope))
-        .thenApply(exhausted -> new Page(domain, progress.examined, progress.retired,
-            progress.lastIdentity, exhausted));
+  }
+
+  private CompletableFuture<Boolean> collectBucket(Domain domain, int bucket, Optional<ByteKey> after,
+      Progress progress, SystemRecordRetirement.Permit permit, RequestScope scope) {
+    requireActive(scope);
+    if (progress.remainingRows == 0) return CompletableFuture.completedFuture(false);
+    return records.scanBucket(domain.recordType(), bucket, after, progress.remainingRows, MAX_SCAN_BYTES, scope)
+        .thenComposeAsync(page -> retireUnreferenced(domain, page, progress, permit, scope).thenCompose(ignored -> {
+          progress.remainingRows = Math.max(0, progress.remainingRows - Math.toIntExact(page.physicalRows()));
+          page.lastIdentity().ifPresent(identity -> progress.lastIdentity = Optional.of(identity));
+          return page.exhausted() ? CompletableFuture.completedFuture(true)
+              : collectBucket(domain, bucket, page.lastIdentity(), progress, permit, scope);
+        }));
   }
 
   enum ResultCollection { ABSENT, REFERENCED, RETIRED, CHANGED }
@@ -78,25 +112,6 @@ public final class HBaseSystemRecordClosure {
                 ? ResultCollection.RETIRED : ResultCollection.CHANGED);
       });
     });
-  }
-
-  private CompletableFuture<Boolean> collectBucket(Domain domain, int bucket,
-      Optional<ByteKey> after, Progress progress, SystemRecordRetirement.Permit permit,
-      RequestScope scope) {
-    requireActive(scope);
-    if (bucket == bucketCount) return CompletableFuture.completedFuture(true);
-    if (progress.remainingRows == 0) return CompletableFuture.completedFuture(false);
-    return records.scanBucket(domain.recordType(), bucket, after, progress.remainingRows,
-        MAX_SCAN_BYTES, scope).thenComposeAsync(page -> retireUnreferenced(domain, page, progress, permit, scope)
-            .thenCompose(ignored -> {
-              // The storage counter includes a possible lookahead row that is not a returned entry.
-              progress.remainingRows = Math.max(0,
-                  progress.remainingRows - Math.toIntExact(page.physicalRows()));
-              page.lastIdentity().ifPresent(identity -> progress.lastIdentity = Optional.of(identity));
-              return page.exhausted()
-                  ? collectBucket(domain, bucket + 1, Optional.empty(), progress, permit, scope)
-                  : collectBucket(domain, bucket, page.lastIdentity(), progress, permit, scope);
-            }));
   }
 
   private CompletableFuture<Void> retireUnreferenced(Domain domain, SystemRecordPage page,
@@ -215,14 +230,15 @@ public final class HBaseSystemRecordClosure {
   private static final class Progress {
     private final ProofBudget proof = new ProofBudget();
     private int remainingRows;
+    private Optional<ByteKey> lastIdentity;
     private int examined;
     private int retired;
-    private Optional<ByteKey> lastIdentity;
 
     private Progress(int maximumRows, Optional<ByteKey> after) {
       remainingRows = maximumRows;
       lastIdentity = after;
     }
+
   }
 
   /** A failed proof has no resumable retirement checkpoint; retry with an appropriate smaller page. */

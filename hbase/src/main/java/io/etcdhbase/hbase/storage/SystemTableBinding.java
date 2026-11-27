@@ -23,6 +23,9 @@ import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 
 /** Validated binding to the pre-provisioned system table; it never creates or adopts a table. */
 public final class SystemTableBinding {
+  static final byte[] GC_FENCE_FAMILY = {'g', 'c'};
+  private static final String GC_FENCE_FORMAT = "etcdhbase.m5.gc-fence-format";
+  private static final String GC_FENCE_FORMAT_VALUE = "1";
   private static final String AUXILIARY_FORMAT_VALUE = "1";
   private static final String LEASE_BINDING_FORMAT_VALUE = "2";
   private static final String LEASE_EXPIRY_FORMAT_VALUE = "3";
@@ -81,7 +84,7 @@ public final class SystemTableBinding {
   public void validate(TableDescriptor descriptor) {
     Objects.requireNonNull(descriptor, "descriptor");
     if (!descriptor.getTableName().equals(table)
-        || descriptor.getColumnFamilyCount() != 1
+        || !hasValidFamilies(descriptor)
         || !descriptor.hasColumnFamily(family)
         || descriptor.getDurability() != Durability.SYNC_WAL
         || !tableGroupId.equals(descriptor.getValue("etcdhbase.m0.table-group-id"))
@@ -102,6 +105,33 @@ public final class SystemTableBinding {
       throw new IllegalArgumentException(
           "system records require a non-expiring single-version column family");
     }
+  }
+
+  private boolean hasValidFamilies(TableDescriptor descriptor) {
+    String format = descriptor.getValue(GC_FENCE_FORMAT);
+    if (format == null) return descriptor.getColumnFamilyCount() == 1;
+    if (!GC_FENCE_FORMAT_VALUE.equals(format) || descriptor.getColumnFamilyCount() != 2
+        || Arrays.equals(family, GC_FENCE_FAMILY)) return false;
+    var maintenance = descriptor.getColumnFamily(GC_FENCE_FAMILY);
+    return maintenance != null && maintenance.getTimeToLive() == HConstants.FOREVER
+        && maintenance.getMaxVersions() == 1;
+  }
+
+  /** Maintenance metadata is isolated from the payload family read by earlier binaries. */
+  public boolean supportsGcFencing(TableDescriptor descriptor) {
+    return supportsCompaction(descriptor) && GC_FENCE_FORMAT_VALUE.equals(descriptor.getValue(GC_FENCE_FORMAT));
+  }
+
+  /** Builds an explicit provisioning descriptor; this method never alters an existing table. */
+  public TableDescriptor withGcFencingCapability(TableDescriptor descriptor) {
+    validate(descriptor);
+    if (!supportsCompaction(descriptor)) throw new IllegalStateException("GC fencing requires Compact capability");
+    if (supportsGcFencing(descriptor)) return descriptor;
+    if (Arrays.equals(family, GC_FENCE_FAMILY)) throw new IllegalStateException("payload family conflicts with GC family");
+    return TableDescriptorBuilder.newBuilder(descriptor)
+        .setColumnFamily(org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder.newBuilder(GC_FENCE_FAMILY)
+            .setMaxVersions(1).setTimeToLive(HConstants.FOREVER).build())
+        .setValue(GC_FENCE_FORMAT, GC_FENCE_FORMAT_VALUE).build();
   }
 
   /** M3 result, identity and workset records require this capability; older M2 tables remain readable. */

@@ -103,7 +103,7 @@ class HBaseSystemRecordClosureTest {
           .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(reference.systemIdentity(),
               ByteKey.copyOf(ManifestMessages.encode(reference))))));
       var page = closure(records, retirement, DIGEST, 1)
-          .collect(SystemRecordClosure.Domain.CANDIDATE, Optional.empty(), 16, permit(scope), scope).join();
+          .collect(SystemRecordClosure.Domain.CANDIDATE, 0, Optional.empty(), 16, permit(scope), scope).join();
       assertEquals(0, page.retired());
     }
   }
@@ -119,7 +119,7 @@ class HBaseSystemRecordClosureTest {
       when(records.scanBucket(SystemRecordType.INVOCATION, 1, Optional.of(cursor), 1, 8L << 20, scope))
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(), Optional.of(next), false, 10, 1, 1)));
       var page = closure(records, retirement, DIGEST, 2)
-          .collect(SystemRecordClosure.Domain.INVOCATION, Optional.of(cursor), 1, permit(scope), scope).join();
+          .collect(SystemRecordClosure.Domain.INVOCATION, 1, Optional.of(cursor), 1, permit(scope), scope).join();
       assertEquals(0, page.examined());
       assertEquals(Optional.of(next), page.lastIdentity());
       assertFalse(page.exhausted());
@@ -133,7 +133,7 @@ class HBaseSystemRecordClosureTest {
       when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.empty(), 1, 8L << 20, scope))
           .thenReturn(CompletableFuture.completedFuture(page(new SystemRecordEntry(key(1), key(2)))));
       var page = closure(records, mock(HBaseSystemRecordStore.class), DIGEST, 1)
-          .collect(SystemRecordClosure.Domain.INVOCATION, Optional.empty(), 1, permit(scope), scope).join();
+          .collect(SystemRecordClosure.Domain.INVOCATION, 0, Optional.empty(), 1, permit(scope), scope).join();
       assertEquals(1, page.examined());
       assertTrue(page.exhausted());
     }
@@ -163,7 +163,7 @@ class HBaseSystemRecordClosureTest {
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordPage(List.of(entry),
               Optional.of(entry.identity()), false, 2, 2, 1)));
       var result = closure(records, mock(HBaseSystemRecordStore.class), DIGEST, 1)
-          .collect(SystemRecordClosure.Domain.INVOCATION, Optional.empty(), 1, permit(scope), scope).join();
+          .collect(SystemRecordClosure.Domain.INVOCATION, 0, Optional.empty(), 1, permit(scope), scope).join();
       assertEquals(1, result.examined());
       assertFalse(result.exhausted());
     }
@@ -186,7 +186,7 @@ class HBaseSystemRecordClosureTest {
       when(retirement.retire(any(), any(), any(), any(), any(), eq(scope)))
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordRetirement.Outcome(true, false, 0)));
       var result = closure(records, retirement, DIGEST, 1)
-          .collect(SystemRecordClosure.Domain.CANDIDATE, Optional.empty(), 16, permit(scope), scope).join();
+          .collect(SystemRecordClosure.Domain.CANDIDATE, 0, Optional.empty(), 16, permit(scope), scope).join();
       assertEquals(expectedRetired, result.retired());
     }
   }
@@ -203,7 +203,7 @@ class HBaseSystemRecordClosureTest {
       when(records.scanBucket(SystemRecordType.INVOCATION, 0, Optional.of(first.identity()), 14, 8L << 20, scope))
           .thenReturn(CompletableFuture.completedFuture(page(second)));
       var result = closure(records, mock(HBaseSystemRecordStore.class), DIGEST, 1)
-          .collect(SystemRecordClosure.Domain.INVOCATION, Optional.empty(), 16, permit(scope), scope).join();
+          .collect(SystemRecordClosure.Domain.INVOCATION, 0, Optional.empty(), 16, permit(scope), scope).join();
       assertEquals(2, result.examined());
       assertEquals(Optional.of(second.identity()), result.lastIdentity());
       assertTrue(result.exhausted());
@@ -241,7 +241,7 @@ class HBaseSystemRecordClosureTest {
           .thenReturn(CompletableFuture.completedFuture(new SystemRecordRetirement.Outcome(true, false, 0)));
       var permit = permit(scope);
       var result = closure(records, retirement, DIGEST, 1)
-          .collect(domain, Optional.empty(), 16, permit, scope).join();
+          .collect(domain, 0, Optional.empty(), 16, permit, scope).join();
       assertEquals(1, result.examined());
       assertEquals(0, result.retired(), "a durable manifest reference must prevent retirement");
     }

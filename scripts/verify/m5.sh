@@ -125,7 +125,7 @@ if [[ "$task" == J51 ]]; then
 elif [[ "$task" == J52 ]]; then
   [[ -n "$failsafe_selector" ]] || { echo 'J52 integration selector is missing' >&2; exit 2; }
   run_logged maven-verify maven.log maven.stderr \
-    scripts/dev/mvn21.sh -B -ntp -pl hbase -am verify -Pm5-j52-public -DforkCount=1 \
+    scripts/dev/mvn21.sh -B -ntp -pl server -am verify -Pm5-j52-public -DforkCount=1 \
       "-Dtest=$surefire_selector" -Dsurefire.failIfNoSpecifiedTests=false \
       "-Dit.test=$failsafe_selector" -Dfailsafe.failIfNoSpecifiedTests=false
   run_logged native-oracle native-oracle.jsonl native-oracle.stderr \

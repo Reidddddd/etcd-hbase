@@ -4,10 +4,14 @@
   "status": "executable",
   "scope": "public",
   "execution_profile": "m5-j52-public",
-  "maven_reactor": "hbase",
+  "maven_reactor": "server",
   "maven_profiles": [
     {
       "module": "hbase",
+      "id": "m5-j52-public"
+    },
+    {
+      "module": "server",
       "id": "m5-j52-public"
     }
   ],
@@ -25,7 +29,8 @@
     "logical-selection-and-unknown-outcome",
     "native-v3.5.23-compact-range-watch-oracle",
     "durable-system-retirement-and-reference-closure",
-    "invocation-window-close-before-result-retirement"
+    "invocation-window-close-before-result-retirement",
+    "bucket-checkpoint-restart-pin-retention-and-physical-drain"
   ],
   "tests": [
     {
@@ -194,13 +199,14 @@
       "kind": "surefire",
       "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordStoreScanTest",
       "methods": [
+        "rejectsGcActivationAndWritesBeforeUsingAnOlderTable",
         "cancelledScanRetainsPhysicalOwnershipUntilHBaseSignalsCompletion",
+        "validatesPhysicalRowOrderForLengthFramedIdentities",
+        "rejectsBackwardPhysicalRowsEvenWhenLogicalIdentitiesAreIncreasing",
         "rejectsCompactRecordsBeforeTouchingAnUndeclaredTable",
         "rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable",
         "rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent",
-        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent",
-        "validatesPhysicalRowOrderForLengthFramedIdentities",
-        "rejectsBackwardPhysicalRowsEvenWhenLogicalIdentitiesAreIncreasing"
+        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent"
       ]
     },
     {
@@ -223,6 +229,7 @@
         "acceptsTheExactDurableSingleVersionSystemTable",
         "resultCapabilityIsExplicitAndDoesNotChangeLegacyValidation",
         "compactRecordsRequireExplicitDescriptorCapability",
+        "gcFencingRequiresAnExplicitDurableIsolatedFamily",
         "rejectsTableFamilyProfileCategoryAndDurabilityMismatches",
         "rejectsExpiringOrMultiVersionFamilies",
         "rejectsDifferentRoutingParametersWithTheSameProfileId"
@@ -233,6 +240,7 @@
       "kind": "surefire",
       "class": "io.etcdhbase.core.commit.SystemRecordRetirementPermitTest",
       "methods": [
+        "derivedPermitOnlyNarrowsBoundsAndKeepsAuthorityProtectionsAndScope",
         "ordinaryCallersCannotMintRetirementPermits",
         "permitBindsProfileRegistryOperationGenerationAndBoundary",
         "permitFailsClosedForAnotherProfileScopeOrAfterItsScopeCloses",
@@ -290,6 +298,11 @@
       "kind": "failsafe",
       "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT",
       "methods": [
+        "descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations",
+        "legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation",
+        "fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts",
+        "lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard",
+        "lateRetirementIsFencedBeforeSuccessorStartsCollection",
         "retirementReplacesTheValueAndBlocksEveryRecreationPath",
         "retirementIsIdempotentForTheSamePlanAndRejectsAChangedValue",
         "repeatedCreateCannotOverwriteAnExistingImmutableRecord",
@@ -319,6 +332,82 @@
         "closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay",
         "anUnresolvedInvocationIsRetainedRatherThanClosed",
         "closingAWindowRetainsAResultStillReferencedByAManifest"
+      ]
+    },
+    {
+      "module": "core",
+      "class": "io.etcdhbase.core.commit.GcCheckpointStoreTest",
+      "methods": [
+        "durableScanAndFenceCursorsMustBelongToTheNamedBucket",
+        "initialLeaseAndTakeoverRequireTheWholeDurableFencePass",
+        "wideningBoundsDuringOneCompactDoesNotResetAnUnfinishedSweep",
+        "roundTripsEveryDomainAndMaximumGroupAndCursor",
+        "rejectsUnknownPhaseMalformedCursorsUtf8AndTrailingBytes",
+        "rejectsTopologyChangesOnResumeAndTakeover",
+        "sameEpochResumesAndTakeoverPreservesProgressWhileStaleCasLoses",
+        "exhaustedSweepAndNewOperationRevisitPrefixesWhileWiderBoundsWait",
+        "rejectsRowValueShardMismatchInClaimAndRead"
+      ],
+      "kind": "surefire"
+    },
+    {
+      "module": "server",
+      "class": "io.etcdhbase.server.commit.GcCheckpointCycleTest",
+      "methods": [
+        "failedFencePageCannotAdvanceOrStartRetirement",
+        "metadataLeaseRunsOnlyTheFencePhaseBeforeCollection",
+        "resumedSweepUsesOnlyANarrowerDerivativeOfTheFreshAuthority",
+        "aBusyBucketYieldsTheNextPageToTheNextShard",
+        "nonOwnerNeverAdmitsOrTouchesStorage",
+        "absentCompactWaitsWithoutCallingAuthorityOrCreatingCheckpoints",
+        "regularAdmissionFailureYieldsAndRecordsGcBacklogWithoutUsingReserve",
+        "authorizationFailureCannotCreateOrAdvanceACheckpoint",
+        "ownerLossAfterCollectionCannotAdvanceDurableProgressAndAdmissionWaitsForProducer"
+      ],
+      "kind": "surefire"
+    },
+    {
+      "module": "server",
+      "class": "io.etcdhbase.server.commit.GcCheckpointWorkerTest",
+      "methods": [
+        "queuedCycleDoesNotStartIoAfterStop",
+        "stopWaitsForPhysicalProducerAndActualCleanupAfterLogicalCompletion",
+        "cancellationReachesLogicalIoButDoesNotPretendPhysicalDrain",
+        "physicalAndCleanupFailuresSurviveStop",
+        "executorRejectionClosesScopeAndRetriesWithoutLeakingOutstandingWork",
+        "schedulerRejectionIsVisibleAndStopBeforeStartCannotResurrectWorker"
+      ],
+      "kind": "surefire"
+    },
+    {
+      "module": "server",
+      "class": "io.etcdhbase.server.commit.GcCheckpointCycleIT",
+      "methods": [
+        "realWorkerProtectsPinnedEventsThenRestartCollectsBothBucketsAndFencesOldCheckpoint"
+      ],
+      "kind": "failsafe"
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.M3TableGroupRuntimeWorkerLifecycleTest",
+      "methods": [
+        "ownerLossStopsInstalledGcAndRejectsReplacement",
+        "closedTailerCanBeDetachedAndRecreatedWithoutRemovingTheNewGeneration",
+        "eventHistoryWorkerStartsImmediatelyAndStartupReadinessWaitsForTailer",
+        "readinessRequiresEventPinsAHealthyWorkerAndAnOpenTailer",
+        "ownerLossBeforeEventHistoryWorkerInstallationRejectsLateWorker",
+        "ownerLossBeforeInstallationRejectsBothWorkers"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.SystemRecordGcFenceTest",
+      "methods": [
+        "newerOwnerDominatesEveryOlderCompactGeneration",
+        "rejectsCorruptDuplicateOrUnknownMaintenanceCells",
+        "payloadReaderKeepsTheBaseLayoutAndRejectsInlineFences"
       ]
     }
   ]

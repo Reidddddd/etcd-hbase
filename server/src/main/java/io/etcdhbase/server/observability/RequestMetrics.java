@@ -56,6 +56,11 @@ public final class RequestMetrics implements RequestCompletionRecorder {
   private final LongAdder leaseExpiryRevocations = new LongAdder();
   private final LongAdder leaseExpiryDelayMillis = new LongAdder();
   private final LongAdder leaseExpiryDelaySamplesMissing = new LongAdder();
+  private final LongAdder gcBacklog = new LongAdder();
+  private final LongAdder gcFailures = new LongAdder();
+  private final LongAdder gcPages = new LongAdder();
+  private final LongAdder gcExamined = new LongAdder();
+  private final LongAdder gcRetired = new LongAdder();
   private final LongAdder leaseExpiryRetries = new LongAdder();
   private final LongAdder eventBackfillSteps = new LongAdder();
   private final LongAdder eventBackfillCompletions = new LongAdder();
@@ -402,6 +407,18 @@ public final class RequestMetrics implements RequestCompletionRecorder {
     leaseExpiryRevocations.increment();
     leaseExpiryDelaySamplesMissing.increment();
   }
+
+  public void recordGcBacklog() { gcBacklog.increment(); }
+  public void recordGcFailure() { gcFailures.increment(); }
+  public void recordGcPage(int examined, int retired) {
+    gcPages.increment();
+    gcExamined.add(examined);
+    gcRetired.add(retired);
+  }
+  public GcSnapshot gc() {
+    return new GcSnapshot(gcBacklog.sum(), gcFailures.sum(), gcPages.sum(), gcExamined.sum(), gcRetired.sum());
+  }
+  public record GcSnapshot(long backlog, long failures, long pages, long examined, long retired) {}
 
   public void recordLeaseExpiryRetry() { leaseExpiryRetries.increment(); }
 

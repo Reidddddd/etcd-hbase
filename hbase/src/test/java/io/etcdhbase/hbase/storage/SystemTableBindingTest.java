@@ -1,5 +1,6 @@
 package io.etcdhbase.hbase.storage;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -86,6 +87,35 @@ class SystemTableBindingTest {
         .setValue("etcdhbase.m5.compaction-format", "2").build();
     assertFalse(BINDING.supportsCompaction(unknown));
     assertThrows(IllegalStateException.class, () -> BINDING.withCompactionCapability(unknown));
+  }
+
+  @Test
+  void gcFencingRequiresAnExplicitDurableIsolatedFamily() {
+    var base = descriptor(TABLE, FAMILY, TABLE_GROUP, SALT_PROFILE, REQUIRED_CATEGORIES,
+        Durability.SYNC_WAL, HConstants.FOREVER, 1);
+    assertThrows(IllegalStateException.class, () -> BINDING.withGcFencingCapability(base));
+    var compact = BINDING.withCompactionCapability(base);
+    assertFalse(BINDING.supportsGcFencing(compact));
+    assertEquals(1, compact.getColumnFamilyCount());
+    var enabled = BINDING.withGcFencingCapability(compact);
+    assertTrue(BINDING.supportsGcFencing(enabled));
+    assertEquals(2, enabled.getColumnFamilyCount());
+    assertEquals(enabled, BINDING.withGcFencingCapability(enabled));
+    var missingFamily = TableDescriptorBuilder.newBuilder(compact)
+        .setValue("etcdhbase.m5.gc-fence-format", "1").build();
+    assertThrows(IllegalArgumentException.class, () -> BINDING.supportsGcFencing(missingFamily));
+    var undeclaredFamily = TableDescriptorBuilder.newBuilder(enabled)
+        .removeValue("etcdhbase.m5.gc-fence-format").build();
+    assertThrows(IllegalArgumentException.class, () -> BINDING.validate(undeclaredFamily));
+    var unknown = TableDescriptorBuilder.newBuilder(enabled)
+        .setValue("etcdhbase.m5.gc-fence-format", "2").build();
+    assertThrows(IllegalArgumentException.class, () -> BINDING.validate(unknown));
+    for (var badPolicy : java.util.List.of(
+        ColumnFamilyDescriptorBuilder.newBuilder(SystemTableBinding.GC_FENCE_FAMILY).setTimeToLive(60).build(),
+        ColumnFamilyDescriptorBuilder.newBuilder(SystemTableBinding.GC_FENCE_FAMILY).setMaxVersions(2).build())) {
+      assertThrows(IllegalArgumentException.class, () -> BINDING.validate(
+          TableDescriptorBuilder.newBuilder(enabled).modifyColumnFamily(badPolicy).build()));
+    }
   }
 
   @Test

@@ -151,6 +151,10 @@ class BootstrapTest {
       assertEquals("127.0.0.1", bootstrap.boundListener().bindHost());
       assertEquals("j03-close", bootstrap.boundListener().tableGroupId());
       assertFalse(bootstrap.awaitTermination(Duration.ZERO));
+      try (ServerSocket occupied = new ServerSocket()) {
+        occupied.setReuseAddress(true);
+        assertThrows(IOException.class, () -> occupied.bind(new InetSocketAddress("127.0.0.1", port)));
+      }
     } finally {
       bootstrap.close();
     }
