@@ -464,7 +464,9 @@
         "onlyBackendEofAfterTheLastCompleteKeyPublishesTheBucketWatermark",
         "ownerLossBeforeDeleteReadbackCannotPublishProgress",
         "maintenanceAdmissionDoesNotReleaseUntilTheActualProducerDrains",
-        "unavailableMaintenanceCapacityStartsNoStorageWork"
+        "unavailableMaintenanceCapacityStartsNoStorageWork",
+        "zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket",
+        "ownerLossBeforeZeroRevisionClaimReturnsCannotPublishCompletion"
       ]
     },
     {
@@ -495,7 +497,8 @@
       "class": "io.etcdhbase.server.J52PhysicalCompactIT",
       "methods": [
         "physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts",
-        "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration"
+        "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration",
+        "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts"
       ]
     },
     {

@@ -585,6 +585,8 @@ J52_REQUIRED_TESTS = {
         'aDifferentProfileOrPinRegistryCannotClaimHistoryProgress',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.HistoryGcCycleTest'): {
+        'zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket',
+        'ownerLossBeforeZeroRevisionClaimReturnsCannotPublishCompletion',
         'persistsActiveKeyIntentBeforeAnyDeletionCanStart',
         'resumesOnlyOneConfirmedVersionPageUnderTheFrozenSafeBounds',
         'unknownDeletionCannotAdvanceTheDurableVersionCursor',
@@ -606,6 +608,7 @@ J52_REQUIRED_TESTS = {
         'shutdownRejectsWaitersAndPreventsQueuedPollsFromStartingStorageWork',
     },
     ('server', 'failsafe', 'io.etcdhbase.server.J52PhysicalCompactIT'): {
+        'zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts',
         'physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts',
         'cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration',
     },

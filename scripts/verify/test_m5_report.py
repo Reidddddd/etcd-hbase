@@ -559,6 +559,21 @@ class M5J52ReportTest(unittest.TestCase):
                 with self.subTest(profile=invalid), self.assertRaises(m5_report.ReportError):
                     m5_report._validate_maven_profile(repo, "server", "m5-j52-public")
 
+    def test_zero_revision_requires_no_scan_worker_and_real_nonempty_rpc_regressions(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        m5_report._validate_task(original, path, repo)
+        for class_name, method in (
+                ("HistoryGcCycleTest", "zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket"),
+                ("J52PhysicalCompactIT", "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts")):
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"] if test["class"].endswith("." + class_name))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method):
+                with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
+                    m5_report._validate_task(task, path, repo)
+
     def test_runtime_profile_cannot_skip_or_omit_the_real_worker_integration_suite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

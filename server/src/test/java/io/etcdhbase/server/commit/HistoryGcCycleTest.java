@@ -37,6 +37,41 @@ class HistoryGcCycleTest {
   private final BudgetManager budgets = budgets(256L << 20);
 
   @Test
+  void zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket() {
+    var permit = selected();
+    when(permit.safeRevision()).thenReturn(0L);
+    held(HistoryGcCheckpoint.start("gc-group", 3, 0, 1, permit));
+    when(enumerator.nextKey(any(), anyInt(), any(), any()))
+        .thenReturn(CompletableFuture.completedFuture(Optional.of(KEY)));
+    when(checkpoints.beginKey(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(true));
+    when(checkpoints.finishBucket(any(), any())).thenReturn(CompletableFuture.completedFuture(true));
+    try (var scope = scope()) {
+      assertEquals(Outcome.PROGRESSED, cycle(budgets).run(scope).join());
+      verifyNoInteractions(enumerator, collector);
+      verify(checkpoints).finishBucket(any(), same(scope));
+    }
+    assertEquals(0, budgets.snapshot().requests());
+  }
+
+  @Test
+  void ownerLossBeforeZeroRevisionClaimReturnsCannotPublishCompletion() {
+    var permit = selected();
+    when(permit.safeRevision()).thenReturn(0L);
+    var checkpoint = HistoryGcCheckpoint.start("gc-group", 3, 0, 1, permit);
+    var acquired = new CompletableFuture<Optional<HistoryGcCheckpointStore.Held>>();
+    when(checkpoints.claim(anyLong(), anyInt(), any(), any())).thenReturn(acquired);
+    when(checkpoints.finishBucket(any(), any())).thenReturn(CompletableFuture.completedFuture(true));
+    try (var scope = scope()) {
+      var pending = cycle(budgets).run(scope);
+      owner.set(Optional.empty());
+      acquired.complete(Optional.of(new HistoryGcCheckpointStore.Held(checkpoint, checkpoint.encode())));
+      assertThrows(CompletionException.class, pending::join);
+      verify(checkpoints, never()).finishBucket(any(), any());
+      verifyNoInteractions(enumerator, collector);
+    }
+  }
+
+  @Test
   void persistsActiveKeyIntentBeforeAnyDeletionCanStart() {
     var permit = selected();
     held(HistoryGcCheckpoint.start("gc-group", 3, 0, 1, permit));

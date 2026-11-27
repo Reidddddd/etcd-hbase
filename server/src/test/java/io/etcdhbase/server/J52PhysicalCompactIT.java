@@ -62,6 +62,43 @@ class J52PhysicalCompactIT {
   @TempDir(cleanup = org.junit.jupiter.api.io.CleanupMode.ON_SUCCESS) Path artifacts;
 
   @Test
+  void zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts() throws Exception {
+    try (var cluster = TemporaryHBaseClusterProcess.startSecure()) {
+      for (String layout : List.of("history-table.json", "native-cell-versions.json")) {
+        for (boolean physical : List.of(false, true)) verifyZeroRevision(cluster, layout, physical);
+      }
+    }
+  }
+
+  private static void verifyZeroRevision(TemporaryHBaseClusterProcess cluster,
+      String layout, boolean physical) throws Exception {
+    var businessScans = new java.util.concurrent.atomic.AtomicInteger();
+    var backend = cluster.clientConfiguration();
+    var plan = M3TableGroupRuntimeIT.plan(layout,
+        backend.getInt("hbase.zookeeper.property.clientPort", -1));
+    try (var fixture = Fixture.open(backend, plan, true, "1", businessScans)) {
+      fixture.put(KEY, "old");
+      fixture.put(KEY, "new");
+      var other = ByteString.copyFromUtf8("another-key");
+      long revision = fixture.put(other, "retained");
+      businessScans.set(0);
+      assertEquals(revision, fixture.client().compact(Rpc.CompactionRequest.newBuilder()
+          .setRevision(0).setPhysical(physical).build()).getHeader().getRevision());
+      fixture.awaitCompletion(0, revision - 1, true);
+      assertEquals(0, businessScans.get(), "zero revision has no business history to enumerate");
+      assertEquals(ByteString.copyFromUtf8("new"), fixture.client().range(
+          Rpc.RangeRequest.newBuilder().setKey(KEY).build()).getKvs(0).getValue());
+      assertEquals(ByteString.copyFromUtf8("retained"), fixture.client().range(
+          Rpc.RangeRequest.newBuilder().setKey(other).build()).getKvs(0).getValue());
+      System.out.printf("j52-zero-rpc layout=%s physical=%s durable=true businessScans=0%n",
+          plan.primary().layout(), physical);
+      fixture.client().compact(Rpc.CompactionRequest.newBuilder()
+          .setRevision(revision).setPhysical(true).build());
+      assertTrue(businessScans.get() > 0, "the observer must see scans for a positive target");
+    }
+  }
+
+  @Test
   void physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts() throws Exception {
     try (var cluster = TemporaryHBaseClusterProcess.startSecure()) {
       for (String layout : List.of("history-table.json", "native-cell-versions.json")) {
@@ -280,6 +317,7 @@ class J52PhysicalCompactIT {
     private final HBaseBackendIdentityProvider provider;
     private final BudgetManager budgets;
     private final ScanScheduler scans;
+    private io.etcdhbase.hbase.api.HBaseConnectionFactory runtimeConnections;
     private AuthorizedBackendIdentity identity;
     private AsyncConnection connection;
     private HistoryGcCheckpointStore checkpoints;
@@ -292,6 +330,7 @@ class J52PhysicalCompactIT {
     private Fixture(M3TableGroupPlan plan, HBaseBackendIdentityProvider provider) {
       this.plan = plan;
       this.provider = provider;
+      runtimeConnections = provider;
       var limits = new BudgetManager.Limits(16, 16, 32, 16, 32, 8L << 20, 512L << 20);
       budgets = new BudgetManager(limits, Map.of(plan.source().tableGroupId(), limits), limits);
       scans = new ScanScheduler(budgets, Duration.ofSeconds(30));
@@ -311,6 +350,11 @@ class J52PhysicalCompactIT {
 
     private static Fixture open(Configuration configuration, M3TableGroupPlan plan,
         boolean fresh, String member) throws Exception {
+      return open(configuration, plan, fresh, member, null);
+    }
+
+    private static Fixture open(Configuration configuration, M3TableGroupPlan plan,
+        boolean fresh, String member, java.util.concurrent.atomic.AtomicInteger businessScans) throws Exception {
       var authentication = new AuthenticationScope(plan.source().tableGroupId(), plan.source().hbaseProfile().id());
       var provider = new HBaseBackendIdentityProvider(plan.source().identityProviderId(), authentication,
           configuration, HBaseAuthenticators.kerberosPassword(),
@@ -324,12 +368,50 @@ class J52PhysicalCompactIT {
             .toCompletableFuture().get(30, TimeUnit.SECONDS);
         if (fresh) fixture.initialize();
         else fixture.bind();
+        if (businessScans != null) fixture.observeBusinessScans(businessScans);
         fixture.start(member);
         return fixture;
       } catch (Exception | Error failure) {
         try { fixture.close(); } catch (Exception | Error cleanup) { failure.addSuppressed(cleanup); }
         throw failure;
       }
+    }
+
+    /** Transparent counters delegate every operation, including real ADMIN checks, to HBase. */
+    private void observeBusinessScans(java.util.concurrent.atomic.AtomicInteger businessScans) {
+      runtimeConnections = new io.etcdhbase.hbase.api.HBaseConnectionFactory() {
+        @Override public java.util.concurrent.CompletionStage<AsyncConnection> connectionFor(
+            AuthorizedBackendIdentity requested) {
+          return provider.connectionFor(requested).thenApply(actual -> {
+            return org.mockito.Mockito.mock(AsyncConnection.class, invocation -> {
+              Object result = org.mockito.AdditionalAnswers.delegatesTo(actual).answer(invocation);
+              String method = invocation.getMethod().getName();
+              if ((method.equals("getTableBuilder") || method.equals("getTable"))
+                  && plan.primary().table().equals(invocation.getArgument(0))) {
+                return method.equals("getTableBuilder") ? observedBuilder(result, businessScans)
+                    : observedTable(result, businessScans);
+              }
+              return result;
+            });
+          });
+        }
+        @Override public void close() { /* The real provider retains connection ownership. */ }
+      };
+    }
+
+    private static Object observedBuilder(Object actual, java.util.concurrent.atomic.AtomicInteger scans) {
+      return org.mockito.Mockito.mock(org.apache.hadoop.hbase.client.AsyncTableBuilder.class, invocation -> {
+        Object result = org.mockito.AdditionalAnswers.delegatesTo(actual).answer(invocation);
+        if (invocation.getMethod().getName().equals("build")) return observedTable(result, scans);
+        return result == actual ? invocation.getMock() : result;
+      });
+    }
+
+    private static Object observedTable(Object actual, java.util.concurrent.atomic.AtomicInteger scans) {
+      return org.mockito.Mockito.mock(org.apache.hadoop.hbase.client.AsyncTable.class, invocation -> {
+        if (invocation.getMethod().getName().startsWith("scan")) scans.incrementAndGet();
+        return org.mockito.AdditionalAnswers.delegatesTo(actual).answer(invocation);
+      });
     }
 
     private void initialize() throws Exception {
@@ -365,7 +447,7 @@ class J52PhysicalCompactIT {
     private void start(String member) throws Exception {
       try (var startup = RequestScope.withTimeout(Duration.ofSeconds(30))) {
         runtime = M3TableGroupRuntime.open(plan, M3TableGroupRuntimeIT.activation(member), RESOURCES,
-            provider, identity, budgets, scans, startup);
+            runtimeConnections, identity, budgets, scans, startup);
       } catch (M3TableGroupRuntime.StartupException failure) {
         try { failure.cleanup().toCompletableFuture().get(30, TimeUnit.SECONDS); }
         catch (Exception cleanup) { failure.addSuppressed(cleanup); }

@@ -84,6 +84,12 @@ final class HistoryGcCycle {
       var acquired = found.orElseThrow();
       var checkpoint = acquired.checkpoint();
       if (checkpoint.exhausted()) return CompletableFuture.completedFuture(nextBucket(false));
+      // Revision zero has no materialized KV versions; bucket completion needs no business scan.
+      if (checkpoint.safeRevision() == 0) {
+        requireOwner(token, scope);
+        return checkpoints.finishBucket(acquired, scope)
+            .thenApply(updated -> updated ? nextBucket(true) : Outcome.IDLE);
+      }
       var pagePermit = permit.restrictTo(checkpoint.safeRevision(), checkpoint.safeSequence());
       return checkpoint.activeKey().isPresent()
           ? collectActiveKey(token, acquired, pagePermit, scope)

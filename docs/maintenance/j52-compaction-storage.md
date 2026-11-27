@@ -32,7 +32,7 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 后台每轮只推进一个持久 key 意图、一个版本页或一次 bucket EOF，随后轮转 bucket，并使用独立的维护 scope、deadline 和常规预算。没有 Lease 运行时也会在启用 Compact 能力时装配 KV worker。删除前持久保存 active key，删除及强读确认后才用精确旧值 CAS 推进版本游标；key 完整处理前不能越过它。owner 接管保留已确认游标，并以 owner epoch 与操作代次约束后续进度；未知结果下一轮重读，不推断成功。
 
-检查点分别保存本轮冻结的 safe revision/sequence 和已完成 revision/sequence。旧 pin 导致的保守低水位只表示部分回收，不能完成更高请求目标；安全边界扩大后，下一轮从 bucket 开始重新检查。只有后端 EOF 且所有 key 页确认后才发布该轮完成水位。正的 completed generation 证明至少完成过一轮，默认 `0/0` 计数不能证明 `Compact(0)` 已完成。较强任务开始时保留旧完成回执，取消、进程终止和 owner 接管均不清除它。
+检查点分别保存本轮冻结的 safe revision/sequence 和已完成 revision/sequence。旧 pin 导致的保守低水位只表示部分回收，不能完成更高请求目标；安全边界扩大后，下一轮从 bucket 开始重新检查。只有后端 EOF 且所有 key 页确认后才发布该轮完成水位。正的 completed generation 证明至少完成过一轮，默认 `0/0` 计数不能证明 `Compact(0)` 已完成。本轮冻结的 safe revision 为零时，没有可删除的 KV 版本，各 bucket 直接持久确认空 sweep，保留 sequence 和正完成代次校验，不逐 key 枚举非空业务表。较强任务开始时保留旧完成回执，取消、进程终止和 owner 接管均不清除它。
 
 请求等待方以有界 point read 检查各 bucket；等待不占用 owner lane，pin 尚未解除时 Put 仍能执行。请求与后台独立，取消后等待方仍持有准入和实际读取资源直至 producer 排空，成功响应还须等待清理结果。运行时关闭或失去 owner 时停止 worker 和等待方，排空后再释放底层连接及自有 timer。保留的最小 guard 会持续占用空间，不能把它描述为常数磁盘容量。
 
