@@ -43,7 +43,8 @@ public final class SystemRecordGcTestFixture {
   private SystemRecordGcTestFixture() {}
 
   public static TableDescriptor descriptor(SystemTableBinding binding, TableDescriptor descriptor) {
-    return binding.withCompactionCapability(binding.withEventRevisionIndexCapability(descriptor));
+    return binding.withGcFencingCapability(
+        binding.withCompactionCapability(binding.withEventRevisionIndexCapability(descriptor)));
   }
 
   static SystemRecordRetirement.Permit authorize(HBaseSystemRecordStore records, RequestScope scope)

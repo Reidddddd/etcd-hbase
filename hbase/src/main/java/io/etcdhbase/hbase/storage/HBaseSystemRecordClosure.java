@@ -29,6 +29,7 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
 
   public HBaseSystemRecordClosure(HBaseSystemRecordStore store) {
     this(store, store, store.profileFingerprint(), store.bucketCount(), new SystemRecordGcAuthority(store));
+    store.requireGcFencing();
   }
 
   HBaseSystemRecordClosure(SystemRecordStore records, HBaseSystemRecordStore retirement,

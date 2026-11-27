@@ -70,12 +70,14 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
   private final boolean leaseExpiryCheckpointsSupported;
   private final boolean eventRevisionIndexSupported;
   private final boolean compactionSupported;
+  private final boolean gcFencingSupported;
 
   HBaseSystemRecordStore(AsyncConnection connection, SystemTableBinding binding,
       boolean resultsSupported, boolean auxiliarySupported, boolean leaseBindingsSupported,
       boolean leaseExpiryCheckpointsSupported, boolean eventRevisionIndexSupported,
-      boolean compactionSupported) {
+      boolean compactionSupported, boolean gcFencingSupported) {
     this.compactionSupported = compactionSupported;
+    this.gcFencingSupported = gcFencingSupported;
     this.connection = connection;
     this.binding = binding;
     this.resultsSupported = resultsSupported;
@@ -89,6 +91,13 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
   public boolean supportsLeaseBindings() { return leaseBindingsSupported; }
   public boolean supportsLeaseExpiryCheckpoints() { return leaseExpiryCheckpointsSupported; }
   public boolean supportsEventRevisionIndex() { return eventRevisionIndexSupported; }
+
+  public boolean supportsCompaction() { return compactionSupported; }
+
+  /** Rejects GC activation on an older table without modifying its descriptor or records. */
+  public void requireGcFencing() {
+    if (!gcFencingSupported) throw new IllegalStateException("system table requires isolated GC fence capability");
+  }
 
   @Override
   public int bucket(SystemRecordType type, ByteKey identity) {
@@ -113,7 +122,8 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
                   binding.supportsLeaseExpiryCheckpoints(descriptor);
               return new HBaseSystemRecordStore(connection, binding, supportsResults,
                   supportsAuxiliary, supportsLeaseBindings, supportsLeaseExpiryCheckpoints,
-                  binding.supportsEventRevisionIndex(descriptor), binding.supportsCompaction(descriptor));
+                  binding.supportsEventRevisionIndex(descriptor), binding.supportsCompaction(descriptor),
+                  binding.supportsGcFencing(descriptor));
             })).exceptionallyCompose(failure -> CompletableFuture.failedFuture(
                 HBaseFailures.classify(failure)));
   }
@@ -433,8 +443,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
       boolean retired = isRetired(result, binding.family());
       int valueLength = retired ? validatedTombstoneLength(result, decoded) : validatedValueLength(result, binding.family());
       long nextBytes = Math.addExact(encodedBytes,
-          Math.addExact(decoded.identity().length(), Math.addExact(valueLength,
-              SystemRecordGcFence.read(result, binding.family()).isPresent() ? SystemRecordGcFence.BYTES : 0)));
+          Math.addExact(decoded.identity().length(), valueLength));
       if (nextBytes > maximumBytes) {
         if (lastInspected.isEmpty()) {
           throw new CompletionException(new BackendFailure(BackendFailure.Category.RESOURCE_LIMIT));
@@ -527,7 +536,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     if (result.isEmpty()) return Optional.empty();
     Cell marker = retirementMarker(result, family);
     if (marker != null) {
-      decodeRetirementMarker(result, family, marker);
+      SystemRecordRetirementMessages.decode(CellUtil.cloneValue(marker));
       return Optional.empty();
     }
     int expectedLength = validatedValueLength(result, family);
@@ -550,18 +559,15 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     Cell[] cells = result.rawCells();
     Cell marker = null;
     Cell guard = null;
-    Cell fence = null;
     if (cells == null) return null;
     for (Cell cell : cells) {
       if (!CellUtil.matchingFamily(cell, family)) throw new IllegalArgumentException("foreign system-record family");
       if (CellUtil.matchingQualifier(cell, TOMBSTONE) && marker == null) marker = cell;
       else if (CellUtil.matchingQualifier(cell, VALUE) && guard == null) guard = cell;
-      else if (CellUtil.matchingQualifier(cell, SystemRecordGcFence.COLUMN) && fence == null) fence = cell;
       else throw new IllegalArgumentException("unexpected or duplicate system-record column");
     }
-    SystemRecordGcFence.read(result, family);
     if (marker == null) return null;
-    if (cells.length != (fence == null ? 2 : 3) || guard == null
+    if (cells.length != 2 || guard == null
         || !CellUtil.matchingValue(guard, RETIRED_VALUE_GUARD)
         || guard.getTimestamp() != RETIREMENT_TIMESTAMP || marker.getTimestamp() != RETIREMENT_TIMESTAMP
         || marker.getValueLength() < 1 || marker.getValueLength() > SystemRecordRetirementMessages.MAX_BYTES) {
@@ -570,19 +576,9 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
     return marker;
   }
 
-  private static RetirementTombstone decodeRetirementMarker(Result result, byte[] family, Cell marker) {
-    var tombstone = SystemRecordRetirementMessages.decode(CellUtil.cloneValue(marker));
-    SystemRecordGcFence.read(result, family).ifPresent(fence -> {
-      if (fence.compactGeneration() != tombstone.maintenanceGeneration()) {
-        throw new IllegalArgumentException("retirement marker differs from its row fence");
-      }
-    });
-    return tombstone;
-  }
-
   private int validatedTombstoneLength(Result result, SystemRecordKeyCodec.DecodedKey identity) {
     Cell cell = retirementMarker(result, binding.family());
-    var tombstone = decodeRetirementMarker(result, binding.family(), cell);
+    var tombstone = SystemRecordRetirementMessages.decode(CellUtil.cloneValue(cell));
     if (tombstone.type() != identity.type() || !tombstone.identity().equals(identity.identity())) {
       throw new IllegalArgumentException("retirement tombstone does not match its row");
     }
@@ -592,17 +588,14 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
   private static int validatedValueLength(Result result, byte[] family) {
     Cell[] cells = result.rawCells();
     Cell value = null;
-    Cell fence = null;
     if (cells != null) for (Cell cell : cells) {
       if (!CellUtil.matchingFamily(cell, family)) throw new IllegalArgumentException("foreign system-record family");
       if (CellUtil.matchingQualifier(cell, VALUE) && value == null) value = cell;
-      else if (CellUtil.matchingQualifier(cell, SystemRecordGcFence.COLUMN) && fence == null) fence = cell;
       else throw new IllegalArgumentException("unexpected or duplicate live system-record column");
     }
-    if (value == null || cells.length != (fence == null ? 1 : 2)) {
+    if (value == null || cells.length != 1) {
       throw new IllegalArgumentException("system record is missing its value");
     }
-    SystemRecordGcFence.read(result, family);
     int length = value.getValueLength();
     validateValueLength(length);
     return length;
@@ -633,7 +626,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
             validatedValueLength(result, binding.family());
             return Optional.<RetirementTombstone>empty();
           }
-          RetirementTombstone tombstone = decodeRetirementMarker(result, binding.family(), marker);
+          RetirementTombstone tombstone = SystemRecordRetirementMessages.decode(CellUtil.cloneValue(marker));
           if (tombstone.type() != type || !tombstone.identity().equals(identity)) {
             throw new IllegalArgumentException("retirement tombstone does not match its row");
           }
@@ -644,6 +637,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
   CompletableFuture<Outcome> retire(SystemRecordType type, ByteKey identity, ByteKey expected,
       Permit permit, Reason reason, RequestScope scope) {
     requireTypeSupported(type);
+    requireGcFencing();
     Objects.requireNonNull(identity, "identity");
     Objects.requireNonNull(expected, "expected");
     Objects.requireNonNull(permit, "permit");
@@ -654,6 +648,7 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
 
   CompletableFuture<Void> fenceForGc(SystemRecordType type, ByteKey identity, Permit permit, RequestScope scope) {
     requireTypeSupported(type);
+    requireGcFencing();
     return new HBaseSystemRecordGcMutations(this, binding).prepareFence(type, identity, permit, scope);
   }
 

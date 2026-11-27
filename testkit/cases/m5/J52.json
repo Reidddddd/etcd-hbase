@@ -199,13 +199,14 @@
       "kind": "surefire",
       "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordStoreScanTest",
       "methods": [
+        "rejectsGcActivationAndWritesBeforeUsingAnOlderTable",
         "cancelledScanRetainsPhysicalOwnershipUntilHBaseSignalsCompletion",
+        "validatesPhysicalRowOrderForLengthFramedIdentities",
+        "rejectsBackwardPhysicalRowsEvenWhenLogicalIdentitiesAreIncreasing",
         "rejectsCompactRecordsBeforeTouchingAnUndeclaredTable",
         "rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable",
         "rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent",
-        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent",
-        "validatesPhysicalRowOrderForLengthFramedIdentities",
-        "rejectsBackwardPhysicalRowsEvenWhenLogicalIdentitiesAreIncreasing"
+        "rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent"
       ]
     },
     {
@@ -228,6 +229,7 @@
         "acceptsTheExactDurableSingleVersionSystemTable",
         "resultCapabilityIsExplicitAndDoesNotChangeLegacyValidation",
         "compactRecordsRequireExplicitDescriptorCapability",
+        "gcFencingRequiresAnExplicitDurableIsolatedFamily",
         "rejectsTableFamilyProfileCategoryAndDurabilityMismatches",
         "rejectsExpiringOrMultiVersionFamilies",
         "rejectsDifferentRoutingParametersWithTheSameProfileId"
@@ -296,6 +298,8 @@
       "kind": "failsafe",
       "class": "io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT",
       "methods": [
+        "legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation",
+        "fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts",
         "lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard",
         "lateRetirementIsFencedBeforeSuccessorStartsCollection",
         "retirementReplacesTheValueAndBlocksEveryRecreationPath",
@@ -401,8 +405,8 @@
       "class": "io.etcdhbase.hbase.storage.SystemRecordGcFenceTest",
       "methods": [
         "newerOwnerDominatesEveryOlderCompactGeneration",
-        "livePayloadKeepsItsValueAndRejectsCorruptOrDuplicateFenceCells",
-        "retiredLayoutBindsTheFenceToTheRecordedCompactGeneration"
+        "rejectsCorruptDuplicateOrUnknownMaintenanceCells",
+        "payloadReaderKeepsTheBaseLayoutAndRejectsInlineFences"
       ]
     }
   ]

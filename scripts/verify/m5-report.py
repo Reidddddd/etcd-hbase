@@ -429,20 +429,22 @@ J52_REQUIRED_TESTS = {
     },
     ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.SystemTableBindingTest'): {
         'acceptsTheExactDurableSingleVersionSystemTable',
-        'compactRecordsRequireExplicitDescriptorCapability',
-        'rejectsDifferentRoutingParametersWithTheSameProfileId',
-        'rejectsExpiringOrMultiVersionFamilies',
-        'rejectsTableFamilyProfileCategoryAndDurabilityMismatches',
         'resultCapabilityIsExplicitAndDoesNotChangeLegacyValidation',
+        'compactRecordsRequireExplicitDescriptorCapability',
+        'gcFencingRequiresAnExplicitDurableIsolatedFamily',
+        'rejectsTableFamilyProfileCategoryAndDurabilityMismatches',
+        'rejectsExpiringOrMultiVersionFamilies',
+        'rejectsDifferentRoutingParametersWithTheSameProfileId',
     },
     ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.HBaseSystemRecordStoreScanTest'): {
+        'rejectsGcActivationAndWritesBeforeUsingAnOlderTable',
         'cancelledScanRetainsPhysicalOwnershipUntilHBaseSignalsCompletion',
-        'rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable',
-        'rejectsCompactRecordsBeforeTouchingAnUndeclaredTable',
-        'rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent',
-        'rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent',
         'validatesPhysicalRowOrderForLengthFramedIdentities',
         'rejectsBackwardPhysicalRowsEvenWhenLogicalIdentitiesAreIncreasing',
+        'rejectsCompactRecordsBeforeTouchingAnUndeclaredTable',
+        'rejectsAuxiliaryAccessBeforeTouchingAnOlderSystemTable',
+        'rejectsLeaseBindingsWhenOnlyJ40AuxiliaryCapabilityIsPresent',
+        'rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.J52HistoryCollectionIT'): {
         'cancellationRetainsPhysicalProducerUntilLateDeleteDrains',
@@ -485,6 +487,8 @@ J52_REQUIRED_TESTS = {
         'byteLimitedPageDoesNotEndCollectionBeforeTheContinuation',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
+        'legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation',
+        'fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts',
         'lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard',
         'lateRetirementIsFencedBeforeSuccessorStartsCollection',
         'retirementReplacesTheValueAndBlocksEveryRecreationPath',
@@ -546,8 +550,8 @@ J52_REQUIRED_TESTS = {
     },
     ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.SystemRecordGcFenceTest'): {
         'newerOwnerDominatesEveryOlderCompactGeneration',
-        'livePayloadKeepsItsValueAndRejectsCorruptOrDuplicateFenceCells',
-        'retiredLayoutBindsTheFenceToTheRecordedCompactGeneration',
+        'rejectsCorruptDuplicateOrUnknownMaintenanceCells',
+        'payloadReaderKeepsTheBaseLayoutAndRejectsInlineFences',
     },
 
 }

@@ -3,6 +3,7 @@ package io.etcdhbase.hbase.storage;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -60,6 +61,64 @@ class HBaseSystemRecordRetirementIT {
       "EXPIRY_CANDIDATE", "AUXILIARY", "LEASE_RESULT", "LEASE_BINDING",
       "LEASE_EXPIRY_CHECKPOINT");
   private static final ByteKey AUTHORIZATION_DIGEST = ByteKey.copyOf(new byte[32]);
+
+  @Test
+  void legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var table = createRetirementCapableSystemTable(environment, false);
+      var store = HBaseSystemRecordStore.open(environment.factory(), environment.identity(), table, scope).join();
+      assertTrue(store.supportsCompaction());
+      assertThrows(IllegalStateException.class, store::requireGcFencing);
+      assertThrows(IllegalStateException.class, () -> new HBaseSystemRecordClosure(store));
+      assertThrows(IllegalStateException.class, () -> store.fenceForGc(
+          SystemRecordType.WORKSET, ByteKey.copyOf(new byte[] {90}), null, scope));
+      var descriptor = environment.connection().getAdmin().getDescriptor(table.table()).join();
+      assertEquals(1, descriptor.getColumnFamilyCount());
+      assertNull(descriptor.getValue("etcdhbase.m5.gc-fence-format"));
+      var identity = ByteKey.copyOf(new byte[] {89});
+      var value = ByteKey.copyOf(new byte[] {88});
+      store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      assertEquals(Optional.of(value), store.read(SystemRecordType.WORKSET, identity, scope).join());
+    }
+  }
+
+  @Test
+  void fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var table = createRetirementCapableSystemTable(environment);
+      var store = HBaseSystemRecordStore.open(environment.factory(), environment.identity(), table, scope).join();
+      var identity = ByteKey.copyOf(new byte[] {91});
+      var value = ByteKey.copyOf(new byte[] {92});
+      var replacement = ByteKey.copyOf(new byte[] {93});
+      store.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      var permit = permit(store, scope);
+      store.fenceForGc(SystemRecordType.WORKSET, identity, permit, scope).join();
+      var backend = environment.connection().getTable(table.table());
+      byte[] row = table.row(SystemRecordType.WORKSET, identity);
+      var live = backend.get(new org.apache.hadoop.hbase.client.Get(row).addFamily(FAMILY)).join();
+      assertEquals(1, live.size(), "the base reader's family projection must still contain only r");
+      assertEquals(Optional.of(value), HBaseSystemRecordStore.decode(live, FAMILY));
+      var scan = backend.scanAll(new org.apache.hadoop.hbase.client.Scan().withStartRow(row, true)
+          .withStopRow(row, true).addFamily(FAMILY)).join();
+      assertEquals(1, scan.size());
+      assertEquals(1, scan.getFirst().size(), "legacy scan must not expose maintenance cells");
+      assertTrue(store.compareAndSet(SystemRecordType.WORKSET, identity, Optional.of(value), replacement, scope).join());
+      assertTrue(store.retire(SystemRecordType.WORKSET, identity, replacement, permit,
+          SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join().retiredNow());
+      var retired = backend.get(new org.apache.hadoop.hbase.client.Get(row).addFamily(FAMILY)).join();
+      assertEquals(2, retired.size(), "the base retired layout remains exactly r/t");
+      assertTrue(HBaseSystemRecordStore.decode(retired, FAMILY).isEmpty());
+      backend.put(new Put(row).setDurability(Durability.SYNC_WAL).addColumn(
+          SystemTableBinding.GC_FENCE_FAMILY, SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP,
+          new SystemRecordGcFence(permit.authority().owner().epoch(), permit.generation() + 1).encode())).join();
+      assertThrows(CompletionException.class, () -> store.fenceForGc(
+          SystemRecordType.WORKSET, identity, permit, scope).join(), "corrupt retired metadata cannot be confirmed");
+      assertTrue(store.read(SystemRecordType.WORKSET, identity, scope).join().isEmpty(),
+          "maintenance corruption cannot change the payload reader's retired result");
+    }
+  }
 
   @Test
   void lostFenceAcknowledgementAndPartialRestartNeverActivateAnIncompleteShard() throws Exception {
@@ -388,6 +447,11 @@ class HBaseSystemRecordRetirementIT {
 
   private static SystemTableBinding createRetirementCapableSystemTable(
       M1TestEnvironment environment) throws Exception {
+    return createRetirementCapableSystemTable(environment, true);
+  }
+
+  private static SystemTableBinding createRetirementCapableSystemTable(
+      M1TestEnvironment environment, boolean gcFencing) throws Exception {
     String suffix = java.util.UUID.randomUUID().toString().replace("-", "");
     String group = "j52-retire-" + suffix;
     String saltProfileId = "j52-salt-" + suffix;
@@ -408,7 +472,8 @@ class HBaseSystemRecordRetirementIT {
         .setValue("etcdhbase.m0.record-categories", RECORD_CATEGORIES)
         .setValue("etcdhbase.m4.auxiliary-format", "3")
         .build();
-    environment.create(table, SystemRecordGcTestFixture.descriptor(binding, descriptor), salt.splitKeys().toArray(byte[][]::new));
+    environment.create(table, gcFencing ? SystemRecordGcTestFixture.descriptor(binding, descriptor)
+        : binding.withCompactionCapability(binding.withEventRevisionIndexCapability(descriptor)), salt.splitKeys().toArray(byte[][]::new));
     return binding;
   }
   private static void rejectUnknownFenceAcknowledgement(SystemRecordGcTestFixture.Authority authority,

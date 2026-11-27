@@ -28,8 +28,10 @@ record SystemRecordGcFence(long ownerEpoch, long compactGeneration) implements C
     Cell cell = null;
     Cell[] cells = result.rawCells();
     if (cells != null) for (Cell candidate : cells) {
-      if (!org.apache.hadoop.hbase.CellUtil.matchingFamily(candidate, family)
-          || !org.apache.hadoop.hbase.CellUtil.matchingQualifier(candidate, COLUMN)) continue;
+      if (!org.apache.hadoop.hbase.CellUtil.matchingFamily(candidate, family)) continue;
+      if (!org.apache.hadoop.hbase.CellUtil.matchingQualifier(candidate, COLUMN)) {
+        throw new IllegalArgumentException("unexpected GC maintenance column");
+      }
       if (cell != null) throw new IllegalArgumentException("duplicate GC row-fence cell");
       cell = candidate;
     }

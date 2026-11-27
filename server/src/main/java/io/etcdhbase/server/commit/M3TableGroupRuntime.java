@@ -886,14 +886,17 @@ public final class M3TableGroupRuntime implements AutoCloseable {
       var eventRetention = new io.etcdhbase.core.commit.EventHistoryRetention(pending.eventPins,
           stores.views(),
           new io.etcdhbase.core.commit.EventIndexBackfillReader(stores.records(), stores.manifests()));
-      var compactions = new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(), Clock.systemUTC());
-      var gcCycle = new GcCheckpointCycle(plan.source().tableGroupId(), owner::currentToken, stores.control(),
-          new io.etcdhbase.core.commit.GcCoordinator(stores.control(), compactions, stores.pins(), Clock.systemUTC()),
-          eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records()),
-          new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), budgets, GcCheckpointCycle.MEMORY,
-          plan.system().saltProfile().bucketCount(), GC_PAGE_RECORDS, business.metrics());
-      pending.installGcWorker(new GcCheckpointWorker(pending.worker, pending.leaseTimers,
-          Duration.ofMillis(GC_TIMEOUT_MILLIS), gcCycle::run, business.metrics()));
+      if (stores.records().supportsCompaction()) {
+        stores.records().requireGcFencing();
+        var compactions = new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(), Clock.systemUTC());
+        var gcCycle = new GcCheckpointCycle(plan.source().tableGroupId(), owner::currentToken, stores.control(),
+            new io.etcdhbase.core.commit.GcCoordinator(stores.control(), compactions, stores.pins(), Clock.systemUTC()),
+            eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records()),
+            new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), budgets, GcCheckpointCycle.MEMORY,
+            plan.system().saltProfile().bucketCount(), GC_PAGE_RECORDS, business.metrics());
+        pending.installGcWorker(new GcCheckpointWorker(pending.worker, pending.leaseTimers,
+            Duration.ofMillis(GC_TIMEOUT_MILLIS), gcCycle::run, business.metrics()));
+      }
       pending.installEventHistoryWorker(new EventHistoryWorker(
           pending.leaseTimers, owner::currentToken, history::run, business.metrics()));
       var selectedEvents = new SelectedSequenceReader(pending.eventPins, stores.control(),

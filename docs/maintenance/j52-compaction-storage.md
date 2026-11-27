@@ -46,9 +46,13 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 首次领取、owner 接管或 Compact 操作切换先持久进入 `FENCING`，此时只持有元数据租约，不能开始退休。fence 游标与原扫描游标分别保存；同 owner 中断可继续 fence 游标，新 owner 必须重新覆盖整个目标分片。全部有界物理页确认并 CAS 转为 `SCANNING` 后，才激活新的回收者。
 
-每个 live 系统记录保留严格编码的 `g` Cell，内容是 owner epoch 和 Compact generation，使用保留 timestamp `Long.MAX_VALUE - 2`。安装只允许单调提升；退休在同一目标行的 `CheckAndMutate` 中同时比较完整旧值、墓碑缺失及确切 `g`，不能在失败后换上更高 fence 重发。接管前已校验的目标行必然已存在；永久 guard/墓碑保留物理行，使完整 fence 遍历能够覆盖这些迟到请求的目标。fencing 期间仍可能结束的旧请求，与新 holder 激活后被同行条件拒绝的旧请求分别验证。已退休行由永久 `r`/`t` guard 阻断旧写，不重复安装 `g`；新行在实际退休前也安装当前 fence。
+每个 live 系统记录在独立维护 family `gc` 中保留严格编码的 `g` Cell，内容是 owner epoch 和 Compact generation，使用保留 timestamp `Long.MAX_VALUE - 2`。安装只允许单调提升；退休在同一目标行的 `CheckAndMutate` 中同时比较完整旧值、墓碑缺失及确切 `g`，不能在失败后换上更高 fence 重发。接管前已校验的目标行必然已存在；永久 guard/墓碑保留物理行，使完整 fence 遍历能够覆盖这些迟到请求的目标。fencing 期间仍可能结束的旧请求，与新 holder 激活后被同行条件拒绝的旧请求分别验证。已退休行由永久 `r`/`t` guard 阻断旧写，不重复安装 `g`；新行在实际退休前也安装当前 fence。
 
-未知 fence ACK 不推进游标；重读确认同一 fence 后可有界重做。损坏、缺页、scope 关闭或较高 fence 均不能被解释为已完成。point/scan 同时严格校验 live 的 `r`/可选 `g`，以及 retired 的 `r`/`t`/可选 `g` 布局；已带 `g` 的墓碑还须匹配 Compact generation。新内部字段不是 KV revision，旧严格 reader 会拒绝该布局；启用前需停止旧 GC writer，不支持混跑不检查同行 fence 的旧维护实现，J55 的受控升级仍未交付。
+未知 fence ACK 不推进游标；重读确认同一 fence 后可有界重做。损坏、缺页、scope 关闭或较高 fence 均不能被解释为已完成。业务 point/scan 只请求原 payload family，live 仍是唯一 `r`，retired 仍是 `r`/`t`；业务条件写也不覆盖维护 family。GC 独立读取并严格校验 `gc:g`，退休请求读回已退休行时核对 Compact generation，两个 family 的退休条件仍在同一 HBase 行上原子执行。维护字段不进入旧 reader 的 Get/Scan 投影，也不是 KV revision。
+
+GC 要求持久 descriptor 声明 `etcdhbase.m5.gc-fence-format=1`，并存在非过期、单版本的 `gc` family。family 数量、名称、格式或保留策略不符会拒绝绑定；仅有原 Compact 能力时，普通记录仍可读取，但 GC closure、退休入口及配置了 Compact 的 M4 运行时拒绝激活 GC，不自动增加 family 或改写 descriptor。未声明 Compact 的 M4 表不启动这个 worker。
+
+该 descriptor 由独立的 provisioning helper 显式构造，本 PR 没有在线 schema 升级或回退命令。已启动旧 reader 继续使用原 family，真实基线 reader 的读取和扫描已单独验证；旧二进制的新启动会因 descriptor 不再是单 family 而拒绝绑定。不能靠删除 `gc` family、去掉 marker 或运行旧维护 writer 实现在线回退；启用及后续迁移须停止旧维护 writer，不支持混跑不检查同行 fence 的维护实现。J55 的受控迁移与真实目标环境的滚动升级/回退验收仍未交付。
 
 完整 sweep 结束，或真实许可的操作、代次变化后，持久增加 sweep 编号并重新检查该 bucket。同一 Compact 的安全边界扩大时，当前 sweep 保留原保守边界，从新取得的真实许可派生更窄许可继续分页；下一 sweep 再采用新边界，避免前台 sequence 增长反复重置游标。派生许可保留全部权威、根保护及 scope，拒绝放宽边界。这样，前一轮因 pin 或引用而保留的前缀不会永久跳过；`completedPages` 保持累计，避免重置游标造成检查点 ABA。记录退休仍由后端独立复核实际授权。
 
@@ -68,7 +72,7 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 GC 检查点值使用格式 2，分别编码 fence/扫描游标及明确的 phase；格式 1 会被严格拒绝，不自动回退或丢弃旧进度。新旧维护格式的受控升级仍待 J55。
 
-system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compaction-format=1`。没有该能力的 store 拒绝读写 Compact 记录或安装控制身份。已有控制格式增加 optional `compact_operation_id`；旧版严格解码器会拒绝该字段，不能把启用后的 writer 回退称为兼容。J55 仍需接入受控升级与启动能力校验。
+system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compaction-format=1`。没有该能力的 store 拒绝读写 Compact 记录或安装控制身份。系统记录 GC 还要求第 4 节的独立维护 family 和持久 fence 能力；不将原 Compact 标记解释为可直接写入新的维护布局。已有控制格式增加 optional `compact_operation_id`；旧版严格解码器会拒绝该字段，不能把启用后的 writer 回退称为兼容。J55 仍需接入受控升级与启动能力校验。
 
 公开存储门禁：
 

@@ -14,9 +14,12 @@ import io.etcdhbase.core.commit.SystemRecordType;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.hbase.codec.SystemRecordRetirementMessages;
+import java.util.ArrayList;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.client.CheckAndMutate;
 import org.apache.hadoop.hbase.client.Consistency;
@@ -24,6 +27,7 @@ import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.RowMutations;
 import org.apache.hadoop.hbase.filter.BinaryComparator;
 import org.apache.hadoop.hbase.filter.Filter;
@@ -61,17 +65,23 @@ final class HBaseSystemRecordGcMutations {
     if (attempt == MAX_FENCE_ATTEMPTS) return unavailable();
     byte[] row = binding.row(type, identity);
     return records.execute(scope, records.logicalReadPayloadBytes(row), table -> table.get(
-        new Get(row).setConsistency(Consistency.STRONG).addFamily(binding.family()))).thenCompose(found -> {
+        new Get(row).setConsistency(Consistency.STRONG).addFamily(binding.family())
+            .addFamily(SystemTableBinding.GC_FENCE_FAMILY))).thenCompose(found -> {
           if (found.isEmpty()) return unavailable();
-          if (HBaseSystemRecordStore.decode(found, binding.family()).isEmpty()) {
-            return records.readTombstone(type, identity, scope).thenAccept(marker -> marker.orElseThrow());
+          var current = SystemRecordGcFence.read(found, SystemTableBinding.GC_FENCE_FAMILY);
+          if (HBaseSystemRecordStore.decode(selectPayloadFamily(found), binding.family()).isEmpty()) {
+            return records.readTombstone(type, identity, scope).thenAccept(marker -> {
+              var tombstone = marker.orElseThrow();
+              if (current.filter(fence -> fence.compactGeneration() != tombstone.maintenanceGeneration()).isPresent()) {
+                throw new IllegalArgumentException("retirement marker differs from its row fence");
+              }
+            });
           }
-          var current = SystemRecordGcFence.read(found, binding.family());
           if (current.filter(fence -> fence.compareTo(desired) > 0).isPresent()) return unavailable();
           if (current.equals(Optional.of(desired))) return CompletableFuture.completedFuture(null);
           var mutation = CheckAndMutate.newBuilder(row).ifMatches(fenceInstallationCondition(current))
               .build(new Put(row).setDurability(Durability.SYNC_WAL)
-                  .addColumn(binding.family(), SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, desired.encode()));
+                  .addColumn(SystemTableBinding.GC_FENCE_FAMILY, SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, desired.encode()));
           return records.execute(scope, records.logicalMutationPayloadBytes(row, SystemRecordGcFence.BYTES),
               table -> table.checkAndMutate(mutation)).thenCompose(updated -> updated.isSuccess()
                   ? CompletableFuture.completedFuture(null)
@@ -79,8 +89,16 @@ final class HBaseSystemRecordGcMutations {
         });
   }
 
+  private Result selectPayloadFamily(Result result) {
+    var cells = new ArrayList<Cell>();
+    for (var cell : result.rawCells()) {
+      if (CellUtil.matchingFamily(cell, binding.family())) cells.add(cell);
+    }
+    return Result.create(cells);
+  }
+
   private Filter fenceInstallationCondition(Optional<SystemRecordGcFence> expected) {
-    var fence = new SingleColumnValueFilter(binding.family(), SystemRecordGcFence.COLUMN,
+    var fence = new SingleColumnValueFilter(SystemTableBinding.GC_FENCE_FAMILY, SystemRecordGcFence.COLUMN,
         CompareOperator.EQUAL, expected.<org.apache.hadoop.hbase.filter.ByteArrayComparable>map(
             value -> new BinaryComparator(value.encode())).orElseGet(NullComparator::new));
     fence.setFilterIfMissing(expected.isPresent());
@@ -99,7 +117,7 @@ final class HBaseSystemRecordGcMutations {
         permit.operationId(), reason, permit.safeRevision(), permit.safeSequence());
     byte[] encoded = SystemRecordRetirementMessages.encode(tombstone);
     var retirement = retirement(row, encoded);
-    var fence = new SingleColumnValueFilter(binding.family(), SystemRecordGcFence.COLUMN,
+    var fence = new SingleColumnValueFilter(SystemTableBinding.GC_FENCE_FAMILY, SystemRecordGcFence.COLUMN,
         CompareOperator.EQUAL, new BinaryComparator(SystemRecordGcFence.from(permit).encode()));
     fence.setFilterIfMissing(true);
     var condition = new FilterList(FilterList.Operator.MUST_PASS_ALL, records.liveValueCondition(observed), fence);

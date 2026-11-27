@@ -34,38 +34,37 @@ class SystemRecordGcFenceTest {
   }
 
   @Test
-  void livePayloadKeepsItsValueAndRejectsCorruptOrDuplicateFenceCells() {
-    var value = cell(new byte[] {'r'}, 10, new byte[] {7});
+  void rejectsCorruptDuplicateOrUnknownMaintenanceCells() {
     var fence = new SystemRecordGcFence(2, 3);
-    var valid = result(value, cell(SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, fence.encode()));
+    var valid = result(cell(SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, fence.encode()));
     assertEquals(fence, SystemRecordGcFence.read(valid, FAMILY).orElseThrow());
-    assertArrayEquals(new byte[] {7}, HBaseSystemRecordStore.decode(valid, FAMILY).orElseThrow().bytes());
     for (byte[] invalid : List.of(new byte[15], new byte[17], new byte[16],
         ByteBuffer.allocate(16).putLong(1).putLong(-1).array())) {
-      assertThrows(IllegalArgumentException.class, () -> HBaseSystemRecordStore.decode(result(value,
+      assertThrows(IllegalArgumentException.class, () -> SystemRecordGcFence.read(result(
           cell(SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, invalid)), FAMILY));
     }
-    assertThrows(IllegalArgumentException.class, () -> HBaseSystemRecordStore.decode(result(value,
+    assertThrows(IllegalArgumentException.class, () -> SystemRecordGcFence.read(result(
         cell(SystemRecordGcFence.COLUMN, 10, fence.encode())), FAMILY));
-    assertThrows(IllegalArgumentException.class, () -> HBaseSystemRecordStore.decode(result(value,
+    assertThrows(IllegalArgumentException.class, () -> SystemRecordGcFence.read(result(
         cell(SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, fence.encode()),
         cell(SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP - 1, fence.encode())), FAMILY));
+    assertThrows(IllegalArgumentException.class, () -> SystemRecordGcFence.read(result(
+        cell(new byte[] {'x'}, SystemRecordGcFence.TIMESTAMP, fence.encode())), FAMILY));
   }
 
   @Test
-  void retiredLayoutBindsTheFenceToTheRecordedCompactGeneration() {
+  void payloadReaderKeepsTheBaseLayoutAndRejectsInlineFences() {
+    var value = cell(new byte[] {'r'}, 10, new byte[] {7});
+    assertArrayEquals(new byte[] {7}, HBaseSystemRecordStore.decode(result(value), FAMILY).orElseThrow().bytes());
     var tombstone = new RetirementTombstone(SystemRecordType.MANIFEST, ByteKey.copyOf(ROW),
         ByteKey.copyOf(new byte[32]), 3, InvocationId.create(),
         SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, 8, 9);
     var guard = cell(new byte[] {'r'}, Long.MAX_VALUE - 1, new byte[] {0});
     var marker = cell(new byte[] {'t'}, Long.MAX_VALUE - 1, SystemRecordRetirementMessages.encode(tombstone));
-    var matching = cell(SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, new SystemRecordGcFence(2, 3).encode());
-    assertTrue(HBaseSystemRecordStore.decode(result(guard, marker, matching), FAMILY).isEmpty());
-    assertThrows(IllegalArgumentException.class, () -> HBaseSystemRecordStore.decode(result(guard, marker,
-        cell(SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, new SystemRecordGcFence(2, 4).encode())), FAMILY));
-    assertThrows(IllegalArgumentException.class, () -> HBaseSystemRecordStore.decode(result(matching), FAMILY));
-    assertThrows(IllegalArgumentException.class, () -> HBaseSystemRecordStore.decode(result(guard, marker, matching,
-        cell(new byte[] {'x'}, 1, new byte[] {0})), FAMILY));
+    assertTrue(HBaseSystemRecordStore.decode(result(guard, marker), FAMILY).isEmpty());
+    var inline = cell(SystemRecordGcFence.COLUMN, SystemRecordGcFence.TIMESTAMP, new SystemRecordGcFence(2, 3).encode());
+    assertThrows(IllegalArgumentException.class, () -> HBaseSystemRecordStore.decode(result(value, inline), FAMILY));
+    assertThrows(IllegalArgumentException.class, () -> HBaseSystemRecordStore.decode(result(guard, marker, inline), FAMILY));
   }
 
   private static KeyValue cell(byte[] qualifier, long timestamp, byte[] value) {
