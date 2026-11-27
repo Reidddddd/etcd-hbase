@@ -84,6 +84,6 @@ scripts/verify/m5.sh --scope public --task J52 --artifact-root .artifacts/m5/j52
 
 入口运行确定性逻辑/pin/许可及扫描单测、HISTORY/NATIVE MiniCluster、系统记录与结果窗口 MiniCluster，以及固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。门禁构建至 `server`，保留原有 HBase 集成套件，并增加 GC 生命周期、检查点及真实双 bucket 重启回收验证。它登记在 M5 CI 中，运行报告明确保留第 5 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
 
-网关的请求授权、真实 gRPC token 传递、CAS 前失效及取消排空回归属于 server 单测，由 J09 的完整构建执行；J52 另行在实际执行的 `server` reactor/profile 中登记 GC worker 套件。真实 Kerberos/HBase 的 `ADMIN` 授予与撤销反例属于 J04 的安全后端集成测试；替身网关测试和实际后端 ACL 测试各自保留验证范围。
+J52 专属门禁在实际执行的 `server` reactor 中登记 `CompactGatewayAuthorizationTest`，覆盖请求身份、每张目标表的 `ADMIN` 权限、真实 gRPC token 传递、CAS 前失效及取消排空；任一授权套件或关键方法缺失均不能通过报告校验。J09 仍执行完整 server 构建，J52 同时保留 GC worker 的真实执行套件。真实 Kerberos/HBase 的 `ADMIN` 授予与撤销反例属于 J04 的安全后端集成测试；替身网关测试和实际后端 ACL 测试各自保留验证范围。
 
 Watch 回放与后台容量的隔离由 server 的确定性回归覆盖：后台保留槽全部占用时仍可在普通预算内回放，在途回放也不抢占最后一个后台槽；普通预算耗尽时仍验证资源拒绝及实际容量诊断。真实双布局 Go 回放、fragment 和断流恢复由既有 J46/J47 门禁验证。

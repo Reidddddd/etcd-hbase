@@ -97,13 +97,17 @@ class CompactGatewayAuthorizationTest {
 
   @Test
   void ordinaryUserCannotCompactEvenWhenPhysicalCollectionIsUnavailable() {
+    var deniedPermissions = List.of(List.of(false, true, true),
+        List.of(true, false, true), List.of(true, true, false));
     for (boolean physical : List.of(false, true)) {
-      var fixture = new Fixture();
-      fixture.permissions = ignored -> CompletableFuture.completedFuture(List.of(true, false, true));
-      try (var scope = RequestScope.withoutDeadline()) {
-        fixture.call(Optional.of(TOKEN), physical, scope).requireFailure(Status.Code.PERMISSION_DENIED);
-        fixture.requireUnchanged();
-        verify(fixture.connections, never()).connectionFor(SERVICE);
+      for (var permissions : deniedPermissions) {
+        var fixture = new Fixture();
+        fixture.permissions = ignored -> CompletableFuture.completedFuture(permissions);
+        try (var scope = RequestScope.withoutDeadline()) {
+          fixture.call(Optional.of(TOKEN), physical, scope).requireFailure(Status.Code.PERMISSION_DENIED);
+          fixture.requireUnchanged();
+          verify(fixture.connections, never()).connectionFor(SERVICE);
+        }
       }
     }
   }

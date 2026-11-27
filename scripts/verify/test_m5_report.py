@@ -466,6 +466,27 @@ class M5J52ReportTest(unittest.TestCase):
         with self.assertRaises(m5_report.ReportError):
             m5_report._validate_task(task, path, repo)
 
+    def test_compact_authorization_suite_and_critical_boundaries_are_required(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        task = json.loads(json.dumps(original))
+        task["tests"] = [test for test in task["tests"]
+                         if not test["class"].endswith("CompactGatewayAuthorizationTest")]
+        with self.assertRaises(m5_report.ReportError):
+            m5_report._validate_task(task, path, repo)
+        for method in (
+                "missingAndInvalidTokensCannotCreateOperationsOrAdvanceControl",
+                "managementPermissionRevokedBeforeSelectionCannotAdvanceControl",
+                "cancellationRetainsUserBorrowUntilLatePermissionRpcDrains",
+                "rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity"):
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"]
+                         if test["class"].endswith("CompactGatewayAuthorizationTest"))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method), self.assertRaises(m5_report.ReportError):
+                m5_report._validate_task(task, path, repo)
+
     def test_runtime_profile_cannot_skip_or_omit_the_real_worker_integration_suite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

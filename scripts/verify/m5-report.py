@@ -554,6 +554,19 @@ J52_REQUIRED_TESTS = {
         'rejectsCorruptDuplicateOrUnknownMaintenanceCells',
         'payloadReaderKeepsTheBaseLayoutAndRejectsInlineFences',
     },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.CompactGatewayAuthorizationTest'): {
+        'missingAndInvalidTokensCannotCreateOperationsOrAdvanceControl',
+        'revokedSessionIsRejectedBeforeCreatingAnOperation',
+        'ordinaryUserCannotCompactEvenWhenPhysicalCollectionIsUnavailable',
+        'authenticationDisabledStillRequiresBackendAdminPermission',
+        'unavailableManagementPermissionCheckCannotPersistWork',
+        'authorizedManagerSelectsWithItsOwnIdentityAndChecksEveryTableTwice',
+        'managementPermissionRevokedBeforeSelectionCannotAdvanceControl',
+        'sessionRevokedBeforeSelectionCannotAdvanceControl',
+        'cancellationRetainsUserBorrowUntilLateConnectionDrains',
+        'cancellationRetainsUserBorrowUntilLatePermissionRpcDrains',
+        'rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity',
+    },
 
 }
 
