@@ -409,6 +409,24 @@
         "rejectsCorruptDuplicateOrUnknownMaintenanceCells",
         "payloadReaderKeepsTheBaseLayoutAndRejectsInlineFences"
       ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.CompactGatewayAuthorizationTest",
+      "methods": [
+        "missingAndInvalidTokensCannotCreateOperationsOrAdvanceControl",
+        "revokedSessionIsRejectedBeforeCreatingAnOperation",
+        "ordinaryUserCannotCompactEvenWhenPhysicalCollectionIsUnavailable",
+        "authenticationDisabledStillRequiresBackendAdminPermission",
+        "unavailableManagementPermissionCheckCannotPersistWork",
+        "authorizedManagerSelectsWithItsOwnIdentityAndChecksEveryTableTwice",
+        "managementPermissionRevokedBeforeSelectionCannotAdvanceControl",
+        "sessionRevokedBeforeSelectionCannotAdvanceControl",
+        "cancellationRetainsUserBorrowUntilLateConnectionDrains",
+        "cancellationRetainsUserBorrowUntilLatePermissionRpcDrains",
+        "rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity"
+      ]
     }
   ]
 }
