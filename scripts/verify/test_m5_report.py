@@ -566,6 +566,7 @@ class M5J52ReportTest(unittest.TestCase):
         m5_report._validate_task(original, path, repo)
         for class_name, method in (
                 ("HistoryGcCycleTest", "zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket"),
+                ("HistoryGcCycleTest", "ownerLossBeforeZeroRevisionClaimReturnsCannotPublishCompletion"),
                 ("J52PhysicalCompactIT", "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts")):
             task = json.loads(json.dumps(original))
             suite = next(test for test in task["tests"] if test["class"].endswith("." + class_name))
