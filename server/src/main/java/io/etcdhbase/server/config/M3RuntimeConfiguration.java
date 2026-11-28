@@ -42,7 +42,8 @@ public record M3RuntimeConfiguration(
     long leaseMaximumRevokeCostBytes,
     @JsonProperty(required = false) String ownerInstanceId,
     @JsonProperty(required = false) OwnerForwardingSettings ownerForwarding,
-    @JsonProperty(value = "activation_profile", required = false) ActivationProfile activationProfile) {
+    @JsonProperty(value = "activation_profile", required = false) ActivationProfile activationProfile,
+    @JsonProperty(value = "result_window_retention_ms", required = false) long resultWindowRetentionMs) {
   private static final long MIN_MEMORY = 256L << 20;
   private static final long MAX_MEMORY = 1L << 40;
 
@@ -107,7 +108,7 @@ public record M3RuntimeConfiguration(
         maxEtcdRequestBytes, pinShards, pinSlotsPerShard, pinLeaseMs, readCacheEnabled,
         m4LeaseApiEnabled, leaseMinTtlSeconds, leaseClockUncertaintyMs, leaseClockMaxDriftPpm,
         leaseMaximumBindings, leaseMaximumKeyBytes, leaseMaximumRevokeCostBytes, null, null,
-        ActivationProfile.PRODUCTION);
+        ActivationProfile.PRODUCTION, Duration.ofMinutes(30).toMillis());
   }
 
   /** Preserve the full constructor while keeping its activation profile fail-closed. */
@@ -122,7 +123,7 @@ public record M3RuntimeConfiguration(
         maxEtcdRequestBytes, pinShards, pinSlotsPerShard, pinLeaseMs, readCacheEnabled,
         m4LeaseApiEnabled, leaseMinTtlSeconds, leaseClockUncertaintyMs, leaseClockMaxDriftPpm,
         leaseMaximumBindings, leaseMaximumKeyBytes, leaseMaximumRevokeCostBytes, ownerInstanceId,
-        ownerForwarding, ActivationProfile.PRODUCTION);
+        ownerForwarding, ActivationProfile.PRODUCTION, Duration.ofMinutes(30).toMillis());
   }
 
   /** Existing callers retain the disabled-cache behavior. */
@@ -135,7 +136,7 @@ public record M3RuntimeConfiguration(
         LeaseCostAdmission.DEFAULT_LIMITS.maximumBindings(),
         LeaseCostAdmission.DEFAULT_LIMITS.maximumKeyBytes(),
         LeaseCostAdmission.DEFAULT_LIMITS.maximumRevokeCostBytes(), null, null,
-        ActivationProfile.PRODUCTION);
+        ActivationProfile.PRODUCTION, Duration.ofMinutes(30).toMillis());
   }
 
   /** Preserve callers that explicitly set the disabled-cache state. */
@@ -147,7 +148,7 @@ public record M3RuntimeConfiguration(
         false, 1, 1_000, 0, LeaseCostAdmission.DEFAULT_LIMITS.maximumBindings(),
         LeaseCostAdmission.DEFAULT_LIMITS.maximumKeyBytes(),
         LeaseCostAdmission.DEFAULT_LIMITS.maximumRevokeCostBytes(), null, null,
-        ActivationProfile.PRODUCTION);
+        ActivationProfile.PRODUCTION, Duration.ofMinutes(30).toMillis());
   }
 
   /** Preserve callers that predate the explicit J41 Lease revocation limits. */
@@ -161,10 +162,13 @@ public record M3RuntimeConfiguration(
         LeaseCostAdmission.DEFAULT_LIMITS.maximumBindings(),
         LeaseCostAdmission.DEFAULT_LIMITS.maximumKeyBytes(),
         LeaseCostAdmission.DEFAULT_LIMITS.maximumRevokeCostBytes(), null, null,
-        ActivationProfile.PRODUCTION);
+        ActivationProfile.PRODUCTION, Duration.ofMinutes(30).toMillis());
   }
 
   public M3RuntimeConfiguration {
+    if (resultWindowRetentionMs < 1 || resultWindowRetentionMs > Duration.ofDays(30).toMillis()) {
+      throw new IllegalArgumentException("invalid result window retention duration");
+    }
     if (readCacheEnabled) {
       throw new CacheActivationUnavailable();
     }

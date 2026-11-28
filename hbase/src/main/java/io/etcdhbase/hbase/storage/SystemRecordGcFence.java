@@ -29,6 +29,14 @@ record SystemRecordGcFence(long ownerEpoch, long compactGeneration) implements C
     Cell[] cells = result.rawCells();
     if (cells != null) for (Cell candidate : cells) {
       if (!org.apache.hadoop.hbase.CellUtil.matchingFamily(candidate, family)) continue;
+      if (org.apache.hadoop.hbase.CellUtil.matchingQualifier(candidate, InvocationWindowEvidence.COLUMN)) {
+        if (candidate.getTimestamp() != InvocationWindowEvidence.TIMESTAMP) {
+          throw new IllegalArgumentException("invalid invocation window evidence timestamp");
+        }
+        InvocationWindowEvidence.decode(io.etcdhbase.core.bytes.ByteKey.copyOf(
+            org.apache.hadoop.hbase.CellUtil.cloneValue(candidate)));
+        continue;
+      }
       if (!org.apache.hadoop.hbase.CellUtil.matchingQualifier(candidate, COLUMN)) {
         throw new IllegalArgumentException("unexpected GC maintenance column");
       }

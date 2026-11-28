@@ -33,7 +33,8 @@
     "bucket-checkpoint-restart-pin-retention-and-physical-drain",
     "durable-kv-bucket-version-progress-and-target-completion",
     "physical-rpc-old-pin-owner-lane-and-exact-delete",
-    "cancelled-rpc-owner-process-death-and-logical-only-resume"
+    "cancelled-rpc-owner-process-death-and-logical-only-resume",
+    "durable-system-domain-completion-and-drained-checkpoint"
   ],
   "tests": [
     {
@@ -298,7 +299,11 @@
         "closedInvocationDoesNotRetainItsTransactionForever",
         "unselectedInvocationDoesNotProtectAbandonedTransactionRecords",
         "lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative",
-        "byteLimitedPageDoesNotEndCollectionBeforeTheContinuation"
+        "byteLimitedPageDoesNotEndCollectionBeforeTheContinuation",
+        "newerManifestPagesUseRootOrPermanentInvocationBoundsWithoutBlockingOldCompletion",
+        "exactRootProtectionCountsAsPendingEvenAboveNumericFloors",
+        "changedRetirementOutcomeRemainsPending",
+        "terminalPreparedCountersRemainAtTheNonRetireableUpperBound"
       ]
     },
     {
@@ -319,7 +324,10 @@
         "bucketScanAdvancesAcrossTombstonesAndReturnsFollowingLiveRecord",
         "permitIsUnusableAfterItsScopeClosesAndForAnotherProfile",
         "staleOwnerCannotRetireOrCloseAnInvocationWindow",
-        "durableRegistryDamageRejectsAnAlreadyIssuedPermit"
+        "durableRegistryDamageRejectsAnAlreadyIssuedPermit",
+        "successorRowFenceRejectsAnAlreadyDispatchedWindowClose",
+        "lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding",
+        "retirementAcknowledgementRequiresStrongTombstoneReadbackBeforeSuccess"
       ]
     },
     {
@@ -339,7 +347,11 @@
       "methods": [
         "closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay",
         "anUnresolvedInvocationIsRetainedRatherThanClosed",
-        "closingAWindowRetainsAResultStillReferencedByAManifest"
+        "retainsResolvedWindowsAtTheTerminalCounters",
+        "closingAWindowRetainsAResultStillReferencedByAManifest",
+        "runtimeClosureWaitsForADurableResultQueryThenKeepsTheNonReplayBinding",
+        "closesAFinalizedSealedInvocationWithoutRequiringAClientReplay",
+        "floorAdvanceCannotCloseAnUndeclaredOrUnexpiredWindowAndUnhealthyClockRetainsIt"
       ]
     },
     {
@@ -354,7 +366,12 @@
         "rejectsTopologyChangesOnResumeAndTakeover",
         "sameEpochResumesAndTakeoverPreservesProgressWhileStaleCasLoses",
         "exhaustedSweepAndNewOperationRevisitPrefixesWhileWiderBoundsWait",
-        "rejectsRowValueShardMismatchInClaimAndRead"
+        "rejectsRowValueShardMismatchInClaimAndRead",
+        "pendingPrefixSurvivesTakeoverAndCleanEofDoesNotPublishCompletion",
+        "completionSurvivesRestartStrongerCompactAndOwnerTakeover",
+        "zeroBoundsNeedAPositiveCompletedGeneration",
+        "rejectsChangedRegistryBindingAndReusedGeneration",
+        "rejectsNegativePendingAndInvalidCompletionReceipts"
       ],
       "kind": "surefire"
     },
@@ -370,7 +387,10 @@
         "absentCompactWaitsWithoutCallingAuthorityOrCreatingCheckpoints",
         "regularAdmissionFailureYieldsAndRecordsGcBacklogWithoutUsingReserve",
         "authorizationFailureCannotCreateOrAdvanceACheckpoint",
-        "ownerLossAfterCollectionCannotAdvanceDurableProgressAndAdmissionWaitsForProducer"
+        "ownerLossAfterCollectionCannotAdvanceDurableProgressAndAdmissionWaitsForProducer",
+        "checkpointWaitsForPhysicalProducerAndCleanupBeforeMetadataCas",
+        "failedProducerOrCleanupCannotPublishCheckpointProgress",
+        "durableOwnerChangeDuringDrainCannotAdvanceEvenWithAnUnchangedLocalToken"
       ],
       "kind": "surefire"
     },
@@ -391,7 +411,8 @@
       "module": "server",
       "class": "io.etcdhbase.server.commit.GcCheckpointCycleIT",
       "methods": [
-        "realWorkerProtectsPinnedEventsThenRestartCollectsBothBucketsAndFencesOldCheckpoint"
+        "realWorkerProtectsPinnedEventsThenRestartCollectsBothBucketsAndFencesOldCheckpoint",
+        "durableCompletionNeedsAnotherSweepAfterTheReferenceChainDrains"
       ],
       "kind": "failsafe"
     },
@@ -533,6 +554,52 @@
         "rejectsSingleVersionForNativeLayout",
         "historyDescriptorDefaultsToOneVersionAndForeverTtl",
         "nativeDescriptorDefaultsTo64AndAccepts128Versions"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.InvocationResultResolverTest",
+      "methods": [
+        "resolvesLostTransitionAcknowledgementAndReplaysTheSamePersistedBytes",
+        "refusesMissingResultWrongAuthorizationAndClosedQueryWindow",
+        "replaysTheSameNoChangeResultWithoutReadingACommitDecision",
+        "resolvesEitherDurableInvocationOutcomeForProtocolProjection",
+        "noChangeReplayRejectsMissingPagesAndAWindowClosedDuringLoad",
+        "transactionResolutionDistinguishesNoChangeFromMetadataOnlyPublication",
+        "selectedAndNoChangeQueriesHoldDurableFloorsUntilMaterialization",
+        "gcWinningEitherRegistrationFloorPreventsAnyResultRead",
+        "resultQueryProtectionAcceptsTerminalRevisionAndSequence",
+        "expiredOrRevokedQueryCannotDeliverMaterializedBytes",
+        "cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops",
+        "failedProducerDrainKeepsThePinAndSurfacesCleanupFailure",
+        "closedWindowHasAnExplicitFailureForEveryResolutionEntryPoint",
+        "queryDeadlineMustFitInsideTheDurablePinLease"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.InvocationWindowEvidenceTest",
+      "methods": [
+        "roundTripsOnlyBoundedCompleteEvidenceAndRejectsMissingOrCorruptTime",
+        "absentTrustedClockIsFailClosedAndRetentionIsExplicitlyBounded"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.config.M3RuntimeConfigurationTest",
+      "methods": [
+        "resultWindowDefaultsToThirtyMinutesAndAcceptsOnlyBoundedExplicitDurations"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.InvocationResultErrorRpcTest",
+      "methods": [
+        "distinguishesClosedWindowsProtectionAdmissionAndCorruptionOverRpc"
       ]
     }
   ]
