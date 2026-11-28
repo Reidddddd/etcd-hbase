@@ -79,7 +79,7 @@ import java.util.function.LongFunction;
 /** Owns the local KV runtime for one validated table group; the caller owns its HBase factory. */
 public final class M3TableGroupRuntime implements AutoCloseable {
   /** One bounded GC page; the worker loops shards rather than enlarging a single page. */
-  private static final int GC_PAGE_RECORDS = 64;
+  private static final int SYSTEM_GC_PAGE_RECORDS = 64;
   private static final long GC_TIMEOUT_MILLIS = 30_000;
   private static final BudgetManager.Reservation REQUEST_MEMORY =
       M3MemoryReservations.REQUEST;
@@ -823,13 +823,25 @@ public final class M3TableGroupRuntime implements AutoCloseable {
               ? business.lease().orElseThrow().revocationProcessor().process(request, binding, verified, scope)
               : CompletableFuture.completedFuture(
                   new OwnerForwarding.Unknown(BackendFailure.Category.UNAVAILABLE));
-          case LEASE_EXPIRY_STEP -> CompletableFuture.completedFuture(
+          case LEASE_EXPIRY_STEP, COMPACT -> CompletableFuture.completedFuture(
               new OwnerForwarding.Unknown(BackendFailure.Category.PERMISSION));
         });
+    var compactAuthorization = compactAuthorization(plan, identity, authorization, authSessions, connections);
+    var compactions = new io.etcdhbase.core.commit.CompactionService(
+        stores.control(), stores.records(), Clock.systemUTC());
+    var compactLane = new CompactOwnerLane(plan.source().tableGroupId(), pending.queue, stores.control(),
+        owner::currentToken, compactions, authorizationResolver, compactAuthorization);
     var lane = new MutationOwnerLane(plan.source().tableGroupId(), pending.queue, receiver, business.metrics());
     MutationRelay relay;
     if (ownerForwarding != null) {
-      ownerForwarding.register(plan.source().tableGroupId(), lane);
+      ownerForwarding.register(plan.source().tableGroupId(), (peer, request, scope) -> {
+        try {
+          return MutationOperationEnvelope.kind(request.operationBytes()) == MutationOperationEnvelope.Kind.COMPACT
+              ? compactLane.receive(peer, request, scope) : lane.receive(peer, request, scope);
+        } catch (IllegalArgumentException malformed) {
+          return CompletableFuture.completedFuture(new OwnerForwarding.Unknown(BackendFailure.Category.PERMISSION));
+        }
+      });
       relay = new MutationRelay(stores.control(), ownerForwarding, ownerForwarding);
     } else {
       relay = localOwnerRelay(plan.source().tableGroupId(), stores.control(), owner, lane);
@@ -891,12 +903,13 @@ public final class M3TableGroupRuntime implements AutoCloseable {
           new io.etcdhbase.core.commit.EventIndexBackfillReader(stores.records(), stores.manifests()));
       if (stores.records().supportsCompaction()) {
         stores.records().requireGcFencing();
-        var compactions = new io.etcdhbase.core.commit.CompactionService(stores.control(), stores.records(), Clock.systemUTC());
         var gcCycle = new GcCheckpointCycle(plan.source().tableGroupId(), owner::currentToken, stores.control(),
             new io.etcdhbase.core.commit.GcCoordinator(stores.control(), compactions, stores.pins(), Clock.systemUTC()),
-            eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records()),
+            eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records(),
+                new io.etcdhbase.hbase.storage.ResultWindowRetention(
+                    Duration.ofMillis(activation.resultWindowRetentionMs()), lease.time())),
             new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), budgets, GcCheckpointCycle.MEMORY,
-            plan.system().saltProfile().bucketCount(), GC_PAGE_RECORDS, business.metrics());
+            plan.system().saltProfile().bucketCount(), SYSTEM_GC_PAGE_RECORDS, business.metrics());
         pending.installGcWorker(new GcCheckpointWorker(pending.worker, pending.timers(),
             Duration.ofMillis(GC_TIMEOUT_MILLIS), gcCycle::run, business.metrics()));
       }
@@ -922,8 +935,10 @@ public final class M3TableGroupRuntime implements AutoCloseable {
                       snapshot.state().publishedRevision(), 0);
                 })));
     return new ServiceComponents(new KvService(gateway, txnGateway, txnGateway::deleteRange,
-        txnGateway::range).withCompact(assembleCompactGateway(plan, activation, identity, authorization,
-            authSessions, connections, stores, pending, owner, physicalHistory)), leaseService, watchService, authService);
+        txnGateway::range).withCompact(assembleCompactGateway(activation, stores, pending, owner,
+            compactAuthorization, compactions, physicalHistory, ownerForwarding == null ? Optional.empty()
+                : Optional.of(new CompactForwarder(plan.source().tableGroupId(), plan.system().profileFingerprint(),
+                    compactAuthorization, stores.control(), relay, budgets)))), leaseService, watchService, authService);
   }
 
   private static Optional<CompactGateway.PhysicalCompletion> assembleHistoryGc(M3TableGroupPlan plan,
@@ -947,25 +962,43 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         new BudgetManager.Reservation(64L << 10, collector.maximumPageReadBytes(), 1L << 20, 0, 0), metrics, buckets);
     var completion = new PhysicalCompactionWaiter(plan.source().tableGroupId(), budgets,
         pending.timers(), pending.worker, Duration.ofMillis(limits.requestDeadlineMs()),
-        () -> new HistoryGcCompletionScan(checkpoints, buckets)::readNext);
+        () -> physicalCompletionScan(plan, checkpoints, stores, pending.eventPins));
     pending.installHistoryMaintenance(new GcCheckpointWorker(pending.worker, pending.timers(),
         Duration.ofMillis(GC_TIMEOUT_MILLIS), cycle::run, metrics), completion);
     return Optional.of(completion);
   }
 
-  private static CompactGateway assembleCompactGateway(M3TableGroupPlan plan,
-      M3RuntimeConfiguration activation, AuthorizedBackendIdentity identity, ByteKey authorization,
-      AuthSessionService authSessions, HBaseConnectionFactory connections, TableGroupStores stores,
-      Pending pending, M3OwnerLease owner,
-      java.util.Optional<CompactGateway.PhysicalCompletion> physicalHistory) {
-    var compactTables = new java.util.ArrayList<org.apache.hadoop.hbase.TableName>();
-    compactTables.add(plan.system().table());
-    compactTables.add(plan.primary().table());
-    plan.current().ifPresent(current -> compactTables.add(current.table()));
-    var compactAuthorization = new CompactRequestAuthorization(plan.source().tableGroupId(), identity,
-        authorization, authSessions, connections, compactTables);
-    var compactions = new io.etcdhbase.core.commit.CompactionService(
-        stores.control(), stores.records(), Clock.systemUTC());
+  private static java.util.function.BiFunction<io.etcdhbase.core.commit.CompactionOperation,
+      RequestScope, CompletableFuture<PhysicalCompactionWaiter.Progress>> physicalCompletionScan(
+      M3TableGroupPlan plan, io.etcdhbase.core.commit.HistoryGcCheckpointStore history,
+      TableGroupStores stores, EventHistoryPinManager events) {
+    if (events == null) {
+      return (target, scope) -> CompletableFuture.failedFuture(
+          new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+    }
+    var registries = new io.etcdhbase.core.commit.GcCheckpoint.RegistryBinding(
+        plan.system().profileFingerprint(), stores.pins().registryIdentity(),
+        events.registryIdentity(), events.namespace().orElseThrow());
+    return new PhysicalGcCompletionScan(plan.source().tableGroupId(), history,
+        new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), registries,
+        plan.system().saltProfile().bucketCount())::readNext;
+  }
+
+  private static CompactRequestAuthorization compactAuthorization(M3TableGroupPlan plan,
+      AuthorizedBackendIdentity identity, ByteKey authorization, AuthSessionService sessions,
+      HBaseConnectionFactory connections) {
+    var tables = new java.util.ArrayList<org.apache.hadoop.hbase.TableName>();
+    tables.add(plan.system().table());
+    tables.add(plan.primary().table());
+    plan.current().ifPresent(current -> tables.add(current.table()));
+    return new CompactRequestAuthorization(plan.source().tableGroupId(), identity,
+        authorization, sessions, connections, tables);
+  }
+
+  private static CompactGateway assembleCompactGateway(M3RuntimeConfiguration activation,
+      TableGroupStores stores, Pending pending, M3OwnerLease owner,
+      CompactRequestAuthorization compactAuthorization, io.etcdhbase.core.commit.CompactionService compactions,
+      java.util.Optional<CompactGateway.PhysicalCompletion> physicalHistory, Optional<CompactForwarder> forwarding) {
     return new CompactGateway(compactAuthorization,
         stores.clusterId(), activation.memberIdBits(),
         compactions,
@@ -974,7 +1007,7 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         requestScope -> stores.control().read(requestScope).thenApply(found ->
             found.orElseThrow(() -> new java.util.concurrent.CompletionException(
                 new BackendFailure(BackendFailure.Category.UNAVAILABLE))).state()),
-        physicalHistory);
+        physicalHistory, forwarding);
   }
 
   static MutationRelay localOwnerRelay(String tableGroupId, CommitControlStore control,

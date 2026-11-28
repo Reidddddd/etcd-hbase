@@ -11,6 +11,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.when;
 
 import etcdserverpb.Rpc;
@@ -47,6 +49,29 @@ class CompactGatewayTest {
   private static final ByteKey AUTHORIZATION = ByteKey.copyOf(new byte[32]);
   private static final CommitOwnerService.OwnerToken OWNER =
       new CommitOwnerService.OwnerToken("owner-instance", 4);
+
+  @Test
+  void nonOwnerForwardsOutsideTheLocalLaneAndWaitsForItsOwnReceipts() throws Exception {
+    var fixture = new Fixture(CompactionOperation.Stage.LOGICAL, 12);
+    fixture.ownerPresent = false;
+    var forwarder = mock(CompactForwarder.class);
+    fixture.forwarding = java.util.Optional.of(forwarder);
+    fixture.lane = (bytes, scope, work) -> { throw new AssertionError("ingress must not enter its owner lane"); };
+    var completion = new CompletableFuture<Void>();
+    fixture.completion = (target, scope) -> completion;
+    when(forwarder.forward(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(fixture.operation));
+    var observer = new RecordingObserver();
+    try (var scope = fixture.scope()) {
+      fixture.gateway().accept(compact(5, true), java.util.Optional.empty(), scope, observer);
+      assertFalse(observer.terminal.isDone());
+      verifyNoInteractions(fixture.compactions);
+      completion.complete(null);
+      observer.terminal.get(5, TimeUnit.SECONDS);
+      assertEquals(MEMBER, observer.last.get().getHeader().getMemberId());
+      assertEquals(1, observer.responses.get());
+      verify(forwarder).forward(any(), any(), same(scope));
+    }
+  }
 
   @Test
   void emptyEncodedZeroRequestCanEnterTheRealOwnerLane() throws Exception {
@@ -353,6 +378,7 @@ class CompactGatewayTest {
     };
     private volatile boolean collectorWired = true;
     private volatile boolean ownerPresent = true;
+    private java.util.Optional<CompactForwarder> forwarding = java.util.Optional.empty();
     private CompactGateway.LaneSubmitter lane = (bytes, scope, work) -> work.apply(scope);
 
     private Fixture(CompactionOperation.Stage stage, long responseRevision) {
@@ -383,7 +409,7 @@ class CompactGatewayTest {
                   4, Long.MAX_VALUE, 2, 2, 12, 2, 12, java.util.Optional.empty(), 0)),
           collectorWired
               ? java.util.Optional.of((target, scope) -> completion.awaitCompletion(target, scope))
-              : java.util.Optional.empty());
+              : java.util.Optional.empty(), forwarding);
     }
   }
 

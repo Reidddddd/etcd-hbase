@@ -64,6 +64,9 @@ public final class MutationOwnerLane {
     catch (IllegalArgumentException malformed) {
       return CompletableFuture.completedFuture(new OwnerForwarding.Unknown(BackendFailure.Category.UNKNOWN));
     }
+    if (operationKind == MutationOperationEnvelope.Kind.COMPACT) {
+      return CompletableFuture.completedFuture(new OwnerForwarding.Unknown(BackendFailure.Category.PERMISSION));
+    }
     long entered = nanoTime.getAsLong();
     long bytes = ENVELOPE_ALLOWANCE + 8L * request.operationBytes().length()
         + 2L * request.authorizationContextReference().length() + 2L * tableGroup.length();

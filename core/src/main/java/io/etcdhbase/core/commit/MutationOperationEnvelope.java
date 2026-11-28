@@ -15,9 +15,11 @@ public final class MutationOperationEnvelope {
   private static final byte[] LEASE_REVOKE_V1 = {0, 'L', 'R', 1};
   private static final byte[] LEASE_EXPIRY_STEP_V1 = {0, 'L', 'X', 1};
 
+  private static final byte[] COMPACT_V1 = {0, 'C', 'P', 1};
+
   public enum Kind {
     PUT, TRANSACTION, DELETE_RANGE, LEASE_GRANT, LEASE_KEEP_ALIVE,
-    LEASE_REVOKE, LEASE_EXPIRY_STEP
+    LEASE_REVOKE, LEASE_EXPIRY_STEP, COMPACT
   }
 
   private MutationOperationEnvelope() {}
@@ -45,6 +47,23 @@ public final class MutationOperationEnvelope {
   /** Internal bounded command carrying an expected checkpoint and one scan result. */
   public static ByteKey leaseExpiryStep(byte[] payload) {
     return tagged(LEASE_EXPIRY_STEP_V1, payload);
+  }
+
+  /** A fixed revision/physical command; Compact has its own durable operation record. */
+  public static ByteKey compact(byte[] payload) {
+    requireCompactPayload(payload);
+    return tagged(COMPACT_V1, payload);
+  }
+
+  private static void requireCompactPayload(byte[] payload) {
+    if (payload.length != Long.BYTES + 1 || payload[Long.BYTES] < 0 || payload[Long.BYTES] > 1) {
+      throw new IllegalArgumentException("invalid bounded Compact command");
+    }
+  }
+
+  public static byte[] compactBytes(ByteKey operation) {
+    if (kind(operation) != Kind.COMPACT) throw new IllegalArgumentException("operation is not Compact");
+    return payload(operation, COMPACT_V1);
   }
 
   private static ByteKey tagged(byte[] prefix, byte[] payload) {
@@ -75,6 +94,10 @@ public final class MutationOperationEnvelope {
     if (Arrays.equals(LEASE_GRANT_V1, prefix)) return Kind.LEASE_GRANT;
     if (Arrays.equals(LEASE_KEEP_ALIVE_V1, prefix)) return Kind.LEASE_KEEP_ALIVE;
     if (Arrays.equals(LEASE_REVOKE_V1, prefix)) return Kind.LEASE_REVOKE;
+    if (Arrays.equals(COMPACT_V1, prefix)) {
+      requireCompactPayload(Arrays.copyOfRange(bytes, COMPACT_V1.length, bytes.length));
+      return Kind.COMPACT;
+    }
     if (Arrays.equals(LEASE_EXPIRY_STEP_V1, prefix)) {
       if (bytes.length <= LEASE_EXPIRY_STEP_V1.length) {
         throw new IllegalArgumentException("empty Lease expiry step envelope");

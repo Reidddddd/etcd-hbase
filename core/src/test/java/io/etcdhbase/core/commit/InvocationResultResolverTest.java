@@ -3,13 +3,19 @@ package io.etcdhbase.core.commit;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.error.BackendFailure;
 import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,6 +58,25 @@ class InvocationResultResolverTest {
       assertEquals(InvocationBinding.State.WINDOW_CLOSED, fixture.invocations.binding.state());
       assertEquals(0, fixture.budgets.snapshot().allocatedBytes());
       assertThrows(CompletionException.class, fixture::resolve);
+    }
+  }
+
+  @Test
+  void closedWindowHasAnExplicitFailureForEveryResolutionEntryPoint() throws Exception {
+    try (var fixture = new Fixture()) {
+      fixture.completeWithoutChanges();
+      fixture.invocations.binding = fixture.invocations.binding.closeQueryWindow();
+      List<Runnable> queries = List.of(
+          () -> fixture.resolve(), () -> fixture.resolveNoChanges(),
+          () -> fixture.resolver.resolveInvocation(fixture.id, fixture.digest, fixture.digest,
+              fixture.scope, fixture.account).join(),
+          () -> fixture.resolver.resolveTransaction(fixture.id, fixture.digest, fixture.digest,
+              fixture.scope, fixture.account).join());
+      for (Runnable query : queries) {
+        var failure = assertThrows(CompletionException.class, query::run);
+        assertInstanceOf(ResultQueryUnavailable.class, failure.getCause());
+      }
+      assertEquals(0, fixture.controlReads);
     }
   }
 
@@ -124,6 +149,124 @@ class InvocationResultResolverTest {
     }
   }
 
+  @Test
+  void selectedAndNoChangeQueriesHoldDurableFloorsUntilMaterialization() throws Exception {
+    for (boolean noChanges : new boolean[] {false, true}) {
+      try (var fixture = new Fixture()) {
+        if (noChanges) fixture.completeWithoutChanges();
+        fixture.results.afterRead = () -> {
+          var boundary = fixture.pins.advanceRegistrationFloors(9, 8, fixture.scope).join();
+          assertEquals(2, boundary.safeRevision());
+          assertEquals(1, boundary.safeSequence());
+          var reopened = SnapshotPinManager.open(fixture.pinRecords, fixture.pinConfiguration,
+              fixture.clock, fixture.scope).join();
+          assertEquals(boundary, reopened.readBoundary(fixture.scope).join());
+        };
+        try (var result = fixture.resolver.resolveInvocation(fixture.id, fixture.digest,
+            fixture.digest, fixture.scope, fixture.account).join()) {
+          assertArrayEquals(new byte[] {1, 2, 3}, bytes(result.payload()));
+          var boundary = fixture.pins.readBoundary(fixture.scope).join();
+          assertEquals(9, boundary.safeRevision());
+          assertEquals(8, boundary.safeSequence());
+          assertTrue(boundary.protections().isEmpty());
+        }
+      }
+    }
+  }
+
+  @Test
+  void queryDeadlineMustFitInsideTheDurablePinLease() throws Exception {
+    try (var fixture = new Fixture()) {
+      for (var queryScope : List.of(RequestScope.withTimeout(Duration.ofMinutes(2)),
+          RequestScope.withoutDeadline())) {
+        try (queryScope) {
+          var failure = assertThrows(CompletionException.class, () -> fixture.pins
+              .registerResultQuery(fixture.invocations.binding, queryScope).join());
+          var unavailable = assertInstanceOf(ResultQueryUnavailable.class, failure.getCause());
+          assertEquals(ResultQueryUnavailable.Reason.PROTECTION_UNAVAILABLE, unavailable.reason());
+        }
+      }
+      assertTrue(fixture.pins.readBoundary(fixture.scope).join().protections().isEmpty());
+      assertEquals(0, fixture.controlReads);
+    }
+  }
+
+  @Test
+  void resultQueryProtectionAcceptsTerminalRevisionAndSequence() throws Exception {
+    try (var fixture = new Fixture()) {
+      var binding = InvocationBinding.begin(fixture.id, fixture.digest, fixture.digest,
+          TransactionId.create(), 1, Long.MAX_VALUE, Long.MAX_VALUE)
+          .completeWithoutChanges(fixture.reference.token());
+      var pin = fixture.pins.registerResultQuery(binding, fixture.scope).join();
+      var boundary = fixture.pins.advanceRegistrationFloors(Long.MAX_VALUE, Long.MAX_VALUE, fixture.scope).join();
+      assertEquals(Long.MAX_VALUE, boundary.safeRevision());
+      assertEquals(Long.MAX_VALUE, boundary.safeSequence());
+      assertEquals(1, boundary.protections().size());
+      pin.complete(fixture.scope).join();
+      assertTrue(fixture.pins.readBoundary(fixture.scope).join().protections().isEmpty());
+    }
+  }
+
+  @Test
+  void gcWinningEitherRegistrationFloorPreventsAnyResultRead() throws Exception {
+    for (boolean revision : new boolean[] {false, true}) {
+      try (var fixture = new Fixture()) {
+        fixture.pins.advanceRegistrationFloors(revision ? 3 : 0, revision ? 0 : 2, fixture.scope).join();
+        fixture.results.afterRead = () -> { throw new AssertionError("unprotected result read"); };
+        var failure = assertThrows(CompletionException.class, fixture::resolve);
+        assertInstanceOf(ResultQueryUnavailable.class, failure.getCause());
+        assertEquals(0, fixture.controlReads, "rejection precedes collectable decision and manifest reads");
+        assertTrue(fixture.pins.readBoundary(fixture.scope).join().protections().isEmpty());
+      }
+    }
+  }
+
+  @Test
+  void expiredOrRevokedQueryCannotDeliverMaterializedBytes() throws Exception {
+    for (boolean revoke : new boolean[] {false, true}) {
+      try (var fixture = new Fixture()) {
+        fixture.completeWithoutChanges();
+        fixture.results.afterRead = () -> {
+          fixture.now.addAndGet(61_000);
+          if (revoke) fixture.pins.revokeExpiredPins(fixture.scope).join();
+        };
+        assertThrows(CompletionException.class, fixture::resolveNoChanges);
+        assertEquals(0, fixture.budgets.snapshot().allocatedBytes());
+      }
+    }
+  }
+
+  @Test
+  void cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops() throws Exception {
+    try (var fixture = new Fixture(); var inspection = RequestScope.withTimeout(Duration.ofSeconds(5))) {
+      fixture.completeWithoutChanges();
+      var producer = new CompletableFuture<Void>();
+      fixture.scope.trackPhysicalProducer(producer);
+      fixture.results.afterRead = () -> fixture.scope.cancel();
+      assertThrows(CompletionException.class, fixture::resolveNoChanges);
+      assertEquals(1, fixture.pins.readBoundary(inspection).join().protections().size());
+      assertFalse(fixture.scope.cleanupCompletion().toCompletableFuture().isDone());
+      producer.complete(null);
+      fixture.scope.cleanupOutcomeCompletion().toCompletableFuture().join();
+      assertTrue(fixture.pins.readBoundary(inspection).join().protections().isEmpty());
+      assertEquals(0, fixture.budgets.snapshot().allocatedBytes());
+    }
+  }
+
+  @Test
+  void failedProducerDrainKeepsThePinAndSurfacesCleanupFailure() throws Exception {
+    try (var fixture = new Fixture(); var inspection = RequestScope.withTimeout(Duration.ofSeconds(5))) {
+      fixture.completeWithoutChanges();
+      var producer = new CompletableFuture<Void>();
+      fixture.scope.trackPhysicalProducer(producer);
+      fixture.results.afterRead = () -> fixture.scope.cancel();
+      assertThrows(CompletionException.class, fixture::resolveNoChanges);
+      producer.completeExceptionally(new IllegalStateException("producer drain not confirmed"));
+      assertThrows(CompletionException.class, () -> fixture.scope.cleanupOutcomeCompletion().toCompletableFuture().join());
+      assertEquals(1, fixture.pins.readBoundary(inspection).join().protections().size());
+    }
+  }
+
   private static byte[] bytes(InvocationResultResolver.ResolvedResult value) {
     return bytes(value.payload());
   }
@@ -145,6 +288,16 @@ class InvocationResultResolverTest {
     private final ResultMemory results;
     private final ResultReference reference;
     private final InvocationResultResolver resolver;
+    private final PinRecords pinRecords = new PinRecords();
+    private final SnapshotPinConfiguration pinConfiguration =
+        new SnapshotPinConfiguration(1, 16, Duration.ofMinutes(1));
+    private final java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong(1000);
+    private final Clock clock = new Clock() {
+      @Override public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
+      @Override public Clock withZone(java.time.ZoneId zone) { return this; }
+      @Override public Instant instant() { return Instant.ofEpochMilli(now.get()); }
+    };
+    private final SnapshotPinManager pins;
     private int controlReads;
 
     private Fixture() throws Exception {
@@ -183,8 +336,9 @@ class InvocationResultResolverTest {
         @Override public CompletableFuture<SystemRecordStore.CreateResult> createIfAbsent(
             CommitDecision value, RequestScope ignored) { throw new UnsupportedOperationException(); }
       };
+      pins = SnapshotPinManager.initializeFresh(pinRecords, pinConfiguration, clock, scope).join();
       resolver = new InvocationResultResolver(invocations, new CommitOutcomeResolver(control, decisions),
-          new ManifestCatalog(new RootMemory(root)), new ResultCatalog(results));
+          new ManifestCatalog(new RootMemory(root)), new ResultCatalog(results), pins);
     }
 
     private InvocationResultResolver.ResolvedResult resolve() {
@@ -204,6 +358,29 @@ class InvocationResultResolverTest {
     }
 
     @Override public void close() { scope.close(); }
+  }
+
+  private static final class PinRecords implements SystemRecordStore {
+    private record Key(SystemRecordType type, ByteKey identity) {}
+    private final Map<Key, ByteKey> values = new HashMap<>();
+    @Override public int bucket(SystemRecordType type, ByteKey identity) { return 0; }
+    @Override public CompletableFuture<Optional<ByteKey>> read(
+        SystemRecordType type, ByteKey identity, RequestScope scope) {
+      return CompletableFuture.completedFuture(Optional.ofNullable(values.get(new Key(type, identity))));
+    }
+    @Override public CompletableFuture<CreateResult> createIfAbsent(
+        SystemRecordType type, ByteKey identity, ByteKey value, RequestScope scope) {
+      var previous = values.putIfAbsent(new Key(type, identity), value);
+      return CompletableFuture.completedFuture(previous == null ? CreateResult.CREATED
+          : previous.equals(value) ? CreateResult.ALREADY_PRESENT : CreateResult.CONFLICT);
+    }
+    @Override public CompletableFuture<Boolean> compareAndSet(SystemRecordType type, ByteKey identity,
+        Optional<ByteKey> expected, ByteKey replacement, RequestScope scope) {
+      var key = new Key(type, identity);
+      if (!Optional.ofNullable(values.get(key)).equals(expected)) return CompletableFuture.completedFuture(false);
+      values.put(key, replacement);
+      return CompletableFuture.completedFuture(true);
+    }
   }
 
   private static final class InvocationMemory implements InvocationRepository {

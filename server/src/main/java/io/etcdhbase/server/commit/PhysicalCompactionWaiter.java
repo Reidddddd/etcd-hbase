@@ -98,7 +98,7 @@ final class PhysicalCompactionWaiter implements CompactGateway.PhysicalCompletio
     private void start(RequestScope request) {
       try {
         GcPageAdmission.admit(budgets, group, scope, MEMORY,
-            new BudgetManager.ReadLimits(65_536, 512L << 20, 65_536, 1, 65_536),
+            new BudgetManager.ReadLimits(1_048_576, 512L << 20, 1_048_576, 1, 1_048_576),
             new BudgetManager.Work(0, 1, 0, 1, 0));
         registration = request.registerScopedCleanup(() -> finish(new BackendFailure(
             request.isDeadlineExceeded() ? BackendFailure.Category.TIMEOUT : BackendFailure.Category.CANCELLED)), released);

@@ -3,6 +3,7 @@ package io.etcdhbase.hbase.storage;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -61,6 +62,32 @@ class HBaseSystemRecordRetirementIT {
       "EXPIRY_CANDIDATE", "AUXILIARY", "LEASE_RESULT", "LEASE_BINDING",
       "LEASE_EXPIRY_CHECKPOINT");
   private static final ByteKey AUTHORIZATION_DIGEST = ByteKey.copyOf(new byte[32]);
+
+  @Test
+  void retirementAcknowledgementRequiresStrongTombstoneReadbackBeforeSuccess() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var actual = open(environment, scope);
+      var store = org.mockito.Mockito.spy(actual);
+      var identity = ByteKey.copyOf(new byte[] {97});
+      var value = ByteKey.copyOf(new byte[] {98});
+      actual.createIfAbsent(SystemRecordType.WORKSET, identity, value, scope).join();
+      var permit = permit(actual, scope);
+      var failure = new BackendFailure(BackendFailure.Category.UNAVAILABLE);
+      org.mockito.Mockito.doReturn(CompletableFuture.failedFuture(failure)).when(store)
+          .readTombstone(SystemRecordType.WORKSET, identity, scope);
+      var observed = assertThrows(CompletionException.class, () -> store.retire(SystemRecordType.WORKSET,
+          identity, value, permit, SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join());
+      assertEquals(BackendFailure.Category.UNAVAILABLE,
+          assertInstanceOf(BackendFailure.class, CompletionFailures.unwrapCompletion(observed)).category());
+      assertTrue(actual.read(SystemRecordType.WORKSET, identity, scope).join().isEmpty(),
+          "the actual retirement committed before the failed proof read");
+      assertTrue(actual.readTombstone(SystemRecordType.WORKSET, identity, scope).join().isPresent());
+      org.mockito.Mockito.doCallRealMethod().when(store).readTombstone(SystemRecordType.WORKSET, identity, scope);
+      assertTrue(store.retire(SystemRecordType.WORKSET, identity, value, permit,
+          SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join().alreadyRetired());
+    }
+  }
 
   @Test
   void descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations() throws Exception {
@@ -447,11 +474,85 @@ class HBaseSystemRecordRetirementIT {
           observed.state().claimOwner("successor", takeover, takeover + 180_000), scope).join());
       assertThrows(CompletionException.class, () -> store.retire(SystemRecordType.WORKSET, identity,
           value, permit, SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join());
-      assertThrows(CompletionException.class, () -> new InvocationWindowCloser(store)
+      assertThrows(CompletionException.class, () -> new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention())
           .close(invocation, permit, scope).join());
       assertEquals(Optional.of(value), store.read(SystemRecordType.WORKSET, identity, scope).join());
       assertEquals(Optional.of(encoded), store.read(SystemRecordType.INVOCATION, invocation, scope).join());
       assertTrue(store.readTombstone(SystemRecordType.WORKSET, identity, scope).join().isEmpty());
+    }
+  }
+
+  @Test
+  void successorRowFenceRejectsAnAlreadyDispatchedWindowClose() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3));
+        var successorScope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var table = createRetirementCapableSystemTable(environment);
+      var store = HBaseSystemRecordStore.open(environment.factory(), environment.identity(), table, scope).join();
+      var authority = SystemRecordGcTestFixture.prepare(store, scope);
+      var binding = io.etcdhbase.core.commit.InvocationBinding.begin(InvocationId.create(),
+          AUTHORIZATION_DIGEST, AUTHORIZATION_DIGEST, TransactionId.create(), 1, 0, 1)
+          .seal(ByteKey.copyOf(new byte[] {7})).selected(ByteKey.copyOf(new byte[] {8}));
+      var identity = ByteKey.copyOf(binding.invocationId().bytes());
+      var encoded = ByteKey.copyOf(io.etcdhbase.hbase.codec.InvocationMessages.encode(binding));
+      store.createIfAbsent(SystemRecordType.INVOCATION, identity, encoded, scope).join();
+      var permit = authority.authorize(scope);
+      store.fenceForGc(SystemRecordType.INVOCATION, identity, permit, scope).join();
+      SystemRecordGcTestFixture.prepareExpiredResultWindow(store, identity, authority.authorize(scope), scope);
+      var faults = new Faults(environment.connection());
+      var delayed = HBaseSystemRecordStore.open(faults, environment.identity(), table, scope).join();
+      faults.gateNextWindow.set(true);
+      var close = new InvocationWindowCloser(delayed, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, permit, scope);
+      try {
+        faults.mutationReached.get(20, TimeUnit.SECONDS);
+        var observed = authority.control().read(successorScope).join().orElseThrow();
+        long takeover = observed.state().ownerLeaseDeadlineEpochMillis() + 1;
+        assertTrue(authority.control().compareAndSet(observed,
+            observed.state().claimOwner("successor", takeover, takeover + 180_000), successorScope).join());
+        var state = authority.control().read(successorScope).join().orElseThrow().state();
+        var successor = new SystemRecordGcTestFixture.Authority(authority.control(), authority.coordinator(),
+            authority.retention(), new CommitOwnerService.OwnerToken("successor", state.ownerEpoch()),
+            authority.pins(), authority.eventPins());
+        var nextPermit = successor.authorize(successorScope);
+        int bucket = store.bucket(SystemRecordType.INVOCATION, identity);
+        new HBaseSystemRecordClosure(store).fence(SystemRecordClosure.Domain.INVOCATION, bucket,
+            Optional.empty(), 16, nextPermit, successorScope).join();
+        faults.resume.complete(null);
+        var retained = assertInstanceOf(InvocationWindowCloser.Retained.class, close.get(20, TimeUnit.SECONDS));
+        assertEquals(InvocationWindowCloser.Skip.ROW_CHANGED, retained.skip());
+        assertEquals(Optional.of(encoded), store.read(SystemRecordType.INVOCATION, identity, successorScope).join());
+        assertInstanceOf(InvocationWindowCloser.Closed.class,
+            new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, nextPermit, successorScope).join());
+      } finally {
+        faults.resume.complete(null);
+      }
+    }
+  }
+
+  @Test
+  void lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var table = createRetirementCapableSystemTable(environment);
+      var store = HBaseSystemRecordStore.open(environment.factory(), environment.identity(), table, scope).join();
+      var permit = SystemRecordGcTestFixture.authorize(store, scope);
+      var binding = io.etcdhbase.core.commit.InvocationBinding.begin(InvocationId.create(),
+          AUTHORIZATION_DIGEST, AUTHORIZATION_DIGEST, TransactionId.create(), 1, 0, 1)
+          .seal(ByteKey.copyOf(new byte[] {7})).selected(ByteKey.copyOf(new byte[] {8}));
+      var identity = ByteKey.copyOf(binding.invocationId().bytes());
+      store.createIfAbsent(SystemRecordType.INVOCATION, identity,
+          ByteKey.copyOf(io.etcdhbase.hbase.codec.InvocationMessages.encode(binding)), scope).join();
+      SystemRecordGcTestFixture.prepareExpiredResultWindow(store, identity, permit, scope);
+      var faults = new Faults(environment.connection());
+      var delayed = HBaseSystemRecordStore.open(faults, environment.identity(), table, scope).join();
+      faults.loseWindowAcknowledgement.set(true);
+      assertThrows(CompletionException.class, () -> new InvocationWindowCloser(delayed, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, permit, scope).join());
+      var stored = new HBaseInvocationRepository(store).read(binding.invocationId(), scope).join().orElseThrow();
+      assertEquals(io.etcdhbase.core.commit.InvocationBinding.State.WINDOW_CLOSED, stored.state());
+      assertTrue(stored.sameAttempt(binding));
+      var again = assertInstanceOf(InvocationWindowCloser.Retained.class,
+          new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, permit, scope).join());
+      assertEquals(InvocationWindowCloser.Skip.ALREADY_CLOSED, again.skip());
     }
   }
 
@@ -626,6 +727,8 @@ class HBaseSystemRecordRetirementIT {
   /** Keeps actual HBase CAS/Delete underneath controlled acknowledgement and dispatch races. */
   private static final class Faults implements HBaseConnectionFactory {
     final AtomicBoolean gateNext = new AtomicBoolean();
+    final AtomicBoolean gateNextWindow = new AtomicBoolean();
+    final AtomicBoolean loseWindowAcknowledgement = new AtomicBoolean();
     final AtomicBoolean loseFenceAcknowledgement = new AtomicBoolean();
     final AtomicBoolean fenceWriteApplied = new AtomicBoolean();
     final CompletableFuture<Void> mutationReached = new CompletableFuture<>();
@@ -651,12 +754,19 @@ class HBaseSystemRecordRetirementIT {
           (self, method, args) -> {
             if (!method.getName().equals("checkAndMutate")) return invoke(target, method, args);
             if (args[0] instanceof CheckAndMutate mutation
-                && mutation.getAction() instanceof RowMutations
-                && gateNext.compareAndSet(true, false)) {
+                && (mutation.getAction() instanceof RowMutations && gateNext.compareAndSet(true, false)
+                    || mutation.getAction() instanceof Put put && put.getFamilyCellMap().containsKey(FAMILY)
+                        && gateNextWindow.compareAndSet(true, false))) {
               mutationReached.complete(null);
               return resume.thenCompose(ignored -> future(invoke(target, method, args)));
             }
             var actual = future(invoke(target, method, args));
+            if (args[0] instanceof CheckAndMutate mutation && mutation.getAction() instanceof Put put
+                && put.getFamilyCellMap().containsKey(FAMILY)
+                && loseWindowAcknowledgement.compareAndSet(true, false)) {
+              return actual.thenCompose(value -> CompletableFuture.failedFuture(
+                  new BackendFailure(BackendFailure.Category.UNKNOWN)));
+            }
             if (args[0] instanceof CheckAndMutate mutation
                 && mutation.getAction() instanceof Put
                 && loseFenceAcknowledgement.compareAndSet(true, false)) {

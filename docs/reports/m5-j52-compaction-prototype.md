@@ -39,7 +39,7 @@
 
 HISTORY 按 revision 分行，单行版本默认值也不能单独证明历史完整性；仍需验证行集合、精确删除、基线保留及迟到写。现有双布局 KV 回收用例的范围见[维护说明](../maintenance/j52-compaction-storage.md)，不将其中的短期逻辑墓碑/精确删除检查解释为删除标记经过长期 compaction 后的存活证明。
 
-当前 physical RPC 仅投影 KV 历史完成。全部内部记录域的保护排空、结果窗口运行时保护和完整物理完成证明仍未交付，详见[设计 §6.1](../specs/2026-11-20-m5-auth-gc-lifecycle-design.md)及维护说明。HFile 空间收敛也不能由 descriptor 或删除确认断言推出。
+J52.2a–J52.2c 已实现结果查询保护、系统记录回执及完整等待组合，仍待相应版本的 CI 和正式 review；HBase 保留实验与真实目标验收不由这些回执证明，详见[设计 §6.1](../specs/2026-11-20-m5-auth-gc-lifecycle-design.md)及维护说明。HFile 空间收敛也不能由 descriptor 或删除确认断言推出。
 
 **表 2 J52.1 仍需补充的实验**
 

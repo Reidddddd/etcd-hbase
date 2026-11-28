@@ -61,6 +61,14 @@ final class CompactRequestAuthorization {
         });
   }
 
+  CommitAuthorizationProof captureProof(MutationForwardReceiver.VerifiedAuthorization identity) {
+    var captured = identity.publicationProof();
+    return CommitAuthorizationProof.capture(captured.proofIdentity(),
+        captured.authorizationBarrierGeneration(), (expected, generation, scope) ->
+            captured.reauthorize(generation, scope)
+                .thenCompose(ignored -> verifyManagement(identity.identity(), scope)));
+  }
+
   private CompletableFuture<Void> verifyManagement(
       AuthorizedBackendIdentity identity, RequestScope scope) {
     return startBackendOperation(scope, () -> connections.connectionFor(identity))

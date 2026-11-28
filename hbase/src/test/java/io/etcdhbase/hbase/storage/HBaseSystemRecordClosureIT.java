@@ -86,6 +86,7 @@ class HBaseSystemRecordClosureIT {
 
       assertEquals(2, page.examined(), "both manifests are examined");
       assertEquals(1, page.retired(), "only the unreferenced manifest is collected");
+      assertEquals(1, page.pending(), "the surviving decision is an unfinished old-range obligation");
       assertTrue(store.read(SystemRecordType.MANIFEST, referencedIdentity, scope).join().isPresent(),
           "a still-referenced manifest must survive");
       assertTrue(store.read(SystemRecordType.MANIFEST, orphanIdentity, scope).join().isEmpty(),
@@ -152,6 +153,7 @@ class HBaseSystemRecordClosureIT {
         var page = closure.collect(domain, 0, Optional.empty(), 16, permit, scope).join();
         assertEquals(0, page.retired(), "durable references protect " + domain);
         assertTrue(page.examined() > 0);
+        assertEquals(page.examined(), page.pending());
       }
     }
   }
