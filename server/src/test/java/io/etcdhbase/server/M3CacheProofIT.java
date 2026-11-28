@@ -43,7 +43,7 @@ import org.junit.jupiter.api.Timeout;
 class M3CacheProofIT {
   private static final Duration TIMEOUT = Duration.ofMinutes(2);
   private static final SnapshotPinConfiguration PINS =
-      new SnapshotPinConfiguration(2, 16, Duration.ofSeconds(60));
+      new SnapshotPinConfiguration(2, 16, Duration.ofMinutes(5));
 
   @Test
   void provesUnrelatedAndRejectsRelatedWritesOnBothLayouts() throws Exception {
