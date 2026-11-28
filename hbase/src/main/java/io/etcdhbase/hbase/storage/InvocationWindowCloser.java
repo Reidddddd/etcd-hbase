@@ -19,21 +19,27 @@ public final class InvocationWindowCloser {
   private final SystemRecordStore records;
   private final HBaseSystemRecordStore retirement;
   private final SystemRecordGcAuthority authority;
+  private final ResultWindowRetention retention;
 
   public InvocationWindowCloser(HBaseSystemRecordStore records) {
-    this(records, records, new SystemRecordGcAuthority(records));
+    this(records, ResultWindowRetention.unconfigured());
+  }
+
+  public InvocationWindowCloser(HBaseSystemRecordStore records, ResultWindowRetention retention) {
+    this(records, records, new SystemRecordGcAuthority(records), retention);
     records.requireGcFencing();
   }
 
   InvocationWindowCloser(SystemRecordStore records, HBaseSystemRecordStore retirement,
-      SystemRecordGcAuthority authority) {
+      SystemRecordGcAuthority authority, ResultWindowRetention retention) {
+    this.retention = Objects.requireNonNull(retention, "retention");
     this.records = Objects.requireNonNull(records, "records");
     this.retirement = Objects.requireNonNull(retirement, "retirement");
     this.authority = Objects.requireNonNull(authority, "authority");
   }
 
   public enum Skip {
-    UNRESOLVED, ALREADY_CLOSED, STILL_PROTECTED, ROW_CHANGED
+    UNRESOLVED, ALREADY_CLOSED, STILL_PROTECTED, ROW_CHANGED, WINDOW_RETAINED
   }
 
   public sealed interface Outcome permits Closed, Retained {
@@ -76,12 +82,45 @@ public final class InvocationWindowCloser {
       }
       return resolvedWindow(binding, scope).thenCompose(resolved -> {
         if (resolved.isEmpty()) return retained(identity, Skip.UNRESOLVED);
-        // Compare the original bytes even when a finalized SEALED attempt was resolved above.
-        return retirement.closeInvocationWindow(identity, ByteKey.copyOf(InvocationMessages.encode(binding)),
-            ByteKey.copyOf(InvocationMessages.encode(resolved.orElseThrow().closeQueryWindow())), permit, scope)
-            .thenApply(closed -> closed ? new Closed(identity) : new Retained(identity, Skip.ROW_CHANGED));
+        return closeRetainedWindow(identity, binding, resolved.orElseThrow(), permit, scope);
       });
     });
+  }
+
+  private CompletableFuture<Outcome> closeRetainedWindow(ByteKey identity, InvocationBinding original,
+      InvocationBinding resolved, SystemRecordRetirement.Permit permit, RequestScope scope) {
+    var now = retention.time().observe();
+    if (!now.healthy()) return retained(identity, Skip.WINDOW_RETAINED);
+    return retirement.readInvocationWindowEvidence(identity, scope).thenCompose(found -> {
+      var witness = found.map(InvocationWindowEvidence::decode);
+      if (witness.isEmpty() || witness.orElseThrow().minimumMillis() < retention.minimum().toMillis()) {
+        return startRetentionWindow(identity, original, found, permit, scope);
+      }
+      // A healthy lower bound proves expiry permanently; a later clock failure cannot make
+      // real time precede an already-proved deadline. Missing/unhealthy bounds never authorize.
+      var checkedTime = retention.time().observe();
+      if (!checkedTime.healthy() || checkedTime.nowLowerEpochMillis()
+          < witness.orElseThrow().notBeforeEpochMillis()) return retained(identity, Skip.WINDOW_RETAINED);
+      return retirement.closeInvocationWindow(identity, ByteKey.copyOf(InvocationMessages.encode(original)),
+          ByteKey.copyOf(InvocationMessages.encode(resolved.closeQueryWindow())), found.orElseThrow(), permit, scope)
+          .thenApply(closed -> closed ? new Closed(identity) : new Retained(identity, Skip.ROW_CHANGED));
+    });
+  }
+
+  private CompletableFuture<Outcome> startRetentionWindow(ByteKey identity, InvocationBinding binding,
+      Optional<ByteKey> previous, SystemRecordRetirement.Permit permit, RequestScope scope) {
+    var now = retention.time().observe();
+    if (!now.healthy()) return retained(identity, Skip.WINDOW_RETAINED);
+    long notBefore;
+    try {
+      notBefore = Math.addExact(now.nowUpperEpochMillis(), retention.minimum().toMillis());
+    } catch (ArithmeticException exhausted) {
+      return retained(identity, Skip.WINDOW_RETAINED);
+    }
+    var evidence = new InvocationWindowEvidence(retention.minimum().toMillis(), notBefore);
+    return retirement.persistInvocationWindowEvidence(identity,
+        ByteKey.copyOf(InvocationMessages.encode(binding)), previous, evidence.encode(), permit, scope)
+        .thenApply(recorded -> new Retained(identity, recorded ? Skip.WINDOW_RETAINED : Skip.ROW_CHANGED));
   }
 
   private CompletableFuture<Optional<InvocationBinding>> resolvedWindow(

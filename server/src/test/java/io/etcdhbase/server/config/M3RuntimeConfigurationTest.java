@@ -13,6 +13,18 @@ import org.junit.jupiter.api.Test;
 
 class M3RuntimeConfigurationTest {
   @Test
+  void resultWindowDefaultsToThirtyMinutesAndAcceptsOnlyBoundedExplicitDurations() {
+    assertEquals(1_800_000L, load(valid()).resultWindowRetentionMs());
+    String configured = valid().replace("\"pin_lease_ms\":60000",
+        "\"pin_lease_ms\":60000,\"result_window_retention_ms\":3600000");
+    assertEquals(3_600_000L, load(configured).resultWindowRetentionMs());
+    assertThrows(IllegalArgumentException.class,
+        () -> load(configured.replace("3600000", "0")));
+    assertThrows(IllegalArgumentException.class,
+        () -> load(configured.replace("3600000", "2592000001")));
+  }
+
+  @Test
   void checkedInDevelopmentExamplesAgreeOnTableGroupAndPinConfiguration() throws Exception {
     Path examples = Path.of("..", "config", "examples", "m3");
     try (var input = Files.newInputStream(examples.resolve("activation.json"));

@@ -113,7 +113,7 @@ class M3ResultRepositoryIT {
     var resolver = new InvocationResultResolver(new HBaseInvocationRepository(records),
         new CommitOutcomeResolver(control, decisions), new ManifestCatalog(new HBaseManifestRepository(records)),
         prepared.results(), SnapshotPinManager.initializeFresh(records,
-            new SnapshotPinConfiguration(1, 16, Duration.ofMinutes(1)), scope).join());
+            new SnapshotPinConfiguration(1, 16, Duration.ofMinutes(5)), scope).join());
     var limits = new BudgetManager.Limits(2, 0, 2, 1, 1, 0, 2_000_000);
     var budgets = new BudgetManager(limits, Map.of("group", limits), limits);
     try (var account = budgets.admit("group", scope, new BudgetManager.Reservation(0, 1, 1_000_000, 100));
@@ -340,7 +340,7 @@ class M3ResultRepositoryIT {
         new CommitOutcomeResolver(control, new HBaseCommitDecisionRepository(records)),
         new ManifestCatalog(new HBaseManifestRepository(records)), reopenedResults,
         SnapshotPinManager.initializeFresh(records,
-            new SnapshotPinConfiguration(1, 16, Duration.ofMinutes(1)), scope).join());
+            new SnapshotPinConfiguration(1, 16, Duration.ofMinutes(5)), scope).join());
     var limits = new BudgetManager.Limits(2, 0, 2, 1, 1, 0, 2_000_000);
     var budgets = new BudgetManager(limits, Map.of("group", limits), limits);
     BudgetManager.Account account;

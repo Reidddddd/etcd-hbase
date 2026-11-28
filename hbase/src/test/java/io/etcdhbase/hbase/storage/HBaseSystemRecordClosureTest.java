@@ -267,7 +267,8 @@ class HBaseSystemRecordClosureTest {
       ByteKey profile, int buckets) {
     var authority = mock(SystemRecordGcAuthority.class);
     when(authority.validate(any(), any())).thenReturn(CompletableFuture.completedFuture(List.of()));
-    return new HBaseSystemRecordClosure(records, retirement, profile, buckets, authority);
+    return new HBaseSystemRecordClosure(records, retirement, profile, buckets, authority,
+        ResultWindowRetention.unconfigured());
   }
 
   private static SystemRecordPage page(SystemRecordEntry entry) {

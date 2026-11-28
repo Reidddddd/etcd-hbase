@@ -26,14 +26,21 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
   private final SystemRecordGcAuthority authority;
   private final ByteKey profile;
   private final int bucketCount;
+  private final ResultWindowRetention resultRetention;
 
   public HBaseSystemRecordClosure(HBaseSystemRecordStore store) {
-    this(store, store, store.profileFingerprint(), store.bucketCount(), new SystemRecordGcAuthority(store));
+    this(store, ResultWindowRetention.unconfigured());
+  }
+
+  public HBaseSystemRecordClosure(HBaseSystemRecordStore store, ResultWindowRetention resultRetention) {
+    this(store, store, store.profileFingerprint(), store.bucketCount(), new SystemRecordGcAuthority(store),
+        resultRetention);
     store.requireGcFencing();
   }
 
   HBaseSystemRecordClosure(SystemRecordStore records, HBaseSystemRecordStore retirement,
-      ByteKey profile, int bucketCount, SystemRecordGcAuthority authority) {
+      ByteKey profile, int bucketCount, SystemRecordGcAuthority authority, ResultWindowRetention resultRetention) {
+    this.resultRetention = Objects.requireNonNull(resultRetention, "resultRetention");
     this.authority = Objects.requireNonNull(authority, "authority");
     this.records = Objects.requireNonNull(records, "records");
     this.retirement = Objects.requireNonNull(retirement, "retirement");
@@ -98,7 +105,7 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
 
   private CompletableFuture<Void> retireUnreferenced(Domain domain, SystemRecordPage page,
       Progress progress, SystemRecordRetirement.Permit permit, RequestScope scope) {
-    var windows = new InvocationWindowCloser(records, retirement, authority);
+    var windows = new InvocationWindowCloser(records, retirement, authority, resultRetention);
     CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
     for (var entry : page.entries()) {
       chain = chain.thenCompose(ignored -> {
