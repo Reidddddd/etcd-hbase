@@ -32,16 +32,21 @@ public final class HBaseSystemRecordClosure implements io.etcdhbase.core.commit.
   private final int bucketCount;
 
   public HBaseSystemRecordClosure(HBaseSystemRecordStore store) {
-    this(store, store, store.profileFingerprint(), store.bucketCount(), new SystemRecordGcAuthority(store));
+    this(store, ResultWindowRetention.unconfigured());
+  }
+
+  public HBaseSystemRecordClosure(HBaseSystemRecordStore store, ResultWindowRetention resultRetention) {
+    this(store, store, store.profileFingerprint(), store.bucketCount(), new SystemRecordGcAuthority(store),
+        resultRetention);
     store.requireGcFencing();
   }
 
   HBaseSystemRecordClosure(SystemRecordStore records, HBaseSystemRecordStore retirement,
-      ByteKey profile, int bucketCount, SystemRecordGcAuthority authority) {
+      ByteKey profile, int bucketCount, SystemRecordGcAuthority authority, ResultWindowRetention resultRetention) {
     this.authority = Objects.requireNonNull(authority, "authority");
     this.records = Objects.requireNonNull(records, "records");
     this.retirement = Objects.requireNonNull(retirement, "retirement");
-    windows = new InvocationWindowCloser(records, retirement, authority);
+    windows = new InvocationWindowCloser(records, retirement, authority, resultRetention);
     this.profile = Objects.requireNonNull(profile, "profile");
     if (profile.length() != 32 || bucketCount < 1 || bucketCount > 65_536) {
       throw new IllegalArgumentException("invalid closure configuration");

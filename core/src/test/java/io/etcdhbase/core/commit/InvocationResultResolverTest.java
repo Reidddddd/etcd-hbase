@@ -62,6 +62,25 @@ class InvocationResultResolverTest {
   }
 
   @Test
+  void closedWindowHasAnExplicitFailureForEveryResolutionEntryPoint() throws Exception {
+    try (var fixture = new Fixture()) {
+      fixture.completeWithoutChanges();
+      fixture.invocations.binding = fixture.invocations.binding.closeQueryWindow();
+      List<Runnable> queries = List.of(
+          () -> fixture.resolve(), () -> fixture.resolveNoChanges(),
+          () -> fixture.resolver.resolveInvocation(fixture.id, fixture.digest, fixture.digest,
+              fixture.scope, fixture.account).join(),
+          () -> fixture.resolver.resolveTransaction(fixture.id, fixture.digest, fixture.digest,
+              fixture.scope, fixture.account).join());
+      for (Runnable query : queries) {
+        var failure = assertThrows(CompletionException.class, query::run);
+        assertInstanceOf(ResultQueryUnavailable.class, failure.getCause());
+      }
+      assertEquals(0, fixture.controlReads);
+    }
+  }
+
+  @Test
   void replaysTheSameNoChangeResultWithoutReadingACommitDecision() throws Exception {
     try (Fixture fixture = new Fixture()) {
       fixture.completeWithoutChanges();
@@ -156,6 +175,23 @@ class InvocationResultResolverTest {
   }
 
   @Test
+  void queryDeadlineMustFitInsideTheDurablePinLease() throws Exception {
+    try (var fixture = new Fixture()) {
+      for (var queryScope : List.of(RequestScope.withTimeout(Duration.ofMinutes(2)),
+          RequestScope.withoutDeadline())) {
+        try (queryScope) {
+          var failure = assertThrows(CompletionException.class, () -> fixture.pins
+              .registerResultQuery(fixture.invocations.binding, queryScope).join());
+          var unavailable = assertInstanceOf(ResultQueryUnavailable.class, failure.getCause());
+          assertEquals(ResultQueryUnavailable.Reason.PROTECTION_UNAVAILABLE, unavailable.reason());
+        }
+      }
+      assertTrue(fixture.pins.readBoundary(fixture.scope).join().protections().isEmpty());
+      assertEquals(0, fixture.controlReads);
+    }
+  }
+
+  @Test
   void resultQueryProtectionAcceptsTerminalRevisionAndSequence() throws Exception {
     try (var fixture = new Fixture()) {
       var binding = InvocationBinding.begin(fixture.id, fixture.digest, fixture.digest,
@@ -178,7 +214,7 @@ class InvocationResultResolverTest {
         fixture.pins.advanceRegistrationFloors(revision ? 3 : 0, revision ? 0 : 2, fixture.scope).join();
         fixture.results.afterRead = () -> { throw new AssertionError("unprotected result read"); };
         var failure = assertThrows(CompletionException.class, fixture::resolve);
-        assertInstanceOf(SnapshotPinManager.RegistrationFloorExceeded.class, failure.getCause());
+        assertInstanceOf(ResultQueryUnavailable.class, failure.getCause());
         assertEquals(0, fixture.controlReads, "rejection precedes collectable decision and manifest reads");
         assertTrue(fixture.pins.readBoundary(fixture.scope).join().protections().isEmpty());
       }

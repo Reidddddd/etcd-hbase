@@ -81,7 +81,8 @@ class InvocationWindowCloserIT {
         var queryPin = registered.getFirst().pinId();
         var invocation = ByteKey.copyOf(preparing.invocationId().bytes());
         int bucket = store.bucket(SystemRecordType.INVOCATION, invocation);
-        var closure = new HBaseSystemRecordClosure(store);
+        SystemRecordGcTestFixture.prepareExpiredResultWindow(store, invocation, authority.authorize(scope), scope);
+        var closure = new HBaseSystemRecordClosure(store, SystemRecordGcTestFixture.resultWindowRetention());
         closure.collect(SystemRecordClosure.Domain.INVOCATION, bucket, Optional.empty(), 1,
             authority.authorize(scope), scope).join();
         assertEquals(InvocationBinding.State.NO_CHANGES,
@@ -132,7 +133,8 @@ class InvocationWindowCloserIT {
           sealed.preparedOwnerEpoch(), sealed.baseSequence(), sealed.baseRevision(), sealed.baseSequence() + 1,
           sealed.baseRevision() + 1, true, root.systemIdentity(), root.digest()));
       var permit = authority.authorize(scope);
-      var closer = new InvocationWindowCloser(store);
+      SystemRecordGcTestFixture.prepareExpiredResultWindow(store, invocation, permit, scope);
+      var closer = new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention());
       var unresolved = assertInstanceOf(InvocationWindowCloser.Retained.class,
           closer.close(invocation, permit, scope).join());
       assertEquals(InvocationWindowCloser.Skip.UNRESOLVED, unresolved.skip());
@@ -210,9 +212,10 @@ class InvocationWindowCloserIT {
       var invocations = new InvocationService(new HBaseInvocationRepository(store));
       var binding = selectedInvocation(invocations, scope);
       var permit = SystemRecordGcTestFixture.authorize(store, scope);
-      var closer = new InvocationWindowCloser(store);
+      var closer = new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention());
 
       var identity = ByteKey.copyOf(binding.invocationId().bytes());
+      SystemRecordGcTestFixture.prepareExpiredResultWindow(store, identity, permit, scope);
       var resultIdentity = ResultIdentity.from(binding);
       var directory = ResultDirectory.create(resultIdentity,
           java.util.List.of(new ResultPageReference(resultIdentity, 0, 8, 1,
@@ -258,7 +261,7 @@ class InvocationWindowCloserIT {
       var encoded = ByteKey.copyOf(InvocationMessages.encode(binding));
       store.createIfAbsent(SystemRecordType.INVOCATION, identity, encoded, scope).join();
       var outcome = assertInstanceOf(InvocationWindowCloser.Retained.class,
-          new InvocationWindowCloser(store).close(identity, permit, scope).join());
+          new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, permit, scope).join());
       assertEquals(InvocationWindowCloser.Skip.STILL_PROTECTED, outcome.skip());
       assertEquals(Optional.of(encoded), store.read(SystemRecordType.INVOCATION, identity, scope).join());
     }
@@ -273,7 +276,7 @@ class InvocationWindowCloserIT {
       var preparing = proposedInvocation();
       invocations.bindOrJoin(preparing, scope).join();
       var permit = SystemRecordGcTestFixture.authorize(store, scope);
-      var closer = new InvocationWindowCloser(store);
+      var closer = new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention());
 
       var identity = ByteKey.copyOf(preparing.invocationId().bytes());
       var outcome = assertInstanceOf(InvocationWindowCloser.Retained.class,
@@ -309,7 +312,8 @@ class InvocationWindowCloserIT {
       store.createIfAbsent(SystemRecordType.MANIFEST, root.systemIdentity(),
           ByteKey.copyOf(io.etcdhbase.hbase.codec.ManifestMessages.encode(root)), scope).join();
       var identity = ByteKey.copyOf(binding.invocationId().bytes());
-      var outcome = new InvocationWindowCloser(store).close(identity, permit, scope).join();
+      SystemRecordGcTestFixture.prepareExpiredResultWindow(store, identity, permit, scope);
+      var outcome = new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, permit, scope).join();
       assertEquals(0, collectResults(store, resultRow, permit, scope).retired());
       assertAll(() -> assertInstanceOf(InvocationWindowCloser.Closed.class, outcome),
           () -> assertEquals(java.util.Optional.of(resultValue), store.read(SystemRecordType.RESULT, resultRow, scope).join()),
@@ -321,8 +325,41 @@ class InvocationWindowCloserIT {
 
   private static SystemRecordClosure.Page collectResults(HBaseSystemRecordStore store, ByteKey identity,
       SystemRecordRetirement.Permit permit, RequestScope scope) {
-    return new HBaseSystemRecordClosure(store).collect(SystemRecordClosure.Domain.RESULT,
+    return new HBaseSystemRecordClosure(store, SystemRecordGcTestFixture.resultWindowRetention()).collect(SystemRecordClosure.Domain.RESULT,
         store.bucket(SystemRecordType.RESULT, identity), Optional.empty(), 16, permit, scope).join();
+  }
+
+  @Test
+  void floorAdvanceCannotCloseAnUndeclaredOrUnexpiredWindowAndUnhealthyClockRetainsIt() throws Exception {
+    try (var environment = M1TestEnvironment.start(1);
+        var scope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var store = open(environment, scope);
+      var binding = selectedInvocation(new InvocationService(new HBaseInvocationRepository(store)), scope);
+      var identity = ByteKey.copyOf(binding.invocationId().bytes());
+      var permit = SystemRecordGcTestFixture.authorize(store, scope);
+      assertInstanceOf(InvocationWindowCloser.Retained.class,
+          new InvocationWindowCloser(store).close(identity, permit, scope).join());
+      assertTrue(store.readInvocationWindowEvidence(identity, scope).join().isEmpty());
+      var now = new java.util.concurrent.atomic.AtomicLong(3_600_000);
+      var healthy = new java.util.concurrent.atomic.AtomicBoolean(true);
+      var policy = new ResultWindowRetention(Duration.ofMinutes(30), () ->
+          new io.etcdhbase.core.lease.LeaseTimeObservation(now.get(), now.get(), healthy.get()));
+      var closer = new InvocationWindowCloser(store, policy);
+      assertInstanceOf(InvocationWindowCloser.Retained.class, closer.close(identity, permit, scope).join());
+      var witness = InvocationWindowEvidence.decode(store.readInvocationWindowEvidence(identity, scope)
+          .join().orElseThrow());
+      assertEquals(5_400_000, witness.notBeforeEpochMillis());
+      now.set(witness.notBeforeEpochMillis() - 1);
+      assertInstanceOf(InvocationWindowCloser.Retained.class, closer.close(identity, permit, scope).join());
+      now.incrementAndGet();
+      healthy.set(false);
+      assertInstanceOf(InvocationWindowCloser.Retained.class, closer.close(identity, permit, scope).join());
+      assertEquals(InvocationBinding.State.SELECTED,
+          new HBaseInvocationRepository(store).read(binding.invocationId(), scope).join().orElseThrow().state());
+      healthy.set(true);
+      assertInstanceOf(InvocationWindowCloser.Closed.class,
+          new InvocationWindowCloser(store, policy).close(identity, permit, scope).join());
+    }
   }
 
   private static InvocationBinding selectedInvocation(InvocationService invocations,

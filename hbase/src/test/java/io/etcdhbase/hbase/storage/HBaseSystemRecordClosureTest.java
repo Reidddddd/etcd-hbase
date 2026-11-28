@@ -105,7 +105,8 @@ class HBaseSystemRecordClosureTest {
       var protection = new SnapshotGcBoundary.Protection(0, 0, 1, ByteKey.copyOf(new byte[16]), 20, 20,
           Optional.of(root.transactionId()), Optional.of(root.systemIdentity()), Optional.of(root.digest()));
       when(authority.validate(any(), any())).thenReturn(CompletableFuture.completedFuture(List.of(protection)));
-      var result = new HBaseSystemRecordClosure(records, retirement, DIGEST, 1, authority)
+      var result = new HBaseSystemRecordClosure(records, retirement, DIGEST, 1, authority,
+          ResultWindowRetention.unconfigured())
           .collect(SystemRecordClosure.Domain.MANIFEST, 0, Optional.empty(), 16, permit(scope), scope).join();
       assertEquals(1, result.pending());
       assertTrue(result.exhausted());
@@ -356,7 +357,8 @@ class HBaseSystemRecordClosureTest {
       ByteKey profile, int buckets) {
     var authority = mock(SystemRecordGcAuthority.class);
     when(authority.validate(any(), any())).thenReturn(CompletableFuture.completedFuture(List.of()));
-    return new HBaseSystemRecordClosure(records, retirement, profile, buckets, authority);
+    return new HBaseSystemRecordClosure(records, retirement, profile, buckets, authority,
+        ResultWindowRetention.unconfigured());
   }
 
   private static SystemRecordPage page(SystemRecordEntry entry) {

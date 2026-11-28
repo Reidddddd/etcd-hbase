@@ -71,7 +71,7 @@ class M3RuntimeBudgetsTest {
     return new M3RuntimeConfiguration("1", 6_000, 1_000, 30_000, 30_000,
         memoryBytes, 1_572_864, 2, 16, 60_000, false, true, 5, 1_000,
         1_000, 1024, 4L << 20, 32L << 20, null, null,
-        M3RuntimeConfiguration.ActivationProfile.PUBLIC_TEST);
+        M3RuntimeConfiguration.ActivationProfile.PUBLIC_TEST, java.time.Duration.ofMinutes(30).toMillis());
   }
 
   @Test
