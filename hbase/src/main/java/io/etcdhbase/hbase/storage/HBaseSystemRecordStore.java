@@ -664,12 +664,29 @@ public final class HBaseSystemRecordStore implements SystemRecordStore {
         new HBaseSystemRecordGcMutations(this, binding).prepareFence(type, identity, permit, scope));
   }
 
+  CompletableFuture<Optional<ByteKey>> readInvocationWindowEvidence(ByteKey identity, RequestScope scope) {
+    byte[] row = binding.row(SystemRecordType.INVOCATION, identity);
+    return execute(scope, logicalReadPayloadBytes(row), table -> table.get(new Get(row)
+        .setConsistency(Consistency.STRONG)
+        .addColumn(SystemTableBinding.GC_FENCE_FAMILY, InvocationWindowEvidence.COLUMN)))
+        .thenApply(result -> Optional.ofNullable(result.getValue(
+            SystemTableBinding.GC_FENCE_FAMILY, InvocationWindowEvidence.COLUMN)).map(ByteKey::copyOf));
+  }
+
+  CompletableFuture<Boolean> persistInvocationWindowEvidence(ByteKey identity, ByteKey expected,
+      Optional<ByteKey> previousEvidence, ByteKey evidence, Permit permit, RequestScope scope) {
+    requireGcFencing();
+    return requireCurrentGcFencing(scope).thenCompose(ignored ->
+        new HBaseSystemRecordGcMutations(this, binding).persistInvocationWindowEvidence(
+            identity, expected, previousEvidence, evidence, permit, scope));
+  }
+
   CompletableFuture<Boolean> closeInvocationWindow(ByteKey identity, ByteKey expected,
-      ByteKey replacement, Permit permit, RequestScope scope) {
+      ByteKey replacement, ByteKey evidence, Permit permit, RequestScope scope) {
     requireGcFencing();
     return requireCurrentGcFencing(scope).thenCompose(ignored ->
         new HBaseSystemRecordGcMutations(this, binding).closeInvocationWindow(
-            identity, expected, replacement, permit, scope));
+            identity, expected, replacement, evidence, permit, scope));
   }
 
   Filter liveValueCondition(byte[] expected) {

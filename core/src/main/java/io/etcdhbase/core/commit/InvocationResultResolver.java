@@ -114,15 +114,19 @@ public final class InvocationResultResolver {
     if (binding.state() != InvocationBinding.State.NO_CHANGES
         && binding.state() != InvocationBinding.State.SEALED
         && binding.state() != InvocationBinding.State.SELECTED) {
-      return CompletableFuture.failedFuture(new IllegalStateException("invocation result is not queryable"));
+      return CompletableFuture.failedFuture(new ResultQueryUnavailable());
     }
-    return pins.registerResultQuery(binding, scope).thenCompose(pin -> {
+    return pins.registerResultQuery(binding, scope).exceptionallyCompose(failure -> {
+      Throwable cause = io.etcdhbase.core.error.CompletionFailures.unwrapCompletion(failure);
+      return CompletableFuture.failedFuture(cause instanceof SnapshotPinManager.RegistrationFloorExceeded
+          ? new ResultQueryUnavailable() : cause);
+    }).thenCompose(pin -> {
       var protection = new ResultQueryProtection(pin, scope);
       // Registration races the GC floors. Recheck the binding before touching collectable data.
       return repository.read(binding.invocationId(), scope).thenCompose(found -> {
         var current = found.orElseThrow(() -> new IllegalStateException("invocation disappeared"));
         if (!current.sameAttempt(binding) || current.state() == InvocationBinding.State.WINDOW_CLOSED) {
-          return CompletableFuture.failedFuture(new IllegalStateException("invocation result window changed during query"));
+          return CompletableFuture.failedFuture(new ResultQueryUnavailable());
         }
         return load.apply(current);
       }).thenCompose(result -> protection.complete().thenApply(ignored -> result)
@@ -135,7 +139,7 @@ public final class InvocationResultResolver {
     return readMatching(id, requestDigest, authorizationDigest, scope, account).thenCompose(binding -> {
       if (binding.state() != InvocationBinding.State.SEALED
           && binding.state() != InvocationBinding.State.SELECTED) {
-        return CompletableFuture.failedFuture(new IllegalStateException("invocation result is not queryable"));
+        return CompletableFuture.failedFuture(new ResultQueryUnavailable());
       }
       return CompletableFuture.completedFuture(binding);
     });
@@ -220,7 +224,7 @@ public final class InvocationResultResolver {
     InvocationBinding latest = current.orElseThrow(() -> new IllegalStateException("invocation disappeared"));
     if (!latest.sameAttempt(binding) || latest.state() != InvocationBinding.State.NO_CHANGES
         || latest.resultReference().filter(reference.token()::equals).isEmpty()) {
-      throw new IllegalStateException("no-change result window changed during query");
+      throw new ResultQueryUnavailable();
     }
     if (scope.isClosed() || scope.isDeadlineExceeded()) {
       throw new java.util.concurrent.CompletionException(new BackendFailure(scope.isDeadlineExceeded()
@@ -240,7 +244,7 @@ public final class InvocationResultResolver {
       }
       if (binding.state() != InvocationBinding.State.SEALED
           && binding.state() != InvocationBinding.State.SELECTED) {
-        return CompletableFuture.failedFuture(new IllegalStateException("transaction result is not queryable"));
+        return CompletableFuture.failedFuture(new ResultQueryUnavailable());
       }
       return resolve(id, requestDigest, authorizationDigest, scope, account).thenApply(result -> {
         if (!result.decision().containsKeyChanges()) {
@@ -289,7 +293,7 @@ public final class InvocationResultResolver {
               InvocationBinding latest = current.orElseThrow(() -> new IllegalStateException("invocation disappeared"));
               if (!latest.sameAttempt(binding) || latest.state() != InvocationBinding.State.SELECTED
                   || latest.resultReference().filter(reference.token()::equals).isEmpty()) {
-                throw new IllegalStateException("invocation result window changed during query");
+                throw new ResultQueryUnavailable();
               }
               return new ResolvedResult(decision, result);
             }).whenComplete((ignored, failure) -> {

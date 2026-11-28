@@ -359,7 +359,8 @@
         "retainsResolvedWindowsAtTheTerminalCounters",
         "closingAWindowRetainsAResultStillReferencedByAManifest",
         "runtimeClosureWaitsForADurableResultQueryThenKeepsTheNonReplayBinding",
-        "closesAFinalizedSealedInvocationWithoutRequiringAClientReplay"
+        "closesAFinalizedSealedInvocationWithoutRequiringAClientReplay",
+        "floorAdvanceCannotCloseAnUndeclaredOrUnexpiredWindowAndUnhealthyClockRetainsIt"
       ]
     },
     {
@@ -585,7 +586,34 @@
         "resultQueryProtectionAcceptsTerminalRevisionAndSequence",
         "expiredOrRevokedQueryCannotDeliverMaterializedBytes",
         "cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops",
-        "failedProducerDrainKeepsThePinAndSurfacesCleanupFailure"
+        "failedProducerDrainKeepsThePinAndSurfacesCleanupFailure",
+        "closedWindowHasAnExplicitFailureForEveryResolutionEntryPoint",
+        "queryDeadlineMustFitInsideTheDurablePinLease"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.InvocationWindowEvidenceTest",
+      "methods": [
+        "roundTripsOnlyBoundedCompleteEvidenceAndRejectsMissingOrCorruptTime",
+        "absentTrustedClockIsFailClosedAndRetentionIsExplicitlyBounded"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.config.M3RuntimeConfigurationTest",
+      "methods": [
+        "resultWindowDefaultsToThirtyMinutesAndAcceptsOnlyBoundedExplicitDurations"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.InvocationResultErrorRpcTest",
+      "methods": [
+        "distinguishesClosedWindowsProtectionAdmissionAndCorruptionOverRpc"
       ]
     },
     {

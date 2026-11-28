@@ -474,7 +474,7 @@ class HBaseSystemRecordRetirementIT {
           observed.state().claimOwner("successor", takeover, takeover + 180_000), scope).join());
       assertThrows(CompletionException.class, () -> store.retire(SystemRecordType.WORKSET, identity,
           value, permit, SystemRecordRetirement.Reason.UNREFERENCED_CLOSURE, scope).join());
-      assertThrows(CompletionException.class, () -> new InvocationWindowCloser(store)
+      assertThrows(CompletionException.class, () -> new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention())
           .close(invocation, permit, scope).join());
       assertEquals(Optional.of(value), store.read(SystemRecordType.WORKSET, identity, scope).join());
       assertEquals(Optional.of(encoded), store.read(SystemRecordType.INVOCATION, invocation, scope).join());
@@ -498,10 +498,11 @@ class HBaseSystemRecordRetirementIT {
       store.createIfAbsent(SystemRecordType.INVOCATION, identity, encoded, scope).join();
       var permit = authority.authorize(scope);
       store.fenceForGc(SystemRecordType.INVOCATION, identity, permit, scope).join();
+      SystemRecordGcTestFixture.prepareExpiredResultWindow(store, identity, authority.authorize(scope), scope);
       var faults = new Faults(environment.connection());
       var delayed = HBaseSystemRecordStore.open(faults, environment.identity(), table, scope).join();
       faults.gateNextWindow.set(true);
-      var close = new InvocationWindowCloser(delayed).close(identity, permit, scope);
+      var close = new InvocationWindowCloser(delayed, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, permit, scope);
       try {
         faults.mutationReached.get(20, TimeUnit.SECONDS);
         var observed = authority.control().read(successorScope).join().orElseThrow();
@@ -521,7 +522,7 @@ class HBaseSystemRecordRetirementIT {
         assertEquals(InvocationWindowCloser.Skip.ROW_CHANGED, retained.skip());
         assertEquals(Optional.of(encoded), store.read(SystemRecordType.INVOCATION, identity, successorScope).join());
         assertInstanceOf(InvocationWindowCloser.Closed.class,
-            new InvocationWindowCloser(store).close(identity, nextPermit, successorScope).join());
+            new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, nextPermit, successorScope).join());
       } finally {
         faults.resume.complete(null);
       }
@@ -541,15 +542,16 @@ class HBaseSystemRecordRetirementIT {
       var identity = ByteKey.copyOf(binding.invocationId().bytes());
       store.createIfAbsent(SystemRecordType.INVOCATION, identity,
           ByteKey.copyOf(io.etcdhbase.hbase.codec.InvocationMessages.encode(binding)), scope).join();
+      SystemRecordGcTestFixture.prepareExpiredResultWindow(store, identity, permit, scope);
       var faults = new Faults(environment.connection());
       var delayed = HBaseSystemRecordStore.open(faults, environment.identity(), table, scope).join();
       faults.loseWindowAcknowledgement.set(true);
-      assertThrows(CompletionException.class, () -> new InvocationWindowCloser(delayed).close(identity, permit, scope).join());
+      assertThrows(CompletionException.class, () -> new InvocationWindowCloser(delayed, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, permit, scope).join());
       var stored = new HBaseInvocationRepository(store).read(binding.invocationId(), scope).join().orElseThrow();
       assertEquals(io.etcdhbase.core.commit.InvocationBinding.State.WINDOW_CLOSED, stored.state());
       assertTrue(stored.sameAttempt(binding));
       var again = assertInstanceOf(InvocationWindowCloser.Retained.class,
-          new InvocationWindowCloser(store).close(identity, permit, scope).join());
+          new InvocationWindowCloser(store, SystemRecordGcTestFixture.resultWindowRetention()).close(identity, permit, scope).join());
       assertEquals(InvocationWindowCloser.Skip.ALREADY_CLOSED, again.skip());
     }
   }

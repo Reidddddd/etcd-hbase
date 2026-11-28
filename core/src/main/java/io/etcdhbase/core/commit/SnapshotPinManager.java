@@ -169,6 +169,12 @@ public final class SnapshotPinManager implements ReadViewPinRegistry {
    */
   CompletableFuture<PinLease> registerResultQuery(InvocationBinding binding, RequestScope scope) {
     Objects.requireNonNull(binding, "binding");
+    Objects.requireNonNull(scope, "scope");
+    // One unary query must finish within this generation's lease. Reject before storage reads
+    // rather than let a long request outlive its protection and race ordinary GC revocation.
+    if (scope.remainingDeadlineNanos() >= configuration.leaseDuration().toNanos()) {
+      return failed(new ResultQueryUnavailable(ResultQueryUnavailable.Reason.PROTECTION_UNAVAILABLE));
+    }
     ByteKey digest = ManifestDigest.sha256(output -> {
       ManifestDigest.writeBytes(output, binding.invocationId().bytes());
       ManifestDigest.writeBytes(output, binding.transactionId().bytes());
