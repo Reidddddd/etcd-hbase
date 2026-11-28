@@ -5,14 +5,18 @@ import io.etcdhbase.core.request.RequestScope;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
-/** Drains a page's reads, mutations and protection cleanup before its durable receipt is written. */
-final class GcPageScope {
+/** Owns a child operation until its producers and cleanup have actually drained. */
+final class DrainingRequestScope {
   private final RequestScope scope;
   private final CompletableFuture<Void> drained;
   private final RequestScope.ScopedCleanup registration;
 
-  GcPageScope(RequestScope parent) {
-    scope = parent.childWithTimeoutNanos(parent.remainingDeadlineNanos());
+  DrainingRequestScope(RequestScope parent) {
+    this(parent, parent.remainingDeadlineNanos());
+  }
+
+  DrainingRequestScope(RequestScope parent, long maximumTimeoutNanos) {
+    scope = parent.childWithTimeoutNanos(maximumTimeoutNanos);
     drained = CompletableFuture.allOf(scope.cleanupOutcomeCompletion().toCompletableFuture(),
         scope.physicalProducersCompletion().toCompletableFuture());
     registration = parent.registerScopedCleanup(scope, drained);

@@ -72,7 +72,7 @@ final class GcCheckpointCycle {
   CompletableFuture<Outcome> run(RequestScope scope) {
     var token = owner.get();
     if (token.isEmpty()) return CompletableFuture.completedFuture(Outcome.IDLE);
-    var page = new GcPageScope(scope);
+    var page = new DrainingRequestScope(scope);
     CompletableFuture<PageWork> work;
     try { work = runPage(token.orElseThrow(), page.scope()); }
     catch (RuntimeException | Error failure) { work = CompletableFuture.failedFuture(failure); }

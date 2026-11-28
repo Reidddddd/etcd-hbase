@@ -186,7 +186,7 @@ Compact 路由到表组 owner，校验管理权限、请求 revision 及当前�
 
 HBase Delete 的确认与 HFile 空间归还不同。提议 physical 完成表示：本次应回收且已解除保护的 Cell/内部记录完成精确删除并强一致复核，受保护项已排空，必要基线和 guard 保留；HFile 空间归还由 HBase compaction 异步执行，不承诺磁盘字节立即下降。该投影与 proto “backend database” 的含义需明确评审并披露，默认不能称为原生物理空间等价。若评审要求 HFile 级回收确认，J52 必须增加获授权 compaction 的完成证据和空间观测，不能以空结果或 `NONE` 状态单独证明；本设计不将 physical=true 降为不实现。
 
-**实现进度：** [PR #68 的范围评审](https://github.com/Reidddddd/etcd-hbase/pull/68#issuecomment-7210841766)曾将 physical RPC 限定为 KV 历史切片。J52.2c 在 J52.2a 的结果窗口与 J52.2b 的系统记录完成回执之上，接入 KV 和全部系统记录域的逐桶证明，等待 revision 与 baseSequence 两个目标下界；缺少完整事件/GC 装配时返回 `UNAVAILABLE`。实现尚待当前版本 CI、正式 review 和目标环境验收，实际格式、运行和验证边界见[维护说明](../maintenance/j52-compaction-storage.md)。
+**实现进度：** [PR #68 的范围评审](https://github.com/Reidddddd/etcd-hbase/pull/68#issuecomment-7210841766)曾将 physical RPC 限定为 KV 历史切片。J52.2c 在 J52.2a 的结果窗口与 J52.2b 的系统记录完成回执之上，接入 KV 和全部系统记录域的逐桶证明，等待 revision 与 baseSequence 两个目标下界；缺少完整事件/GC 装配时返回 `UNAVAILABLE`。J52.2d 复用 mTLS owner 通道和同一 mutation lane 完成跨副本选择，独立 COMPACTION 回执经身份绑定校验后，由入口副本等待物理回执；未知发送结果不换身份重发。实现尚待当前版本 CI、正式 review 和目标环境验收，实际格式、运行和验证边界见[维护说明](../maintenance/j52-compaction-storage.md)。
 
 ### 6.2 回收许可的形成
 

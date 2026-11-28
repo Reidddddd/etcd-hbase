@@ -53,13 +53,15 @@ public final class CompactGateway
       LaneSubmitter lane,
       Supplier<java.util.Optional<CommitOwnerService.OwnerToken>> owner,
       java.util.function.Function<RequestScope, CompletableFuture<CommitState>> controlState,
-      java.util.Optional<PhysicalCompletion> physicalCompletion) {
+      java.util.Optional<PhysicalCompletion> physicalCompletion,
+      Optional<CompactForwarder> forwarding) {
     this.authorizations = Objects.requireNonNull(authorizations, "authorizations");
     this.compactions = Objects.requireNonNull(compactions, "compactions");
     this.lane = Objects.requireNonNull(lane, "lane");
     this.owner = Objects.requireNonNull(owner, "owner");
     this.controlState = Objects.requireNonNull(controlState, "controlState");
     this.physicalCompletion = Objects.requireNonNull(physicalCompletion, "physicalCompletion");
+    this.forwarding = Objects.requireNonNull(forwarding, "forwarding");
     if (clusterId == 0 || memberId == 0) {
       throw new IllegalArgumentException("invalid Compact gateway identity");
     }
@@ -75,6 +77,7 @@ public final class CompactGateway
   private final Supplier<java.util.Optional<CommitOwnerService.OwnerToken>> owner;
   private final java.util.function.Function<RequestScope, CompletableFuture<CommitState>> controlState;
   private final java.util.Optional<PhysicalCompletion> physicalCompletion;
+  private final Optional<CompactForwarder> forwarding;
 
   @Override
   public void accept(Rpc.CompactionRequest request, StreamObserver<Rpc.CompactionResponse> observer) {
@@ -92,9 +95,11 @@ public final class CompactGateway
     if (!scope.startIfOpen(() -> scope.trackPhysicalProducer(drained))) return;
     try {
       // Proto3 omits default fields, so a valid Compact(0) still needs one admission unit.
-      lane.submit(Math.max(1, request.getSerializedSize()), scope,
-              laneScope -> execute(request, token, laneScope))
-          .thenCompose(selected -> awaitPhysical(request.getPhysical(), selected, scope))
+      var selection = owner.get().isEmpty() && forwarding.isPresent()
+          ? forwarding.orElseThrow().forward(request, token, scope)
+          : lane.submit(Math.max(1, request.getSerializedSize()), scope,
+              laneScope -> execute(request, token, laneScope));
+      selection.thenCompose(selected -> awaitPhysical(request.getPhysical(), selected, scope))
           .whenComplete((selected, failure) -> {
             try {
               // The queue receipt includes service-scope cleanup, while delivery belongs to the RPC.

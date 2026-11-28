@@ -88,7 +88,9 @@ J52.2a 的运行时结果窗口保护与关闭、J52.2b 的系统记录分域完
 
 完整证明依赖已装配的事件注册表、回填和系统记录 GC。只启用 KV 的旧装配仍可登记逻辑 Compact 并运行 KV worker，但 `physical=true` 返回 `UNAVAILABLE`；已登记的逻辑工作保留，不以 KV 完成响应冒充完整证明。启用 Lease/事件运行时与 GC 格式的公开临时环境用于正向验证。该装配要求不等于已解除生产 Lease/身份能力门禁。
 
-跨副本 Compact owner RPC 转发和真实目标环境的管理权限验收仍待后续任务。未决旧准备记录继续按引用与保护保留，可能阻止物理完成；J53 负责其判定与清理，不以本轮扫描结束跳过。
+J52.2d 复用既有 mTLS owner 通道，将 Compact 的有界 revision/physical 命令送至权威 owner。接收端在同一 mutation lane 中复查表组、hop、deadline、owner epoch、可信 peer 和安全身份引用，并在准备记录及控制行 CAS 前复查实际用户的会话与 ADMIN 权限。Compact 使用独立 COMPACTION 回执，不创建普通提交的 INVOCATION 绑定；返回值严格匹配操作身份、请求、授权范围、profile、revision 和终态。物理等待留在入口副本，响应 header 使用入口 member；转发选择使用独立子 scope，成功或失败都等待入口侧身份借用、在途传输和清理实际排空，清理失败不能发布成功回执。发送结果未知时不换 invocation 重发。发送前的 owner 变更由既有 relay 最多重新定位一次，发送后的取消、未知结果及 owner 接管保留已登记的持久任务。
+
+真实目标环境的管理权限验收仍待补齐。未决旧准备记录继续按引用与保护保留，可能阻止物理完成；J53 负责其判定与清理，不以本轮扫描结束跳过。
 
 ## 6. 格式与验证入口
 
@@ -102,7 +104,7 @@ system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compactio
 scripts/verify/m5.sh --scope public --task J52 --artifact-root .artifacts/m5/j52-storage-run
 ```
 
-入口运行确定性逻辑/pin/许可及扫描单测、HISTORY/NATIVE MiniCluster、系统记录与结果窗口 MiniCluster，以及固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。门禁构建至 `server`，保留原有 HBase 集成套件，并覆盖 GC 生命周期、KV 与系统记录检查点及真实双 bucket 重启回收。`J52PhysicalCompactIT` 使用实际管理身份、生产 runtime 和 gRPC，分别验证两种布局下旧 pin 阻塞、owner lane 可继续写入、全部目标版本精确删除及基线保留，以及取消后强杀 owner JVM、接管继续原任务和逻辑请求登记后台工作。另有事件 pin 在 KV 已完成后继续阻塞的反例，并逐域逐桶核对系统回执；只启用 KV 的装配必须返回 UNAVAILABLE。测试采用两桶配置和真实 Lease 时钟。Lease worker 在完整空窗口结束后按既有 1 秒 idle 间隔调度，未完成窗口仍持续推进；回归同时覆盖 Lease mutation 推进时间水位的情况。此前实时钟探针暴露了空 Lease 窗口的密集发布、辅助 decision 窗口边界及闭包证明预算耗尽问题，分别由 idle 调度、统一结果窗口和已证明前缀推进处理。早期 16 桶探针超过 90 秒，两桶高更新量探针也曾在 300 秒内未取得全量回执；当前定向功能结果不构成 16 桶完成延迟或生产尾延迟承诺。测试门禁要求这些方法实际执行，且 Kerberos 测试按 JVM 隔离。它登记在 M5 CI 中，运行报告明确保留第 5 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
+入口运行确定性逻辑/pin/许可及扫描单测、HISTORY/NATIVE MiniCluster、系统记录与结果窗口 MiniCluster，以及固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。门禁构建至 `server`，保留原有 HBase 集成套件，并覆盖 GC 生命周期、KV 与系统记录检查点及真实双 bucket 重启回收。`J52PhysicalCompactIT` 使用实际管理身份、生产 runtime 和 gRPC，分别验证两种布局下旧 pin 阻塞、owner lane 可继续写入、全部目标版本精确删除及基线保留，以及取消后强杀 owner JVM、接管继续原任务和逻辑请求登记后台工作。另有事件 pin 在 KV 已完成后继续阻塞的反例，并逐域逐桶核对系统回执；只启用 KV 的装配必须返回 UNAVAILABLE。跨副本用例以实际双副本 mTLS 通道验证入口 header、逻辑选择、物理等待不占 owner lane、取消后接管继续原任务，以及新 owner 的后续 Compact。测试采用两桶配置和真实 Lease 时钟。Lease worker 在完整空窗口结束后按既有 1 秒 idle 间隔调度，未完成窗口仍持续推进；回归同时覆盖 Lease mutation 推进时间水位的情况。此前实时钟探针暴露了空 Lease 窗口的密集发布、辅助 decision 窗口边界及闭包证明预算耗尽问题，分别由 idle 调度、统一结果窗口和已证明前缀推进处理。早期 16 桶探针超过 90 秒，两桶高更新量探针也曾在 300 秒内未取得全量回执；当前定向功能结果不构成 16 桶完成延迟或生产尾延迟承诺。测试门禁要求这些方法实际执行，且 Kerberos 测试按 JVM 隔离。它登记在 M5 CI 中，运行报告明确保留第 5 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
 
 J52 专属门禁在实际执行的 `server` reactor 中登记 `CompactGatewayAuthorizationTest`，覆盖请求身份、每张目标表的 `ADMIN` 权限、真实 gRPC token 传递、CAS 前失效及取消排空；任一授权套件或关键方法缺失均不能通过报告校验。J09 仍执行完整 server 构建，J52 同时保留 GC worker 的真实执行套件。真实 Kerberos/HBase 的 `ADMIN` 授予与撤销反例属于 J04 的安全后端集成测试；替身网关测试和实际后端 ACL 测试各自保留验证范围。
 

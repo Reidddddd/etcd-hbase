@@ -541,6 +541,8 @@ class M5J52ReportTest(unittest.TestCase):
             "HistoryGcCompletionScanTest": "conservativePinBoundsDoNotCompleteTheRequestedTarget",
             "PhysicalGcCompletionScanTest": "everyDomainAndBucketNeedsBothTargetBounds",
             "SystemRecordGcTargetTest": "metadataOnlyDecisionSharesItsPreparedResultWindowRatherThanBlockingThePreviousRevision",
+            "CompactForwarderTest": "unknownSendOutcomeNeverAllocatesAnotherAttempt",
+            "CompactOwnerLaneTest": "queuedCompactRechecksOwnerAndCancellationCannotDispatchIt",
             "LeaseExpiryWorkerTest": "completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain",
             "PhysicalCompactionWaiterTest": "cancellationDetachesTheRpcButRetainsAdmissionUntilTheRealReadDrains",
             "CompactGatewayTest": "physicalWaitDoesNotHoldTheOwnerLane",
@@ -604,7 +606,8 @@ class M5J52ReportTest(unittest.TestCase):
                 ("HBaseSystemRecordClosureTest", "proofBudgetEndsAtTheCompletedPrefixAndTheNextPageRetriesTheUnprovedRecord"),
                 ("HBaseSystemRecordClosureTest", "anUnprovableFirstRecordStillFailsRatherThanPublishingANonadvancingCursor"),
                 ("HBaseSystemRecordClosureTest", "malformedRecordAfterACompletedPrefixStillAbortsThePage"),
-                ("HBaseSystemRecordClosureTest", "resultPageChecksOnlyItsCanonicalDirectoryAndRejectsDifferentOrMalformedPreparations")):
+                ("HBaseSystemRecordClosureTest", "resultPageChecksOnlyItsCanonicalDirectoryAndRejectsDifferentOrMalformedPreparations"),
+                ("CompactForwarderTest", "logicalReceiptWaitsForPhysicalDrainAndCannotHideCleanupFailure")):
             task = json.loads(json.dumps(original))
             suite = next(test for test in task["tests"] if test["class"].endswith(class_name))
             suite["methods"].remove(method)

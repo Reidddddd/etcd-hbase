@@ -381,6 +381,17 @@ J52_REQUIRED_TESTS = {
         'metadataOnlyDecisionSharesItsPreparedResultWindowRatherThanBlockingThePreviousRevision',
         'keyChangingAndTerminalDecisionsKeepTheirActualPublicationBounds',
     },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.CompactForwarderTest'): {
+        'logicalReceiptWaitsForPhysicalDrainAndCannotHideCleanupFailure',
+        'boundedCommandPreservesNegativeZeroAndPhysicalWithoutProtoUnknownFields',
+        'returnedOperationMustMatchInvocationRequestAuthorizationProfileRevisionAndTerminalStage',
+        'unknownSendOutcomeNeverAllocatesAnotherAttempt',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.CompactOwnerLaneTest'): {
+        'compactUsesItsOwnOperationReceiptAndNeverCreatesAnInvocationBinding',
+        'peerContextGroupHopAndEpochAreCheckedBeforeSelection',
+        'queuedCompactRechecksOwnerAndCancellationCannotDispatchIt',
+    },
     ('core', 'surefire', 'io.etcdhbase.core.commit.InvocationResultResolverTest'): {
         'resultQueryProtectionAcceptsTerminalRevisionAndSequence',
         'failedProducerDrainKeepsThePinAndSurfacesCleanupFailure',
@@ -610,6 +621,7 @@ J52_REQUIRED_TESTS = {
         'payloadReaderKeepsTheBaseLayoutAndRejectsInlineFences',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.CompactGatewayAuthorizationTest'): {
+        'forwardedCompactResolvesTheSessionAndRechecksUserAdminBeforeBothWrites',
         'missingAndInvalidTokensCannotCreateOperationsOrAdvanceControl',
         'revokedSessionIsRejectedBeforeCreatingAnOperation',
         'ordinaryUserCannotCompactEvenWhenPhysicalCollectionIsUnavailable',
@@ -669,6 +681,7 @@ J52_REQUIRED_TESTS = {
         'shutdownRejectsWaitersAndPreventsQueuedPollsFromStartingStorageWork',
     },
     ('server', 'failsafe', 'io.etcdhbase.server.J52PhysicalCompactIT'): {
+        'standbyForwardsCompactOverMtlsAndKeepsWaitingAcrossOwnerTakeoverInBothLayouts',
         'kvOnlyRuntimeCannotReportFullPhysicalCompletion',
         'eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts',
         'zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts',
@@ -676,6 +689,7 @@ J52_REQUIRED_TESTS = {
         'cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.CompactGatewayTest'): {
+        'nonOwnerForwardsOutsideTheLocalLaneAndWaitsForItsOwnReceipts',
         'emptyEncodedZeroRequestCanEnterTheRealOwnerLane',
         'realLaneRejectionReturnsAnErrorInsteadOfHanging',
         'dispatchedServiceScopeCannotSendSuccessAfterTheRpcScopeIsCancelled',
@@ -712,6 +726,7 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "cancelled-rpc-owner-process-death-and-logical-only-resume",
         "complete-kv-and-system-receipts-with-event-pin-blocking",
         "bounded-proof-prefix-and-canonical-result-directory",
+        "mtls-compact-forwarding-owner-takeover-and-drained-identity",
     }
     scenarios = task.get("scenarios", [])
     if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)

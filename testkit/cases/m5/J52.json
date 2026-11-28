@@ -37,7 +37,8 @@
     "cancelled-rpc-owner-process-death-and-logical-only-resume",
     "durable-system-domain-completion-and-drained-checkpoint",
     "complete-kv-and-system-receipts-with-event-pin-blocking",
-    "bounded-proof-prefix-and-canonical-result-directory"
+    "bounded-proof-prefix-and-canonical-result-directory",
+    "mtls-compact-forwarding-owner-takeover-and-drained-identity"
   ],
   "tests": [
     {
@@ -463,7 +464,8 @@
         "sessionRevokedBeforeSelectionCannotAdvanceControl",
         "cancellationRetainsUserBorrowUntilLateConnectionDrains",
         "cancellationRetainsUserBorrowUntilLatePermissionRpcDrains",
-        "rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity"
+        "rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity",
+        "forwardedCompactResolvesTheSessionAndRechecksUserAdminBeforeBothWrites"
       ]
     },
     {
@@ -529,7 +531,8 @@
         "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration",
         "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts",
         "eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts",
-        "kvOnlyRuntimeCannotReportFullPhysicalCompletion"
+        "kvOnlyRuntimeCannotReportFullPhysicalCompletion",
+        "standbyForwardsCompactOverMtlsAndKeepsWaitingAcrossOwnerTakeoverInBothLayouts"
       ]
     },
     {
@@ -551,7 +554,8 @@
         "repeatedCompactIsReportedAsCompactedRatherThanSucceeding",
         "futureCompactIsRejectedWithoutAdvancingTheBoundary",
         "missingOwnerFailsClosedWithoutAttemptingAControlWrite",
-        "cancelledRequestDoesNotSendAResponse"
+        "cancelledRequestDoesNotSendAResponse",
+        "nonOwnerForwardsOutsideTheLocalLaneAndWaitsForItsOwnReceipts"
       ]
     },
     {
@@ -613,6 +617,27 @@
       "methods": [
         "metadataOnlyDecisionSharesItsPreparedResultWindowRatherThanBlockingThePreviousRevision",
         "keyChangingAndTerminalDecisionsKeepTheirActualPublicationBounds"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.CompactForwarderTest",
+      "methods": [
+        "boundedCommandPreservesNegativeZeroAndPhysicalWithoutProtoUnknownFields",
+        "returnedOperationMustMatchInvocationRequestAuthorizationProfileRevisionAndTerminalStage",
+        "unknownSendOutcomeNeverAllocatesAnotherAttempt",
+        "logicalReceiptWaitsForPhysicalDrainAndCannotHideCleanupFailure"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.CompactOwnerLaneTest",
+      "methods": [
+        "compactUsesItsOwnOperationReceiptAndNeverCreatesAnInvocationBinding",
+        "peerContextGroupHopAndEpochAreCheckedBeforeSelection",
+        "queuedCompactRechecksOwnerAndCancellationCannotDispatchIt"
       ]
     }
   ]
