@@ -440,7 +440,7 @@ class M4LeaseRpcIT {
         LeaseCostAdmission.DEFAULT_LIMITS.maximumBindings(),
         LeaseCostAdmission.DEFAULT_LIMITS.maximumKeyBytes(),
         LeaseCostAdmission.DEFAULT_LIMITS.maximumRevokeCostBytes(), null, null,
-        M3RuntimeConfiguration.ActivationProfile.PUBLIC_TEST);
+        M3RuntimeConfiguration.ActivationProfile.PUBLIC_TEST, java.time.Duration.ofMinutes(30).toMillis());
   }
 
 
@@ -2680,7 +2680,7 @@ class M4LeaseRpcIT {
         base.readCacheEnabled(), base.m4LeaseApiEnabled(), base.leaseMinTtlSeconds(),
         base.leaseClockUncertaintyMs(), base.leaseClockMaxDriftPpm(), base.leaseMaximumBindings(),
         base.leaseMaximumKeyBytes(), base.leaseMaximumRevokeCostBytes(), instanceId, forwarding,
-        base.activationProfile());
+        base.activationProfile(), base.resultWindowRetentionMs());
   }
 
   private static Rpc.PutResponse putThrough(RuntimeServer server, String key, long expectedMemberId)

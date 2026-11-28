@@ -543,6 +543,8 @@ class J52PhysicalCompactIT {
       var tree = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(
           Files.readAllBytes(Path.of("..", "config", "examples", "m4", "activation.json")));
       tree.put("member_id", member);
+      // Keep the production gate, with an explicit shorter window for this bounded fixture.
+      tree.put("result_window_retention_ms", 1_000);
       return new io.etcdhbase.server.config.M3RuntimeConfigurationLoader(
           io.etcdhbase.server.config.M3RuntimeConfiguration.ActivationProfile.PUBLIC_TEST)
           .load(new java.io.ByteArrayInputStream(mapper.writeValueAsBytes(tree)));
