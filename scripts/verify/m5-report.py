@@ -482,6 +482,9 @@ J52_REQUIRED_TESTS = {
         'rejectsEventIndexWhenOnlyLeaseExpiryCapabilityIsPresent',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.J52HistoryCollectionIT'): {
+        'nativeAdmissionPreservesPinnedHistoryWhileRawVersionEvictionIgnoresPins',
+        'finiteTtlExpiresWallClockCellsAndImmediatelyHidesRevisionTimestampsInBothLayouts',
+        'unfencedLatePutCanReappearAfterItsDeleteMarkerIsCompacted',
         'activeReadPinPreventsDeletionUntilReleaseInBothLayouts',
         'enumeratesEveryKeyWithBucketLocalExclusiveResumePoints',
         'boundsKeyEnumerationToOneDurableBucketInBothLayouts',
@@ -727,6 +730,9 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "complete-kv-and-system-receipts-with-event-pin-blocking",
         "bounded-proof-prefix-and-canonical-result-directory",
         "mtls-compact-forwarding-owner-takeover-and-drained-identity",
+        "native-capacity-admission-and-raw-pinned-version-eviction",
+        "finite-ttl-wall-clock-and-revision-timestamp-expiry",
+        "actual-major-compaction-active-hfiles-and-late-put-guards",
     }
     scenarios = task.get("scenarios", [])
     if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)

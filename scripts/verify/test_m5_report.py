@@ -405,6 +405,21 @@ class M5J52ReportTest(unittest.TestCase):
         with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
             m5_report._validate_task(task, path, repo)
 
+    def test_retention_experiments_cannot_be_omitted(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for method in (
+                "nativeAdmissionPreservesPinnedHistoryWhileRawVersionEvictionIgnoresPins",
+                "finiteTtlExpiresWallClockCellsAndImmediatelyHidesRevisionTimestampsInBothLayouts",
+                "unfencedLatePutCanReappearAfterItsDeleteMarkerIsCompacted"):
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"] if test["class"].endswith("J52HistoryCollectionIT"))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method):
+                with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
+                    m5_report._validate_task(task, path, repo)
+
     def test_source_snapshot_preserves_the_first_porcelain_status_column(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

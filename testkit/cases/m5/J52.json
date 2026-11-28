@@ -38,7 +38,10 @@
     "durable-system-domain-completion-and-drained-checkpoint",
     "complete-kv-and-system-receipts-with-event-pin-blocking",
     "bounded-proof-prefix-and-canonical-result-directory",
-    "mtls-compact-forwarding-owner-takeover-and-drained-identity"
+    "mtls-compact-forwarding-owner-takeover-and-drained-identity",
+    "native-capacity-admission-and-raw-pinned-version-eviction",
+    "finite-ttl-wall-clock-and-revision-timestamp-expiry",
+    "actual-major-compaction-active-hfiles-and-late-put-guards"
   ],
   "tests": [
     {
@@ -231,7 +234,10 @@
         "doesNotEndEnumerationInsideAHighChurnKey",
         "resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder",
         "boundsKeyEnumerationToOneDurableBucketInBothLayouts",
-        "activeReadPinPreventsDeletionUntilReleaseInBothLayouts"
+        "activeReadPinPreventsDeletionUntilReleaseInBothLayouts",
+        "nativeAdmissionPreservesPinnedHistoryWhileRawVersionEvictionIgnoresPins",
+        "finiteTtlExpiresWallClockCellsAndImmediatelyHidesRevisionTimestampsInBothLayouts",
+        "unfencedLatePutCanReappearAfterItsDeleteMarkerIsCompacted"
       ]
     },
     {

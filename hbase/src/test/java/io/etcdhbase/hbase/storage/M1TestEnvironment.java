@@ -64,6 +64,10 @@ final class M1TestEnvironment implements AutoCloseable {
   /** Returns the provider-owned connection for fixture callers that borrow it. */
   AsyncConnection connection() { return connection; }
 
+  java.util.Map<String, Long> activeStoreFiles(StorageTableBinding binding) throws Exception {
+    return cluster.activeStoreFiles(binding.table(), binding.family());
+  }
+
   void create(StorageTableBinding binding, byte[][] splits) throws Exception {
     create(binding.table(), binding.descriptor(), splits);
   }

@@ -1,78 +1,90 @@
-# J52.1 保留参数契约与待验证项
+# J52.1 保留参数与真实 HBase 实验
 
 ## 1. 范围与状态
 
-本文供 J24.1/J25 历史布局选型与 J52 评审使用，记录保留参数的源码约束、descriptor 单元测试及尚缺的 HBase 实验。descriptor 是表和列族的配置描述；构造并校验它不涉及 HBase 读写。
+本文供 J24.1/J25 历史布局选型与 J52 评审使用，记录两种候选布局的保留配置、实际读写及 major compaction 结果。2026-11-28 已完成公开临时环境中的版本容量、TTL、删除标记和 active HFile 观测；当前交付仍待对应 head 的 CI 与正式 review。最终布局尚未选择，真实目标环境尚未验收。
 
-本次只交付参数契约回归，**J52.1 仍未完成**，也不选择最终历史布局。版本淘汰、TTL 到期、删除标记经过 compaction 后的行为与真实目标环境均未在本次实测。HBase compaction 指存储文件合并，与服务的逻辑 Compact 边界不同。
+实验使用项目锁定的 HBase `2.6.6-hadoop3`、JDK 21、一个 RegionServer 的独立进程 MiniCluster 和四个 salt bucket。临时环境采用 simple 身份；本实验不证明目标集群的 Kerberos、ADMIN 权限、DDL 策略或存储运维行为。HBase compaction 是存储文件合并，与服务的逻辑 Compact 边界不同。
 
-## 2. 源码约束
+## 2. 配置与生产约束
 
-以下为既有实现事实，不是本次新增的平台行为：
+[`StorageTableBinding`](../../hbase/src/main/java/io/etcdhbase/hbase/storage/StorageTableBinding.java) 的 HISTORY 将 revision 编入行键，NATIVE 将同一 key 的 revision 编为 Cell timestamp。NATIVE 的默认 `maxVersions=64`，其余布局默认 `1`；所有生产 binding 都要求 TTL 为 `FOREVER`。NATIVE binding 拒绝单版本，完整 materializer 另外要求版本配置为 `2..1024`。
 
-- [`StorageTableBinding`](../../hbase/src/main/java/io/etcdhbase/hbase/storage/StorageTableBinding.java) 的 `HISTORY` 布局将 revision 编入行键；`NATIVE` 布局使用同一行的 Cell 多版本。`descriptor()` 对 `NATIVE` 默认设置 `maxVersions=64`，其余布局为 `1`；TTL 使用 HBase 的 `FOREVER` 默认值。
-- `StorageTableBinding.validate()` 先核对表身份、列族、durability 与格式/profile 属性，再要求 TTL 为 `FOREVER`，并拒绝 `NATIVE` 的 `maxVersions < 2`。
-- [`HBaseMaterializationStore.open()`](../../hbase/src/main/java/io/etcdhbase/hbase/storage/HBaseMaterializationStore.java) 还单独限制 `NATIVE` 的版本配置为 `2..1024`。binding 层允许某个 descriptor 不等于完整启动或读写验证通过。
+[`HBaseMaterializationStore`](../../hbase/src/main/java/io/etcdhbase/hbase/storage/HBaseMaterializationStore.java) 在 NATIVE 物化前读取实际 metadata 版本数，达到配置容量时返回 `RESOURCE_LIMIT`，不会继续写入并依赖 HBase 自动淘汰旧历史。`64` 是每列物理版本容量，不能据此承诺固定的 revision 跨度或持续写入吞吐。
 
-`64` 是每列物理 Cell 版本数的默认配置，不是全局 revision 跨度，也不证明读 pin 可保留固定长度的历史。某个 key 的更新密度、版本配置、读取方式及 HBase 的实际保留行为都需要纳入选型实验。
+[`J52RetentionDescriptorTest`](../../hbase/src/test/java/io/etcdhbase/hbase/storage/J52RetentionDescriptorTest.java) 保留四项配置契约测试：拒绝有限 TTL、拒绝 NATIVE 单版本、核对 HISTORY 默认值，以及核对 NATIVE 默认值与 `128` 配置。拒绝用例只改变待测参数；此前移除对应生产校验的反向探针能使它们失败。descriptor 构造与单测均不替代以下真实 HBase 实验。
 
-## 3. Descriptor 单元测试
+## 3. 版本容量与持久读保护
 
-[`J52RetentionDescriptorTest`](../../hbase/src/test/java/io/etcdhbase/hbase/storage/J52RetentionDescriptorTest.java) 只执行 Java descriptor 构造与校验，不启动 MiniCluster。
+[`J52HistoryCollectionIT`](../../hbase/src/test/java/io/etcdhbase/hbase/storage/J52HistoryCollectionIT.java) 先写 revision 2，再通过生产 `ReadViewService` 和 `SnapshotPinManager` 注册持久读 pin。每次最终观测都核对相同 pin generation 的持久保护，并确认实验仍在原始一分钟 lease 内完成。
 
-**表 1 参数契约断言及证据边界**
+**表 1 同一 key 的版本容量结果**
 
-| 用例 | 断言 | 不证明的行为 |
+| 路径 | 实际写入与准入 | Flush 后 revision 2 | Major 后 revision 2 | 结论 |
+|---|---|---|---|---|
+| HISTORY 生产物化 | 70 个 revision，`maxVersions=1` | 保留 | 保留 | 每个 revision 单独成行，单 Cell 版本限制未淘汰这些行 |
+| NATIVE 生产物化 | 64 个版本；第 65 次写入被 `RESOURCE_LIMIT` 拒绝 | 保留 | 保留 | 生产容量保护阻止静默丢失 pinned 历史 |
+| NATIVE 隔离 raw Put | 在上述临时行上绕过 materializer，补到 70 个 metadata 版本 | 本次仍保留 | 已淘汰 | HBase 的版本保留不读取应用 pin，容量保护不可绕过 |
+
+raw Put 使用合成 metadata，只经原始 HBase `Get` 观测，不作为合法生产记录解码，也不声称生产入口成功写入了 70 个 NATIVE 版本。此次追加版本先进入另一个 HFile，因此 flush 后仍能精确读到旧文件中的版本；major compaction 合并后旧版本消失。不能把 flush 单独视为跨文件淘汰已完成。
+
+## 4. 有限 TTL 的实际行为
+
+隔离实验仅将有效 descriptor 的 TTL 改为 2 秒，并断言生产 `validate()` 拒绝该配置，再用测试设施显式创建实验表。两种布局均观察到：
+
+- `RevisionTimestamp.timestamp(2)` 对应的 Cell 立即不可见，因为逻辑 revision timestamp 不能用作墙钟 TTL。
+- 使用实际墙钟 timestamp 的探针先可见，随后到期不可见。
+- 已确认的 major compaction 后，两类过期探针仍不可见。
+
+一个人工 future timestamp 为 `Long.MAX_VALUE - 3` 的 anchor 使实验有非空输入和输出文件。它仅用于 fixture 观测，不属于业务时间、生产写入策略或 TTL 绕过方案。生产 TTL 校验保持不变。
+
+## 5. 删除标记与迟到写
+
+生产回收实验先确认旧 pin 阻止删除，释放并排空后精确删除 revision 2、3；逻辑墓碑 revision 4 与更新 revision 5、6 在实际 major compaction 前后都保留。使用原始 `Scan.setRaw(true)` 统计 HBase Delete marker：HISTORY 从 4 个降为 0，NATIVE 从 6 个降为 0。随后重放原生产 materializer 的迟到写，仍被 RETIRED guard 或当前 fence 拒绝，旧版本没有复活。
+
+独立 raw 表另做反例：精确删除 timestamp 1 的 Cell，确认 major compaction 已清除 Delete marker，再以相同 timestamp 迟到 Put。两种布局的 raw Cell 都重新可见。该反例故意不经过生产 fencing，说明 Delete marker 清除后仍须保留生产 guard；它不是生产写入入口的漏洞复现。
+
+## 6. Major Compaction 与空间观测
+
+[`HBaseCompactionProbe`](../../hbase/src/test/java/io/etcdhbase/hbase/storage/HBaseCompactionProbe.java) 先实际 flush 并取得非空输入，再调用 `AsyncAdmin.majorCompact()`。完成要求同时满足：原来有输入文件的 region 的 last-major timestamp 增长、当前 active StoreFile 集合与所有输入文件完全不相交且非空、compaction state 为 `NONE`。随后逐项核对读写语义；不以 `NONE` 或空查询单独证明完成。
+
+文件集合从 MiniCluster RegionServer 的实际 `HStore.getStorefiles()` 读取，排除已经 compact、尚待 archive 的旧输入文件；大小取 HStoreFile 的实际文件信息。该本地控制通道与既有 scanner 计数通道共用同步请求及 nonce，应答通过原子文件发布。相邻 scanner 取消回归确认远端 scanner 曾打开且已关闭。
+
+**表 2 本次 active HFile 字节观测**
+
+| 实验 | HISTORY：前 → 后（字节） | NATIVE：前 → 后（字节） |
 |---|---|---|
-| 有限 TTL | 从每种布局的有效 descriptor 仅将 TTL 改为 `60`，校验拒绝 | HBase 何时淘汰到期 Cell |
-| NATIVE 单版本 | 从有效 descriptor 仅将 `maxVersions` 改为 `1`，校验拒绝 | 真实历史读取或删除结果 |
-| HISTORY 默认值 | `maxVersions=1`、TTL 为 `FOREVER`，校验通过 | revision 行集合的完整性与长期保留 |
-| NATIVE 默认值与可配置性 | 默认 `64`、TTL 为 `FOREVER`；改为 `128` 后 binding 校验也通过 | 固定逻辑读窗口或完整运行时配置验收 |
+| 生产版本容量 | 19,541 → 19,575 | 16,603 → 16,637 |
+| Raw NATIVE 超容量 | 不适用 | 21,784 → 16,628 |
+| 有限 TTL 探针 | 14,592 → 9,677 | 14,496 → 9,629 |
+| 生产精确删除 | 5,941 → 5,819 | 5,647 → 5,495 |
 
-拒绝用例先校验原始 descriptor，再只修改待测参数，保留全部格式属性，避免因无关配置错误而误通过。临时移除生产代码的保留参数校验时，原始四项测试仍全部通过；修正后的 TTL 与单版本两项测试失败。该反向探针仅用于验证断言有效性，生产代码已恢复，未提交校验变更。
+注：这些数值是一次临时环境运行的 active StoreFile 大小，不是固定断言、HDFS 总占用或磁盘已归还字节。全部保留的版本实验中，文件元数据可使合并后大小略增。测试要求真实完成与正确读取，不要求每次字节都下降。
 
-测试以 Surefire 单测登记到 [`J52.json`](../../testkit/cases/m5/J52.json)，报告校验器要求该类及全部四个方法存在。清单遗漏类或任一方法的反向探针必须失败。
+## 7. 安全约束与剩余验收
 
-## 4. 安全约束与未验证风险
+本次证据支持以下约束：生产 TTL 保持 `FOREVER`；NATIVE 必须保留容量准入并评估高更新密度 key 的写入压力；回收先受逻辑边界和持久 pin 限制，再做精确删除及强读确认；永久 guard/fence 不能仅因 HBase Delete marker 已清除而删除。HISTORY 的 revision 行成本与 NATIVE 的容量背压仍须结合访问及恢复成本选型。
 
-逻辑边界、pin 和底层保留配置承担不同职责。TTL 为 `FOREVER` 与合适的版本配置是当前实现的配置要求；参数校验通过不足以证明读 pin 能阻止 HBase 自身的版本淘汰。NATIVE 配置容量是否满足承诺的历史读取，需要覆盖高更新密度 key、活跃 pin、flush 与 compaction 的实验，不能从默认 `64` 推出固定可读窗口。
+J52.2a–J52.2d 分别交付结果窗口、系统记录回执、完整等待和跨副本转发，状态与范围见[维护说明](../maintenance/j52-compaction-storage.md)。这些完成回执证明本次应回收内容的删除确认，不承诺 HFile 字节立即下降；本实验也没有把 HFile 等待接入 `physical=true`。
 
-HISTORY 按 revision 分行，单行版本默认值也不能单独证明历史完整性；仍需验证行集合、精确删除、基线保留及迟到写。现有双布局 KV 回收用例的范围见[维护说明](../maintenance/j52-compaction-storage.md)，不将其中的短期逻辑墓碑/精确删除检查解释为删除标记经过长期 compaction 后的存活证明。
+最终布局选择、真实目标环境的版本/配置/权限复测、长期混合负载、归档与 snapshot 保留成本、GC 对前台尾延迟的影响，均未由本次短期 MiniCluster 实验完成。目标环境记录与最终选型仍分别保留，不将 J52 整体标为验收完成。
 
-J52.2a–J52.2c 已实现结果查询保护、系统记录回执及完整等待组合，仍待相应版本的 CI 和正式 review；HBase 保留实验与真实目标验收不由这些回执证明，详见[设计 §6.1](../specs/2026-11-20-m5-auth-gc-lifecycle-design.md)及维护说明。HFile 空间收敛也不能由 descriptor 或删除确认断言推出。
+## 8. 验证入口
 
-**表 2 J52.1 仍需补充的实验**
-
-| 待验证项 | 所需证据 |
-|---|---|
-| NATIVE 版本容量 | 超出配置版本数的同一 key 更新，核对不同 revision 的可读性、活跃 pin 与 flush/compaction 前后结果 |
-| TTL 到期 | 隔离实验中观测有限 TTL 的实际过期行为，区分配置拒绝与底层淘汰 |
-| 删除标记 | 两布局下逻辑墓碑、HBase 删除标记、迟到写及 compaction 前后的精确读取结果 |
-| Compaction 与空间 | 实际触发与完成证据、HFile 空间变化；区分逻辑不可读、精确删除确认与磁盘归还 |
-| 目标环境 | 固定目标 HBase 版本、配置、权限及环境，复核上述结果后再形成选型结论 |
-
-## 5. 验证入口
-
-参数单测：
+定向实验及相邻 scanner 回归：
 
 ```sh
-scripts/dev/mvn21.sh -B -ntp -pl hbase -am \
-  -Dtest=J52RetentionDescriptorTest \
-  -Dsurefire.failIfNoSpecifiedTests=false test
+scripts/dev/mvn21.sh -q -pl hbase -am -Pm5-j52-public \
+  -Dtest=J52RetentionDescriptorTest -Dsurefire.failIfNoSpecifiedTests=false \
+  '-Dit.test=J52HistoryCollectionIT#nativeAdmissionPreservesPinnedHistoryWhileRawVersionEvictionIgnoresPins+finiteTtlExpiresWallClockCellsAndImmediatelyHidesRevisionTimestampsInBothLayouts+preservesPinnedBaselineTombstoneNewerWritesAndRetiredGuardsInBothLayouts+unfencedLatePutCanReappearAfterItsDeleteMarkerIsCompacted,M1StorageIT#cancelledPhysicalPageClosesTheObservedServerScannerBeforeLeaseExpiry' \
+  -Dfailsafe.failIfNoSpecifiedTests=false verify
 ```
 
-J52 清单与报告防遗漏检查：
+四个实验方法各自覆盖两种布局，相邻 scanner 回归独立执行。完整公共 J52 门禁交由当前 head/base 的 CI，不能将本地定向结果概括为全量通过：
 
 ```sh
 python3 scripts/verify/m5-report.py --validate-task J52
-python3 scripts/verify/test_m5_report.py
-```
-
-完整公共存储门禁入口如下；运行结果应以对应 head/base 的 CI 报告为准，不能仅因本文列出命令就视为已经执行：
-
-```sh
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify/test_m5_report.py
 scripts/verify/m5.sh --scope public --task J52 \
   --artifact-root .artifacts/m5/j52-retention
 ```
-
-本次新增四项参数单测与清单防遗漏检查的执行证据记录在 PR 中。完整 J52 门禁即使通过，也不替代表 2 的专门实验、最终布局选型或真实目标环境验收。

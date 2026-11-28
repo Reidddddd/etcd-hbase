@@ -79,6 +79,128 @@ class J52HistoryCollectionIT {
   @AfterAll static void stop() throws Exception { if (environment != null) environment.close(); }
 
   @Test
+  void nativeAdmissionPreservesPinnedHistoryWhileRawVersionEvictionIgnoresPins() throws Exception {
+    for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
+      verifyVersionRetention(layout);
+    }
+  }
+
+  private static void verifyVersionRetention(StorageTableBinding.Layout layout) throws Exception {
+    try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3));
+        var readerScope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
+      var group = group(layout, scope);
+      group.append(false, scope);
+      var views = new ReadViewService(group.control,
+          new ManifestCatalog(new HBaseManifestRepository(group.records)), group.pins, group.system.profileFingerprint());
+      long registeredAfter = System.nanoTime();
+      try (var read = await(views.open(OptionalLong.of(2), AUTHORIZATION, readerScope))) {
+        int lastRevision = layout == StorageTableBinding.Layout.NATIVE ? 65 : 71;
+        for (int revision = 3; revision <= lastRevision; revision++) group.append(false, scope);
+        if (layout == StorageTableBinding.Layout.NATIVE) {
+          var rejected = assertThrows(java.util.concurrent.ExecutionException.class, () -> group.append(false, scope));
+          assertEquals(BackendFailure.Category.RESOURCE_LIMIT,
+              assertInstanceOf(BackendFailure.class, rejected.getCause()).category());
+        }
+        boolean beforeFlush = hasExactMetadata(group, 2);
+        await(environment.connection().getAdmin().flush(group.primary.table()));
+        assertTrue(hasExactMetadata(group, 2));
+        var result = new HBaseCompactionProbe(environment).majorCompact(group.primary);
+        assertTrue(hasExactMetadata(group, 2));
+        assertTrue(hasExactMetadata(group, lastRevision));
+        assertDurablePin(group, read, scope);
+        assertTrue(System.nanoTime() - registeredAfter < TimeUnit.MILLISECONDS.toNanos(PIN_CONFIGURATION.leaseMillis()),
+            "the retention observation must finish inside the original durable pin lease");
+        System.out.printf("j52-retention layout=%s productionWrites=%d capacityRejected=%s oldBeforeFlush=%s "
+            + "oldAfterFlush=true oldAfterMajor=true durablePinActive=true majorConfirmed=true "
+            + "activeBytesBefore=%d activeBytesAfter=%d%n", layout, lastRevision - 1,
+            layout == StorageTableBinding.Layout.NATIVE, beforeFlush, result.before().bytes(), result.after().bytes());
+        if (layout == StorageTableBinding.Layout.NATIVE) verifyRawNativeEviction(group, read, registeredAfter, scope);
+      }
+    }
+  }
+
+  private static void verifyRawNativeEviction(Group group, io.etcdhbase.core.commit.PinnedReadView read,
+      long registeredAfter, RequestScope scope) throws Exception {
+    var binding = group.primary;
+    var table = environment.connection().getTable(binding.table());
+    byte[] row = binding.codec().encode(group.key, 1);
+    // Deliberately bypass production admission on this disposable row to isolate backend retention.
+    // Synthetic metadata is only inspected with raw HBase Get, never decoded as a production record.
+    for (int revision = 66; revision <= 71; revision++) {
+      await(table.put(new Put(row).addColumn(binding.family(), new byte[] {'m'},
+          RevisionTimestamp.timestamp(revision), new byte[] {(byte) revision})));
+    }
+    boolean beforeFlush = hasExactMetadata(group, 2);
+    await(environment.connection().getAdmin().flush(binding.table()));
+    boolean afterFlush = hasExactMetadata(group, 2);
+    var result = new HBaseCompactionProbe(environment).majorCompact(binding);
+    assertFalse(hasExactMetadata(group, 2));
+    assertTrue(hasExactMetadata(group, 71));
+    assertDurablePin(group, read, scope);
+    assertTrue(System.nanoTime() - registeredAfter < TimeUnit.MILLISECONDS.toNanos(PIN_CONFIGURATION.leaseMillis()));
+    System.out.printf("j52-raw-native maxVersions=64 totalVersions=70 admissionBypassed=true "
+        + "oldBeforeFlush=%s oldAfterFlush=%s oldAfterMajor=false durablePinActive=true "
+        + "majorConfirmed=true activeBytesBefore=%d activeBytesAfter=%d%n",
+        beforeFlush, afterFlush, result.before().bytes(), result.after().bytes());
+  }
+
+  private static void assertDurablePin(Group group, io.etcdhbase.core.commit.PinnedReadView read,
+      RequestScope scope) throws Exception {
+    assertTrue(read.isOpen());
+    assertTrue(await(group.pins.readBoundary(scope)).protections().stream().anyMatch(
+        protection -> protection.requiredRevision() == 2 && protection.generation() == read.view().pinGeneration()));
+  }
+
+  private static boolean hasExactMetadata(Group group, long revision) throws Exception {
+    var binding = group.primary;
+    byte[] row = binding.codec().encode(group.key, binding.layout() == StorageTableBinding.Layout.NATIVE ? 1 : revision);
+    var get = new Get(row).addColumn(binding.family(), new byte[] {'m'}).readAllVersions();
+    if (binding.layout() == StorageTableBinding.Layout.NATIVE) {
+      long timestamp = RevisionTimestamp.timestamp(revision);
+      get.setTimeRange(timestamp, timestamp + 1);
+    }
+    return !await(environment.connection().getTable(binding.table()).get(get)).isEmpty();
+  }
+
+  @Test
+  void finiteTtlExpiresWallClockCellsAndImmediatelyHidesRevisionTimestampsInBothLayouts() throws Exception {
+    for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
+      var binding = new StorageTableBinding(TableName.valueOf("j52_ttl_" + UUID.randomUUID().toString().replace("-", "")),
+          new byte[] {'d'}, layout, SALT);
+      var descriptor = binding.descriptor();
+      var finite = TableDescriptorBuilder.newBuilder(descriptor).modifyColumnFamily(
+          ColumnFamilyDescriptorBuilder.newBuilder(descriptor.getColumnFamily(binding.family())).setTimeToLive(2).build())
+          .build();
+      assertThrows(IllegalArgumentException.class, () -> binding.validate(finite));
+      environment.create(binding.table(), finite, SALT.splitKeys().toArray(byte[][]::new));
+      var table = environment.connection().getTable(binding.table());
+      byte[] revisionRow = binding.codec().encode(ByteKey.copyOf(new byte[] {1}), 2);
+      byte[] wallRow = binding.codec().encode(ByteKey.copyOf(new byte[] {2}), 2);
+      byte[] value = {'v'};
+      await(table.put(new Put(revisionRow).addColumn(binding.family(), value, RevisionTimestamp.timestamp(2), new byte[] {1})));
+      await(table.put(new Put(wallRow).addColumn(binding.family(), value, System.currentTimeMillis(), new byte[] {2})));
+      assertTrue(await(table.get(new Get(revisionRow).addFamily(binding.family()))).isEmpty());
+      assertFalse(await(table.get(new Get(wallRow).addFamily(binding.family()))).isEmpty());
+      await(environment.connection().getAdmin().flush(binding.table()));
+      long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+      while (!await(table.get(new Get(wallRow).addFamily(binding.family()))).isEmpty()) {
+        assertTrue(System.nanoTime() < deadline, "the wall-clock probe did not expire");
+        Thread.sleep(20);
+      }
+      // A future-dated fixture anchor keeps nonempty input/output files without changing the probes.
+      byte[] anchor = binding.codec().encode(ByteKey.copyOf(new byte[] {3}), 2);
+      await(table.put(new Put(anchor).addColumn(binding.family(), value, Long.MAX_VALUE - 3, new byte[] {3})));
+      var result = new HBaseCompactionProbe(environment).majorCompact(binding);
+      assertTrue(await(table.get(new Get(revisionRow).addFamily(binding.family()))).isEmpty());
+      assertTrue(await(table.get(new Get(wallRow).addFamily(binding.family()))).isEmpty());
+      assertFalse(await(table.get(new Get(anchor).addFamily(binding.family()))).isEmpty());
+      System.out.printf("j52-ttl layout=%s ttlSeconds=2 revisionTimestampImmediatelyExpired=true "
+          + "wallClockExpired=true majorConfirmed=true activeBytesBefore=%d activeBytesAfter=%d%n",
+          layout, result.before().bytes(), result.after().bytes());
+    }
+  }
+
+  @Test
   void activeReadPinPreventsDeletionUntilReleaseInBothLayouts() throws Exception {
     for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
       collectBeforeAndAfterReadPinRelease(layout);
@@ -259,35 +381,7 @@ class J52HistoryCollectionIT {
       try (var scope = RequestScope.withTimeout(Duration.ofMinutes(3));
           var readerScope = RequestScope.withTimeout(Duration.ofMinutes(3))) {
         var group = group(layout, scope);
-        var first = group.append(false, scope);
-        group.append(false, scope);
-        group.append(true, scope);
-        group.append(false, scope);
-        var views = new ReadViewService(group.control,
-            new ManifestCatalog(new HBaseManifestRepository(group.records)), group.pins, group.system.profileFingerprint());
-        var oldRead = await(views.open(OptionalLong.of(2), AUTHORIZATION, readerScope));
-        group.compact(4, scope);
-        var collector = await(HBaseHistoryCollector.open(environment.factory(), environment.identity(),
-            group.system, group.primary, group.current, PIN_CONFIGURATION, scope));
-        var coordinator = new GcCoordinator(group.control, group.compactions, group.pins, Clock.systemUTC());
-        var protectedPermit = await(coordinator.authorizeHistory(OWNER, scope));
-        assertEquals(2, protectedPermit.safeRevision());
-        assertEquals(0, await(collector.collectKey(protectedPermit, group.key, 0, 1, scope)).deletedVersions());
-        assertArrayEquals(new byte[] {2}, await(environment.store(group.primary, scope)
-            .get(group.key, 2, ReadProjection.FULL)).orElseThrow().value().orElseThrow());
-        oldRead.close();
-        await(oldRead.termination().toCompletableFuture());
-        var permit = await(coordinator.authorizeHistory(OWNER, scope));
-        assertEquals(4, permit.safeRevision());
-        int deleted = 0;
-        long after = 0;
-        HBaseHistoryCollector.Page page;
-        do {
-          page = await(collector.collectKey(permit, group.key, after, 1, scope));
-          deleted += page.deletedVersions();
-          after = page.lastRevision();
-        } while (!page.exhausted());
-        assertEquals(2, deleted);
+        var collected = collectAfterReadPinRelease(group, scope, readerScope);
         var reader = environment.store(group.primary, scope);
         assertTrue(await(reader.get(group.key, 3, ReadProjection.FULL)).isEmpty());
         assertEquals(StorageMetadata.State.TOMBSTONE,
@@ -295,28 +389,117 @@ class J52HistoryCollectionIT {
         assertArrayEquals(new byte[] {5}, await(reader.get(group.key, 5, ReadProjection.FULL))
             .orElseThrow().value().orElseThrow());
         group.append(false, scope);
-        if (layout == StorageTableBinding.Layout.HISTORY) {
-          assertThrows(Exception.class, () -> await(group.materializer.applySelected(decision(first), first, scope)));
-          Result retired = await(environment.connection().getTable(group.primary.table()).get(
-              new Get(group.primary.codec().encode(group.key, 2)).addFamily(group.primary.family())));
-          assertNull(retired.getValue(group.primary.family(), new byte[] {'m'}));
-          assertNull(retired.getValue(group.primary.family(), new byte[] {'v'}));
-          assertEquals(RowFenceMessages.State.RETIRED, RowFenceMessages.decode(
-              retired.getValue(group.primary.family(), new byte[] {'g'})).state());
-        } else {
-          assertEquals(io.etcdhbase.core.commit.MaterializationStore.ApplyResult.CURRENT_SUPERSEDED,
-              await(group.materializer.applySelected(decision(first), first, scope)));
-          Result exact = await(environment.connection().getTable(group.primary.table()).get(
-              new Get(group.primary.codec().encode(group.key, 1)).setTimeRange(1, 3)
-                  .readVersions(64).addFamily(group.primary.family())));
-          assertTrue(exact.isEmpty(), "m/v/f must all be deleted at the old timestamps");
-        }
+        long deleteMarkersBefore = deleteMarkers(group.primary);
+        assertTrue(deleteMarkersBefore > 0, "real HBase Delete markers must precede major compaction");
+        var major = new HBaseCompactionProbe(environment).majorCompact(group.primary);
+        assertEquals(StorageMetadata.State.TOMBSTONE,
+            await(reader.get(group.key, 4, ReadProjection.FULL)).orElseThrow().metadata().state());
+        assertTrue(await(reader.get(group.key, 3, ReadProjection.FULL)).isEmpty());
+        assertArrayEquals(new byte[] {5}, await(reader.get(group.key, 5, ReadProjection.FULL))
+            .orElseThrow().value().orElseThrow());
+        long deleteMarkersAfter = deleteMarkers(group.primary);
+        assertEquals(0, deleteMarkersAfter);
+        assertLateMaterializerFenced(group, collected.first(), scope);
         assertArrayEquals(new byte[] {6}, await(reader.get(group.key, 6, ReadProjection.FULL))
             .orElseThrow().value().orElseThrow());
-        assertEquals(0, await(collector.collectKey(permit, group.key, 0, 64, scope)).deletedVersions());
-        System.out.printf("j52-history layout=%s pinned=true tombstone=true exactDelete=true lateWriterFenced=true%n", layout);
+        assertEquals(0, await(collected.collector().collectKey(collected.permit(), group.key, 0, 64, scope)).deletedVersions());
+        System.out.printf("j52-history layout=%s pinned=true tombstone=true exactDelete=true lateWriterFenced=true "
+            + "majorConfirmed=true deleteMarkersBefore=%d deleteMarkersAfter=%d activeBytesBefore=%d activeBytesAfter=%d%n",
+            layout, deleteMarkersBefore, deleteMarkersAfter, major.before().bytes(), major.after().bytes());
       }
     }
+  }
+
+  private record CollectedHistory(PreparedCandidate first,
+      io.etcdhbase.core.commit.HistoryGcPermit permit, HBaseHistoryCollector collector) {}
+
+  private static CollectedHistory collectAfterReadPinRelease(Group group, RequestScope scope,
+      RequestScope readerScope) throws Exception {
+    var first = group.append(false, scope);
+    group.append(false, scope);
+    group.append(true, scope);
+    group.append(false, scope);
+    var views = new ReadViewService(group.control,
+        new ManifestCatalog(new HBaseManifestRepository(group.records)), group.pins, group.system.profileFingerprint());
+    var oldRead = await(views.open(OptionalLong.of(2), AUTHORIZATION, readerScope));
+    group.compact(4, scope);
+    var collector = await(HBaseHistoryCollector.open(environment.factory(), environment.identity(),
+        group.system, group.primary, group.current, PIN_CONFIGURATION, scope));
+    var coordinator = new GcCoordinator(group.control, group.compactions, group.pins, Clock.systemUTC());
+    var protectedPermit = await(coordinator.authorizeHistory(OWNER, scope));
+    assertEquals(2, protectedPermit.safeRevision());
+    assertEquals(0, await(collector.collectKey(protectedPermit, group.key, 0, 1, scope)).deletedVersions());
+    assertArrayEquals(new byte[] {2}, await(environment.store(group.primary, scope)
+        .get(group.key, 2, ReadProjection.FULL)).orElseThrow().value().orElseThrow());
+    oldRead.close();
+    await(oldRead.termination().toCompletableFuture());
+    var permit = await(coordinator.authorizeHistory(OWNER, scope));
+    assertEquals(4, permit.safeRevision());
+    int deleted = 0;
+    long after = 0;
+    HBaseHistoryCollector.Page page;
+    do {
+      page = await(collector.collectKey(permit, group.key, after, 1, scope));
+      deleted += page.deletedVersions();
+      after = page.lastRevision();
+    } while (!page.exhausted());
+    assertEquals(2, deleted);
+    return new CollectedHistory(first, permit, collector);
+  }
+
+  private static void assertLateMaterializerFenced(Group group, PreparedCandidate first,
+      RequestScope scope) throws Exception {
+    if (group.primary.layout() == StorageTableBinding.Layout.HISTORY) {
+      var rejected = assertThrows(java.util.concurrent.ExecutionException.class,
+          () -> await(group.materializer.applySelected(decision(first), first, scope)));
+      assertEquals("retired row guard permanently rejects late materialization",
+          assertInstanceOf(IllegalStateException.class, rejected.getCause()).getMessage());
+      Result retired = await(environment.connection().getTable(group.primary.table()).get(
+          new Get(group.primary.codec().encode(group.key, 2)).addFamily(group.primary.family())));
+      assertNull(retired.getValue(group.primary.family(), new byte[] {'m'}));
+      assertNull(retired.getValue(group.primary.family(), new byte[] {'v'}));
+      assertEquals(RowFenceMessages.State.RETIRED, RowFenceMessages.decode(
+          retired.getValue(group.primary.family(), new byte[] {'g'})).state());
+    } else {
+      assertEquals(io.etcdhbase.core.commit.MaterializationStore.ApplyResult.CURRENT_SUPERSEDED,
+          await(group.materializer.applySelected(decision(first), first, scope)));
+      Result exact = await(environment.connection().getTable(group.primary.table()).get(
+          new Get(group.primary.codec().encode(group.key, 1)).setTimeRange(1, 3)
+              .readVersions(64).addFamily(group.primary.family())));
+      assertTrue(exact.isEmpty(), "m/v/f must all be deleted at the old timestamps");
+    }
+  }
+
+  @Test
+  void unfencedLatePutCanReappearAfterItsDeleteMarkerIsCompacted() throws Exception {
+    for (var layout : List.of(StorageTableBinding.Layout.HISTORY, StorageTableBinding.Layout.NATIVE)) {
+      var binding = new StorageTableBinding(TableName.valueOf("j52_raw_" + UUID.randomUUID().toString().replace("-", "")),
+          new byte[] {'d'}, layout, SALT);
+      environment.create(binding, SALT.splitKeys().toArray(byte[][]::new));
+      var table = environment.connection().getTable(binding.table());
+      byte[] row = binding.codec().encode(ByteKey.copyOf(new byte[] {1}), 2);
+      byte[] anchor = binding.codec().encode(ByteKey.copyOf(new byte[] {2}), 3);
+      byte[] value = {'v'};
+      await(table.put(new Put(row).addColumn(binding.family(), value, 1, new byte[] {1})));
+      await(table.put(new Put(anchor).addColumn(binding.family(), value, 2, new byte[] {2})));
+      await(table.delete(new org.apache.hadoop.hbase.client.Delete(row).addColumn(binding.family(), value, 1)));
+      assertTrue(await(table.get(new Get(row).addFamily(binding.family()))).isEmpty());
+      assertTrue(deleteMarkers(binding) > 0);
+      new HBaseCompactionProbe(environment).majorCompact(binding);
+      assertEquals(0, deleteMarkers(binding));
+      assertTrue(await(table.get(new Get(row).addFamily(binding.family()))).isEmpty());
+      // This deliberately bypasses application fencing to isolate native Delete-marker retention.
+      await(table.put(new Put(row).addColumn(binding.family(), value, 1, new byte[] {1})));
+      assertArrayEquals(new byte[] {1}, await(table.get(new Get(row))).getValue(binding.family(), value));
+      System.out.printf("j52-raw-late-put layout=%s deleteMarkerCompacted=true rawPutReappeared=true%n", layout);
+    }
+  }
+
+  private static long deleteMarkers(StorageTableBinding binding) throws Exception {
+    var rows = await(environment.connection().getTable(binding.table()).scanAll(
+        new org.apache.hadoop.hbase.client.Scan().setRaw(true).readAllVersions().addFamily(binding.family())));
+    return rows.stream().flatMap(row -> java.util.Arrays.stream(row.rawCells()))
+        .filter(org.apache.hadoop.hbase.CellUtil::isDelete).count();
   }
 
   @Test
