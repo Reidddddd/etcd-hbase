@@ -905,7 +905,9 @@ public final class M3TableGroupRuntime implements AutoCloseable {
         stores.records().requireGcFencing();
         var gcCycle = new GcCheckpointCycle(plan.source().tableGroupId(), owner::currentToken, stores.control(),
             new io.etcdhbase.core.commit.GcCoordinator(stores.control(), compactions, stores.pins(), Clock.systemUTC()),
-            eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records()),
+            eventRetention, authorization, new io.etcdhbase.hbase.storage.HBaseSystemRecordClosure(stores.records(),
+                new io.etcdhbase.hbase.storage.ResultWindowRetention(
+                    Duration.ofMillis(activation.resultWindowRetentionMs()), lease.time())),
             new io.etcdhbase.core.commit.GcCheckpointStore(stores.records()), budgets, GcCheckpointCycle.MEMORY,
             plan.system().saltProfile().bucketCount(), SYSTEM_GC_PAGE_RECORDS, business.metrics());
         pending.installGcWorker(new GcCheckpointWorker(pending.worker, pending.timers(),

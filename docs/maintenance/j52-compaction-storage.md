@@ -45,10 +45,18 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 `InvocationResultResolver` 在读取可回收的决定、manifest 或结果前，先通过同一 `SnapshotPinManager` 注册持久查询保护，再重读绑定。保护使用独立的 `baseRevision + 1` 和 `baseSequence + 1` 下界（到达计数上限时取 `Long.MAX_VALUE`），阻止 GC 在查询期间关闭该窗口；不引入另一套 pin 格式。注册与 GC floor 推进竞争同一分片 CAS，GC 先推进时，低于任一 floor 的新查询即不能进入可保护窗口，即使后台尚未写入 `WINDOW_CLOSED`，也拒绝读取旧结果。
 
 不增加 KV revision 的辅助提交，其 decision 也按 `baseRevision + 1` 判断结果窗口，与 invocation、manifest 和 result 保持一致；计数上限饱和为 `Long.MAX_VALUE`。该保守下界避免将仍处于合法结果窗口的 decision 计入前一 revision 的待回收范围，不提前关闭查询窗口。真正增加 KV revision 的 decision 仍使用其发布 revision。
+结果查询的 deadline 必须严格短于配置的 `pin_lease_ms`；过长或无 deadline 的查询在结果读取前返回 `UNAVAILABLE`，不会在没有续租保证时继续读取。注册 floor 已先推进或窗口已关闭时，返回 `FAILED_PRECONDITION: invocation result is no longer queryable`；缺页和损坏仍属于内部错误。请求不可把这类查询失败解释为原写未执行。
 
 完整结果加载到受预算约束的内存后，查询用 pin 完成 CAS 核实该代次仍有效，再交付字节；已过期或被撤销的查询不能返回成功。此后传输只依赖内存，不再持有存储视图。失败查询的保护归请求 scope 所有；取消后等实际后端 producer 排空才释放，不能以可取消 future 已结束代替物理排空。
 
 `HBaseSystemRecordClosure` 的 INVOCATION 页调用 `InvocationWindowCloser`，先核验许可、边界及确切保护，再以完整绑定值、墓碑缺失和当前 `gc:g` 的同行条件关闭结果窗口。仍处于 PREPARING 或无法确认提交结果的绑定继续保留；已收尾但仍停在 SEALED 的绑定先从实际决定及 manifest 确认结果。关闭保留摘要及不可重放绑定，未知 ACK 可在下一次扫描重读确认。该页只推进窗口，RESULT 页另行通过引用闭包回收正文；仍被 manifest 或其他目录引用的结果继续保留。
+
+最短结果保留期由激活配置 `result_window_retention_ms` 指定，默认 `1800000`（30 分钟），允许 1 毫秒至 30 天。首次满足回收的逻辑边界、终态与引用条件后，GC 先以同行 fence 和完整绑定 CAS 在 `gc:w` 登记版本化的保留时长及 `notBefore`，本轮不关窗。期限从该次健康可信时间的上界开始计算，因此它是从首次回收准入观察起至少保留一段时间，不承诺从业务响应恰好 30 分钟后立即删除。旧记录没有证据时同样先获得完整新窗口，不把 revision/sequence floor 当作时间证据。
+
+后续必须取得健康可信时间，且下界达到持久 `notBefore`，才能在比较同一窗口证据、完整绑定和当前 `gc:g` 的同行 CAS 中关闭。时钟不可信、时间溢出或证据缺失都不能作为已到期；损坏证据使该页失败。增加配置时长会先持久扩展不足的旧证据；减少配置不会缩短已声明窗口。生产复用 Lease 的有界可信时间源；未装配可信时间源的独立 closure 不自动关窗。
+
+完整物理回收等待必须包含结果保留窗口，故 `physical=true` 可能等待 30 分钟或更久；到达请求 deadline 返回超时，后台按原操作继续，不能为了及时回复而提前回收结果。这里不将等待结束称为 HFile 磁盘空间归还。窗口证据写在既有单版本、FOREVER 的维护 family 内；旧维护实现拒绝新增列，不支持混跑或直接回退 writer，受控迁移仍遵循第 4 节要求。
+
 
 退休用同一 `CheckAndMutate(RowMutations)` 比较完整旧值和墓碑缺失，移除旧 value，并保留 `r={0}` guard 与严格编码的 `t` 墓碑。两者使用保留的内部 timestamp `Long.MAX_VALUE - 1`，使迟到的旧 absent-CAS 不能让记录复活；它不是 KV revision 或应用墙钟。目标 HBase 的 future timestamp 策略必须允许该保留值；拒绝时退休失败，不声明已删除。MiniCluster 覆盖此协议，真实目标环境的 timestamp 配置尚未验收。
 
