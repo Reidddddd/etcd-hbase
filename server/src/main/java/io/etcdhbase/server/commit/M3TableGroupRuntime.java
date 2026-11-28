@@ -79,9 +79,7 @@ import java.util.function.LongFunction;
 /** Owns the local KV runtime for one validated table group; the caller owns its HBase factory. */
 public final class M3TableGroupRuntime implements AutoCloseable {
   /** One bounded GC page; the worker loops shards rather than enlarging a single page. */
-  // Each system record independently rechecks authority and proves its live references.
-  // Smaller pages checkpoint progress between those proofs under concurrent publication.
-  private static final int SYSTEM_GC_PAGE_RECORDS = 8;
+  private static final int SYSTEM_GC_PAGE_RECORDS = 64;
   private static final long GC_TIMEOUT_MILLIS = 30_000;
   private static final BudgetManager.Reservation REQUEST_MEMORY =
       M3MemoryReservations.REQUEST;

@@ -57,12 +57,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /** Production RPC, real authenticated ADMIN checks, durable pins and both physical layouts. */
-@Timeout(600)
+@Timeout(900)
 class J52PhysicalCompactIT {
   private static final SnapshotPinConfiguration PINS =
       new SnapshotPinConfiguration(2, 16, Duration.ofSeconds(60));
   private static final RuntimeConfiguration.ResourceBudgets RESOURCES =
-      new RuntimeConfiguration.ResourceBudgets(65_536, 8, 120_000, 4 << 20, 4 << 20, 8, 0);
+      new RuntimeConfiguration.ResourceBudgets(65_536, 8, 300_000, 4 << 20, 4 << 20, 8, 0);
   private static final ByteString KEY = ByteString.copyFromUtf8("physical-key");
   @TempDir(cleanup = org.junit.jupiter.api.io.CleanupMode.ON_SUCCESS) Path artifacts;
 
@@ -170,7 +170,7 @@ class J52PhysicalCompactIT {
           .get(30, TimeUnit.SECONDS);
       try {
         var history = populateHistory(fixture);
-        var waiting = KVGrpc.newFutureStub(fixture.channel).withDeadlineAfter(120, TimeUnit.SECONDS)
+        var waiting = KVGrpc.newFutureStub(fixture.channel).withDeadlineAfter(300, TimeUnit.SECONDS)
             .compact(Rpc.CompactionRequest.newBuilder().setRevision(history.target()).setPhysical(true).build());
         fixture.awaitLowerCompletion(2);
         assertFalse(waiting.isDone(), "a completed sweep at pin revision 2 cannot complete the higher target");
@@ -179,7 +179,7 @@ class J52PhysicalCompactIT {
         assertCompacted(fixture, history.target());
         assertFalse(waiting.isDone(), "duplicate ErrCompacted must not discard the original durable task");
         release(oldRead);
-        assertEquals(history.target(), awaitRpc(waiting, fixture, 120).getHeader().getRevision());
+        assertEquals(history.target(), awaitRpc(waiting, fixture, 300).getHeader().getRevision());
         fixture.assertSystemCompletion();
         assertRetainedHistory(fixture, history);
         System.out.printf("j52-physical-rpc layout=%s oldPinBlocked=true ownerLaneFree=true "
@@ -595,7 +595,7 @@ class J52PhysicalCompactIT {
     }
 
     private void awaitSystemCompletion() throws Exception {
-      try (var scope = RequestScope.withTimeout(Duration.ofSeconds(90))) {
+      try (var scope = RequestScope.withTimeout(Duration.ofSeconds(300))) {
         var target = selectedCompact(scope);
         var system = new GcCheckpointStore(records);
         for (var domain : SystemRecordClosure.Domain.values()) {

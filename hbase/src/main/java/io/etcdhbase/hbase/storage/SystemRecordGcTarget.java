@@ -33,7 +33,11 @@ record SystemRecordGcTarget(TransactionId transaction, long revision, long seque
       case DECISION -> {
         var decision = CommitDecisionMessages.decode(value);
         requireSequenceIdentity(entry.identity(), decision.sequence());
-        yield new SystemRecordGcTarget(decision.transactionId(), decision.revision(), decision.sequence());
+        // Metadata-only decisions stay in the same query window as their invocation/result.
+        // Their published KV revision is the base, while prepared records use base + 1.
+        long revision = decision.containsKeyChanges() || decision.revision() == Long.MAX_VALUE
+            ? decision.revision() : decision.revision() + 1;
+        yield new SystemRecordGcTarget(decision.transactionId(), revision, decision.sequence());
       }
       case EVENT_REVISION_INDEX -> {
         var decision = EventRevisionIndexMessages.decode(value).decision();

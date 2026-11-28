@@ -16,7 +16,8 @@
     }
   ],
   "backend_adapters": [
-    "minicluster-simple"
+    "minicluster-simple",
+    "minicluster-kerberos"
   ],
   "layouts": [
     "HISTORY",
@@ -34,7 +35,9 @@
     "durable-kv-bucket-version-progress-and-target-completion",
     "physical-rpc-old-pin-owner-lane-and-exact-delete",
     "cancelled-rpc-owner-process-death-and-logical-only-resume",
-    "durable-system-domain-completion-and-drained-checkpoint"
+    "durable-system-domain-completion-and-drained-checkpoint",
+    "complete-kv-and-system-receipts-with-event-pin-blocking",
+    "bounded-proof-prefix-and-canonical-result-directory"
   ],
   "tests": [
     {
@@ -303,7 +306,12 @@
         "newerManifestPagesUseRootOrPermanentInvocationBoundsWithoutBlockingOldCompletion",
         "exactRootProtectionCountsAsPendingEvenAboveNumericFloors",
         "changedRetirementOutcomeRemainsPending",
-        "terminalPreparedCountersRemainAtTheNonRetireableUpperBound"
+        "terminalPreparedCountersRemainAtTheNonRetireableUpperBound",
+        "metadataOnlyDecisionStaysOutsideThePreviousWindowAndCollectsAfterItsReferencesDrain",
+        "proofBudgetEndsAtTheCompletedPrefixAndTheNextPageRetriesTheUnprovedRecord",
+        "anUnprovableFirstRecordStillFailsRatherThanPublishingANonadvancingCursor",
+        "malformedRecordAfterACompletedPrefixStillAbortsThePage",
+        "resultPageChecksOnlyItsCanonicalDirectoryAndRejectsDifferentOrMalformedPreparations"
       ]
     },
     {
@@ -596,6 +604,15 @@
       "methods": [
         "completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain",
         "cleanupExecutorRejectionStillWaitsForPhysicalProducerDrain"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.SystemRecordGcTargetTest",
+      "methods": [
+        "metadataOnlyDecisionSharesItsPreparedResultWindowRatherThanBlockingThePreviousRevision",
+        "keyChangingAndTerminalDecisionsKeepTheirActualPublicationBounds"
       ]
     }
   ]

@@ -377,6 +377,10 @@ def _validate_j51(task: dict[str, object], repo: Path) -> None:
 
 
 J52_REQUIRED_TESTS = {
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.SystemRecordGcTargetTest'): {
+        'metadataOnlyDecisionSharesItsPreparedResultWindowRatherThanBlockingThePreviousRevision',
+        'keyChangingAndTerminalDecisionsKeepTheirActualPublicationBounds',
+    },
     ('core', 'surefire', 'io.etcdhbase.core.commit.InvocationResultResolverTest'): {
         'resultQueryProtectionAcceptsTerminalRevisionAndSequence',
         'failedProducerDrainKeepsThePinAndSurfacesCleanupFailure',
@@ -499,6 +503,11 @@ J52_REQUIRED_TESTS = {
         'publicStoreApiCannotBypassTheClosureDecision',
     },
     ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.HBaseSystemRecordClosureTest'): {
+        'resultPageChecksOnlyItsCanonicalDirectoryAndRejectsDifferentOrMalformedPreparations',
+        'proofBudgetEndsAtTheCompletedPrefixAndTheNextPageRetriesTheUnprovedRecord',
+        'anUnprovableFirstRecordStillFailsRatherThanPublishingANonadvancingCursor',
+        'malformedRecordAfterACompletedPrefixStillAbortsThePage',
+        'metadataOnlyDecisionStaysOutsideThePreviousWindowAndCollectsAfterItsReferencesDrain',
         'newerManifestPagesUseRootOrPermanentInvocationBoundsWithoutBlockingOldCompletion',
         'exactRootProtectionCountsAsPendingEvenAboveNumericFloors',
         'changedRetirementOutcomeRemainsPending',
@@ -688,7 +697,7 @@ J52_REQUIRED_TESTS = {
 
 
 def _validate_j52(task: dict[str, object], repo: Path) -> None:
-    if task.get("backend_adapters") != ["minicluster-simple"] or task.get("layouts") != ["HISTORY", "NATIVE"]:
+    if task.get("backend_adapters") != ["minicluster-simple", "minicluster-kerberos"] or task.get("layouts") != ["HISTORY", "NATIVE"]:
         raise ReportError("J52 storage gate must cover both real MiniCluster layouts")
     expected_scenarios = {
         "logical-selection-and-unknown-outcome", "independent-pin-floors",
@@ -701,6 +710,8 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "durable-kv-bucket-version-progress-and-target-completion",
         "physical-rpc-old-pin-owner-lane-and-exact-delete",
         "cancelled-rpc-owner-process-death-and-logical-only-resume",
+        "complete-kv-and-system-receipts-with-event-pin-blocking",
+        "bounded-proof-prefix-and-canonical-result-directory",
     }
     scenarios = task.get("scenarios", [])
     if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)
