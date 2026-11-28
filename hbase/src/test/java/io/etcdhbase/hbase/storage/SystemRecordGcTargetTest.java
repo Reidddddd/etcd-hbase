@@ -1,6 +1,6 @@
 package io.etcdhbase.hbase.storage;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.commit.CommitDecision;
