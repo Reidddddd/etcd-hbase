@@ -54,6 +54,57 @@ final class HBaseSystemRecordGcMutations {
         .thenCompose(ignored -> retireValue(type, identity, expected, permit, reason, scope));
   }
 
+  CompletableFuture<Boolean> persistInvocationWindowEvidence(ByteKey identity, ByteKey expected,
+      Optional<ByteKey> previousEvidence, ByteKey evidence, Permit permit, RequestScope scope) {
+    InvocationWindowEvidence.decode(evidence);
+    byte[] row = binding.row(SystemRecordType.INVOCATION, identity);
+    var put = new Put(row).setDurability(Durability.SYNC_WAL).addColumn(
+        SystemTableBinding.GC_FENCE_FAMILY, InvocationWindowEvidence.COLUMN,
+        InvocationWindowEvidence.TIMESTAMP, evidence.bytes());
+    return updateInvocationWindow(identity, expected, previousEvidence, put, permit, scope,
+        evidence.length());
+  }
+
+  /** Closing also compares the exact retention witness; an extending writer cannot be bypassed. */
+  CompletableFuture<Boolean> closeInvocationWindow(ByteKey identity, ByteKey expected,
+      ByteKey replacement, ByteKey evidence, Permit permit, RequestScope scope) {
+    InvocationWindowEvidence.decode(evidence);
+    byte[] row = binding.row(SystemRecordType.INVOCATION, identity);
+    var put = new Put(row).setDurability(Durability.SYNC_WAL)
+        .addColumn(binding.family(), VALUE, replacement.bytes());
+    return updateInvocationWindow(identity, expected, Optional.of(evidence), put, permit, scope,
+        replacement.length());
+  }
+
+  private CompletableFuture<Boolean> updateInvocationWindow(ByteKey identity, ByteKey expected,
+      Optional<ByteKey> evidence, Put put, Permit permit, RequestScope scope, long mutationBytes) {
+    var type = SystemRecordType.INVOCATION;
+    var authority = new SystemRecordGcAuthority(records);
+    return authority.validate(permit, scope)
+        .thenCompose(ignored -> prepareFence(type, identity, permit, scope))
+        .thenCompose(ignored -> authority.validate(permit, scope))
+        .thenCompose(ignored -> {
+          byte[] row = binding.row(type, identity);
+          var fence = new SingleColumnValueFilter(SystemTableBinding.GC_FENCE_FAMILY,
+              SystemRecordGcFence.COLUMN, CompareOperator.EQUAL,
+              new BinaryComparator(SystemRecordGcFence.from(permit).encode()));
+          fence.setFilterIfMissing(true);
+          var window = evidence.map(value -> new SingleColumnValueFilter(
+              SystemTableBinding.GC_FENCE_FAMILY, InvocationWindowEvidence.COLUMN,
+              CompareOperator.EQUAL, new BinaryComparator(value.bytes())))
+              .orElseGet(() -> new SingleColumnValueFilter(SystemTableBinding.GC_FENCE_FAMILY,
+                  InvocationWindowEvidence.COLUMN, CompareOperator.EQUAL, new NullComparator()));
+          window.setFilterIfMissing(evidence.isPresent());
+          var condition = new FilterList(FilterList.Operator.MUST_PASS_ALL,
+              records.liveValueCondition(expected.bytes()), fence, window);
+          var mutation = CheckAndMutate.newBuilder(row).ifMatches(condition).build(put);
+          return records.execute(scope, records.logicalMutationPayloadBytes(row,
+              expected.length() + mutationBytes + evidence.map(ByteKey::length).orElse(0)
+                  + SystemRecordGcFence.BYTES),
+              table -> table.checkAndMutate(mutation)).thenApply(result -> result.isSuccess());
+        });
+  }
+
   /** The caller has validated this page's authority; a late older pass cannot lower a row fence. */
   CompletableFuture<Void> prepareFence(SystemRecordType type, ByteKey identity, Permit permit, RequestScope scope) {
     permit.requireUsable(binding.profileFingerprint(), scope);

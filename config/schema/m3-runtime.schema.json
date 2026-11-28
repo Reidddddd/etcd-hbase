@@ -21,6 +21,8 @@
     "max_etcd_request_bytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
     "pin_shards": {"type": "integer", "minimum": 1, "maximum": 256},
     "pin_slots_per_shard": {"type": "integer", "minimum": 1, "maximum": 512},
+    "result_window_retention_ms": {"type": "integer", "minimum": 1, "maximum": 2592000000, "default": 1800000,
+      "description": "首次满足回收条件后登记的最短结果保留期；时钟不可信时保留，physical=true 可能等待。"},
     "pin_lease_ms": {"type": "integer", "minimum": 10, "maximum": 300000},
     "read_cache_enabled": {"type": "boolean", "const": false},
     "m4_lease_api_enabled": {

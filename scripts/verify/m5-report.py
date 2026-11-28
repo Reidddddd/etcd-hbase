@@ -377,6 +377,33 @@ def _validate_j51(task: dict[str, object], repo: Path) -> None:
 
 
 J52_REQUIRED_TESTS = {
+    ('server', 'surefire', 'io.etcdhbase.server.commit.InvocationResultErrorRpcTest'): {
+        'distinguishesClosedWindowsProtectionAdmissionAndCorruptionOverRpc',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.config.M3RuntimeConfigurationTest'): {
+        'resultWindowDefaultsToThirtyMinutesAndAcceptsOnlyBoundedExplicitDurations',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.InvocationWindowEvidenceTest'): {
+        'roundTripsOnlyBoundedCompleteEvidenceAndRejectsMissingOrCorruptTime',
+        'absentTrustedClockIsFailClosedAndRetentionIsExplicitlyBounded',
+    },
+    ('core', 'surefire', 'io.etcdhbase.core.commit.InvocationResultResolverTest'): {
+        'closedWindowHasAnExplicitFailureForEveryResolutionEntryPoint',
+        'queryDeadlineMustFitInsideTheDurablePinLease',
+
+        'resultQueryProtectionAcceptsTerminalRevisionAndSequence',
+        'failedProducerDrainKeepsThePinAndSurfacesCleanupFailure',
+        'resolvesLostTransitionAcknowledgementAndReplaysTheSamePersistedBytes',
+        'refusesMissingResultWrongAuthorizationAndClosedQueryWindow',
+        'replaysTheSameNoChangeResultWithoutReadingACommitDecision',
+        'resolvesEitherDurableInvocationOutcomeForProtocolProjection',
+        'noChangeReplayRejectsMissingPagesAndAWindowClosedDuringLoad',
+        'transactionResolutionDistinguishesNoChangeFromMetadataOnlyPublication',
+        'selectedAndNoChangeQueriesHoldDurableFloorsUntilMaterialization',
+        'gcWinningEitherRegistrationFloorPreventsAnyResultRead',
+        'expiredOrRevokedQueryCannotDeliverMaterializedBytes',
+        'cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops',
+    },
     ("hbase", "surefire", "io.etcdhbase.hbase.storage.J52RetentionDescriptorTest"): {
         "rejectsFiniteTtlForEveryLayout",
         "rejectsSingleVersionForNativeLayout",
@@ -498,6 +525,8 @@ J52_REQUIRED_TESTS = {
         'byteLimitedPageDoesNotEndCollectionBeforeTheContinuation',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
+        'lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding',
+        'successorRowFenceRejectsAnAlreadyDispatchedWindowClose',
         'descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations',
         'legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation',
         'fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts',
@@ -519,6 +548,11 @@ J52_REQUIRED_TESTS = {
         'manifestPagesAndRootsProtectRealCandidateEventAndResultRecords',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.InvocationWindowCloserIT'): {
+        'floorAdvanceCannotCloseAnUndeclaredOrUnexpiredWindowAndUnhealthyClockRetainsIt',
+
+        'retainsResolvedWindowsAtTheTerminalCounters',
+        'runtimeClosureWaitsForADurableResultQueryThenKeepsTheNonReplayBinding',
+        'closesAFinalizedSealedInvocationWithoutRequiringAClientReplay',
         'closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay',
         'anUnresolvedInvocationIsRetainedRatherThanClosed',
         'closingAWindowRetainsAResultStillReferencedByAManifest',

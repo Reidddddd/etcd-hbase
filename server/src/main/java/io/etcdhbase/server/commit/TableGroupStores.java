@@ -220,7 +220,7 @@ public final class TableGroupStores {
     var finalizer = new CommitFinalizationService(control, outcomes, decisions, manifests,
         materialization, results, auxiliaryMaterialization, eventIndexes);
     var views = new ReadViewService(control, manifests, pins, system.profileFingerprint());
-    var invocationResults = new InvocationResultResolver(invocations, outcomes, manifests, results);
+    var invocationResults = new InvocationResultResolver(invocations, outcomes, manifests, results, pins);
     return new TableGroupStores(records, control, invocations, manifestRepository, manifests,
         resultRepository, results, decisions, eventIndexes, outcomes, materialization, auxiliaryMaterialization,
         finalizer, pins, views, invocationResults, clusterId);

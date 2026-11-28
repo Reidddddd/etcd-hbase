@@ -319,7 +319,9 @@
         "bucketScanAdvancesAcrossTombstonesAndReturnsFollowingLiveRecord",
         "permitIsUnusableAfterItsScopeClosesAndForAnotherProfile",
         "staleOwnerCannotRetireOrCloseAnInvocationWindow",
-        "durableRegistryDamageRejectsAnAlreadyIssuedPermit"
+        "durableRegistryDamageRejectsAnAlreadyIssuedPermit",
+        "successorRowFenceRejectsAnAlreadyDispatchedWindowClose",
+        "lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding"
       ]
     },
     {
@@ -339,7 +341,11 @@
       "methods": [
         "closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay",
         "anUnresolvedInvocationIsRetainedRatherThanClosed",
-        "closingAWindowRetainsAResultStillReferencedByAManifest"
+        "retainsResolvedWindowsAtTheTerminalCounters",
+        "closingAWindowRetainsAResultStillReferencedByAManifest",
+        "runtimeClosureWaitsForADurableResultQueryThenKeepsTheNonReplayBinding",
+        "closesAFinalizedSealedInvocationWithoutRequiringAClientReplay",
+        "floorAdvanceCannotCloseAnUndeclaredOrUnexpiredWindowAndUnhealthyClockRetainsIt"
       ]
     },
     {
@@ -533,6 +539,52 @@
         "rejectsSingleVersionForNativeLayout",
         "historyDescriptorDefaultsToOneVersionAndForeverTtl",
         "nativeDescriptorDefaultsTo64AndAccepts128Versions"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.InvocationResultResolverTest",
+      "methods": [
+        "resolvesLostTransitionAcknowledgementAndReplaysTheSamePersistedBytes",
+        "refusesMissingResultWrongAuthorizationAndClosedQueryWindow",
+        "replaysTheSameNoChangeResultWithoutReadingACommitDecision",
+        "resolvesEitherDurableInvocationOutcomeForProtocolProjection",
+        "noChangeReplayRejectsMissingPagesAndAWindowClosedDuringLoad",
+        "transactionResolutionDistinguishesNoChangeFromMetadataOnlyPublication",
+        "selectedAndNoChangeQueriesHoldDurableFloorsUntilMaterialization",
+        "gcWinningEitherRegistrationFloorPreventsAnyResultRead",
+        "resultQueryProtectionAcceptsTerminalRevisionAndSequence",
+        "expiredOrRevokedQueryCannotDeliverMaterializedBytes",
+        "cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops",
+        "failedProducerDrainKeepsThePinAndSurfacesCleanupFailure",
+        "closedWindowHasAnExplicitFailureForEveryResolutionEntryPoint",
+        "queryDeadlineMustFitInsideTheDurablePinLease"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.InvocationWindowEvidenceTest",
+      "methods": [
+        "roundTripsOnlyBoundedCompleteEvidenceAndRejectsMissingOrCorruptTime",
+        "absentTrustedClockIsFailClosedAndRetentionIsExplicitlyBounded"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.config.M3RuntimeConfigurationTest",
+      "methods": [
+        "resultWindowDefaultsToThirtyMinutesAndAcceptsOnlyBoundedExplicitDurations"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.InvocationResultErrorRpcTest",
+      "methods": [
+        "distinguishesClosedWindowsProtectionAdmissionAndCorruptionOverRpc"
       ]
     }
   ]
