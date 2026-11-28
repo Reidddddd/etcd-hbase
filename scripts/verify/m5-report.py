@@ -635,6 +635,18 @@ J52_REQUIRED_TESTS = {
         'maintenanceAdmissionDoesNotReleaseUntilTheActualProducerDrains',
         'unavailableMaintenanceCapacityStartsNoStorageWork',
     },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.LeaseExpiryWorkerTest'): {
+        'completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain',
+        'cleanupExecutorRejectionStillWaitsForPhysicalProducerDrain',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.PhysicalGcCompletionScanTest'): {
+        'kvCompletionAloneCannotCompleteAnySystemDomain',
+        'everyDomainAndBucketNeedsBothTargetBounds',
+        'eofAndDefaultZeroBoundsAreNotCompletionReceipts',
+        'profileRegistriesNamespaceAndTopologyCannotTransferCompletion',
+        'durableOlderReceiptSurvivesANewerPendingSweepAndOwnerTakeover',
+        'storageFailureAndForeignTargetCannotBecomeCompletion',
+    },
     ('server', 'surefire', 'io.etcdhbase.server.commit.HistoryGcCompletionScanTest'): {
         'conservativePinBoundsDoNotCompleteTheRequestedTarget',
         'defaultZeroCountersAreNotACompletedZeroRevisionSweep',
@@ -648,6 +660,8 @@ J52_REQUIRED_TESTS = {
         'shutdownRejectsWaitersAndPreventsQueuedPollsFromStartingStorageWork',
     },
     ('server', 'failsafe', 'io.etcdhbase.server.J52PhysicalCompactIT'): {
+        'kvOnlyRuntimeCannotReportFullPhysicalCompletion',
+        'eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts',
         'zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts',
         'physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts',
         'cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration',

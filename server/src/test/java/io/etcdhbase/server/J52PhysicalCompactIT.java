@@ -10,6 +10,11 @@ import io.etcdhbase.admin.M3TableGroupPlan;
 import io.etcdhbase.core.bytes.ByteKey;
 import io.etcdhbase.core.bytes.KeyRange;
 import io.etcdhbase.core.commit.HistoryGcCheckpointStore;
+import io.etcdhbase.core.commit.CompactionOperation;
+import io.etcdhbase.core.commit.EventHistoryPinManager;
+import io.etcdhbase.core.commit.GcCheckpointStore;
+import io.etcdhbase.core.commit.SystemRecordClosure;
+import io.etcdhbase.core.commit.SystemRecordType;
 import io.etcdhbase.core.commit.ManifestCatalog;
 import io.etcdhbase.core.commit.ReadViewService;
 import io.etcdhbase.core.commit.SnapshotPinConfiguration;
@@ -62,6 +67,57 @@ class J52PhysicalCompactIT {
   @TempDir(cleanup = org.junit.jupiter.api.io.CleanupMode.ON_SUCCESS) Path artifacts;
 
   @Test
+  void kvOnlyRuntimeCannotReportFullPhysicalCompletion() throws Exception {
+    try (var cluster = TemporaryHBaseClusterProcess.startSecure()) {
+      for (String layout : List.of("history-table.json", "native-cell-versions.json")) {
+        var backend = cluster.clientConfiguration();
+        var plan = M3TableGroupRuntimeIT.plan(layout,
+            backend.getInt("hbase.zookeeper.property.clientPort", -1), 2);
+        try (var fixture = Fixture.open(backend, plan, true, "1", null, false)) {
+          long target = fixture.put(KEY, "value");
+          assertEquals(Status.Code.UNAVAILABLE, assertThrows(StatusRuntimeException.class,
+              () -> fixture.client().compact(Rpc.CompactionRequest.newBuilder()
+                  .setRevision(target).setPhysical(true).build())).getStatus().getCode());
+          fixture.awaitCompletion(target, target - 1, false);
+          assertCompacted(fixture, target);
+        }
+      }
+    }
+  }
+
+  @Test
+  void eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts() throws Exception {
+    try (var cluster = TemporaryHBaseClusterProcess.startSecure()) {
+      for (String layout : List.of("history-table.json", "native-cell-versions.json")) {
+        try (var fixture = Fixture.open(cluster, layout);
+            var scope = RequestScope.withTimeout(Duration.ofMinutes(2))) {
+          fixture.put(KEY, "old");
+          var events = EventHistoryPinManager.openSelected(fixture.records, fixture.control, PINS,
+              java.time.Clock.systemUTC(), scope).get(30, TimeUnit.SECONDS);
+          var pin = events.register(new EventHistoryPinManager.Requirement(2, 1,
+              ByteKey.copyOf(new byte[32]), java.util.Optional.empty(), java.util.Optional.empty()), scope).join();
+          try {
+            long target = fixture.put(KEY, "new");
+            var waiting = KVGrpc.newFutureStub(fixture.channel).withDeadlineAfter(90, TimeUnit.SECONDS)
+                .compact(Rpc.CompactionRequest.newBuilder().setRevision(target).setPhysical(true).build());
+            fixture.awaitCompletion(target, 0, false);
+            assertFalse(waiting.isDone(), "KV receipts cannot bypass an active event protection");
+            pin.close();
+            pin.releaseCompletion().toCompletableFuture().get(30, TimeUnit.SECONDS);
+            assertEquals(target, awaitRpc(waiting, fixture, 90).getHeader().getRevision());
+            fixture.assertSystemCompletion();
+            System.out.printf("j52-event-pin layout=%s kvCompleteBeforeRelease=true allSystemReceipts=true%n",
+                fixture.plan.primary().layout());
+          } finally {
+            pin.close();
+            pin.releaseCompletion().toCompletableFuture().get(30, TimeUnit.SECONDS);
+          }
+        }
+      }
+    }
+  }
+
+  @Test
   void zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts() throws Exception {
     try (var cluster = TemporaryHBaseClusterProcess.startSecure()) {
       for (String layout : List.of("history-table.json", "native-cell-versions.json")) {
@@ -75,7 +131,7 @@ class J52PhysicalCompactIT {
     var businessScans = new java.util.concurrent.atomic.AtomicInteger();
     var backend = cluster.clientConfiguration();
     var plan = M3TableGroupRuntimeIT.plan(layout,
-        backend.getInt("hbase.zookeeper.property.clientPort", -1));
+        backend.getInt("hbase.zookeeper.property.clientPort", -1), 2);
     try (var fixture = Fixture.open(backend, plan, true, "1", businessScans)) {
       fixture.put(KEY, "old");
       fixture.put(KEY, "new");
@@ -114,7 +170,7 @@ class J52PhysicalCompactIT {
           .get(30, TimeUnit.SECONDS);
       try {
         var history = populateHistory(fixture);
-        var waiting = KVGrpc.newFutureStub(fixture.channel).withDeadlineAfter(60, TimeUnit.SECONDS)
+        var waiting = KVGrpc.newFutureStub(fixture.channel).withDeadlineAfter(120, TimeUnit.SECONDS)
             .compact(Rpc.CompactionRequest.newBuilder().setRevision(history.target()).setPhysical(true).build());
         fixture.awaitLowerCompletion(2);
         assertFalse(waiting.isDone(), "a completed sweep at pin revision 2 cannot complete the higher target");
@@ -123,11 +179,23 @@ class J52PhysicalCompactIT {
         assertCompacted(fixture, history.target());
         assertFalse(waiting.isDone(), "duplicate ErrCompacted must not discard the original durable task");
         release(oldRead);
-        assertEquals(history.target(), waiting.get(60, TimeUnit.SECONDS).getHeader().getRevision());
+        assertEquals(history.target(), awaitRpc(waiting, fixture, 120).getHeader().getRevision());
+        fixture.assertSystemCompletion();
         assertRetainedHistory(fixture, history);
         System.out.printf("j52-physical-rpc layout=%s oldPinBlocked=true ownerLaneFree=true "
             + "duplicateCompacted=true confirmedDeletes=72 realAdmin=true%n", fixture.plan.primary().layout());
       } finally { release(oldRead); }
+    }
+  }
+
+  private static Rpc.CompactionResponse awaitRpc(
+      com.google.common.util.concurrent.ListenableFuture<Rpc.CompactionResponse> waiting,
+      Fixture fixture, int seconds) throws Exception {
+    try { return waiting.get(seconds, TimeUnit.SECONDS); }
+    catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException failure) {
+      try { fixture.printCompletionProgress(); }
+      catch (Exception diagnostic) { failure.addSuppressed(diagnostic); }
+      throw failure;
     }
   }
 
@@ -321,6 +389,7 @@ class J52PhysicalCompactIT {
     private AuthorizedBackendIdentity identity;
     private AsyncConnection connection;
     private HistoryGcCheckpointStore checkpoints;
+    private HBaseSystemRecordStore records;
     private ReadViewService views;
     private HBaseCommitControlStore control;
     private M3TableGroupRuntime runtime;
@@ -331,21 +400,23 @@ class J52PhysicalCompactIT {
       this.plan = plan;
       this.provider = provider;
       runtimeConnections = provider;
-      var limits = new BudgetManager.Limits(16, 16, 32, 16, 32, 8L << 20, 512L << 20);
-      budgets = new BudgetManager(limits, Map.of(plan.source().tableGroupId(), limits), limits);
+      var limits = new BudgetManager.Limits(16, 16, 32, 16, 32, 8L << 20, 1L << 30);
+      var reserve = io.etcdhbase.server.commit.LeaseBudgetProfile.perGroupCapacity(1_572_864);
+      budgets = new BudgetManager(limits, Map.of(plan.source().tableGroupId(), limits), limits,
+          reserve, Map.of(plan.source().tableGroupId(), reserve));
       scans = new ScanScheduler(budgets, Duration.ofSeconds(30));
     }
 
     static Fixture open(TemporaryHBaseClusterProcess cluster, String layout) throws Exception {
       var configuration = cluster.clientConfiguration();
       var plan = M3TableGroupRuntimeIT.plan(layout,
-          configuration.getInt("hbase.zookeeper.property.clientPort", -1));
+          configuration.getInt("hbase.zookeeper.property.clientPort", -1), 2);
       return open(configuration, plan, true, "1");
     }
 
     static Fixture openExisting(Configuration configuration, String layout, int port,
         String namespace, String member) throws Exception {
-      return open(configuration, M3TableGroupRuntimeIT.plan(layout, port, namespace), false, member);
+      return open(configuration, M3TableGroupRuntimeIT.plan(layout, port, namespace, 2), false, member);
     }
 
     private static Fixture open(Configuration configuration, M3TableGroupPlan plan,
@@ -355,6 +426,12 @@ class J52PhysicalCompactIT {
 
     private static Fixture open(Configuration configuration, M3TableGroupPlan plan,
         boolean fresh, String member, java.util.concurrent.atomic.AtomicInteger businessScans) throws Exception {
+      return open(configuration, plan, fresh, member, businessScans, true);
+    }
+
+    private static Fixture open(Configuration configuration, M3TableGroupPlan plan,
+        boolean fresh, String member, java.util.concurrent.atomic.AtomicInteger businessScans,
+        boolean fullRuntime) throws Exception {
       var authentication = new AuthenticationScope(plan.source().tableGroupId(), plan.source().hbaseProfile().id());
       var provider = new HBaseBackendIdentityProvider(plan.source().identityProviderId(), authentication,
           configuration, HBaseAuthenticators.kerberosPassword(),
@@ -369,7 +446,7 @@ class J52PhysicalCompactIT {
         if (fresh) fixture.initialize();
         else fixture.bind();
         if (businessScans != null) fixture.observeBusinessScans(businessScans);
-        fixture.start(member);
+        fixture.start(member, fullRuntime);
         return fixture;
       } catch (Exception | Error failure) {
         try { fixture.close(); } catch (Exception | Error cleanup) { failure.addSuppressed(cleanup); }
@@ -419,7 +496,8 @@ class J52PhysicalCompactIT {
       connection = provider.connectionFor(identity).toCompletableFuture().get(30, TimeUnit.SECONDS);
       var admin = connection.getAdmin();
       var system = admin.getDescriptor(plan.system().table()).get(30, TimeUnit.SECONDS);
-      admin.modifyTable(plan.system().withCompactionCapability(system)).get(30, TimeUnit.SECONDS);
+      admin.modifyTable(plan.system().withGcFencingCapability(
+          plan.system().withCompactionCapability(system))).get(30, TimeUnit.SECONDS);
       if (plan.primary().layout() == StorageTableBinding.Layout.NATIVE) {
         var descriptor = admin.getDescriptor(plan.primary().table()).get(30, TimeUnit.SECONDS);
         var family = ColumnFamilyDescriptorBuilder.newBuilder(descriptor.getColumnFamily(plan.primary().family()))
@@ -433,7 +511,7 @@ class J52PhysicalCompactIT {
     private void bind() throws Exception {
       connection = provider.connectionFor(identity).toCompletableFuture().get(30, TimeUnit.SECONDS);
       try (var scope = RequestScope.withTimeout(Duration.ofSeconds(30))) {
-        var records = HBaseSystemRecordStore.open(provider, identity, plan.system(), scope).get(30, TimeUnit.SECONDS);
+        records = HBaseSystemRecordStore.open(provider, identity, plan.system(), scope).get(30, TimeUnit.SECONDS);
         control = HBaseCommitControlStore.open(provider, identity, plan.system(), scope).get(30, TimeUnit.SECONDS);
         var pins = SnapshotPinManager.open(records, PINS, scope).get(30, TimeUnit.SECONDS);
         checkpoints = new HistoryGcCheckpointStore(records, plan.source().tableGroupId(),
@@ -444,18 +522,30 @@ class J52PhysicalCompactIT {
       }
     }
 
-    private void start(String member) throws Exception {
+    private void start(String member, boolean fullRuntime) throws Exception {
       try (var startup = RequestScope.withTimeout(Duration.ofSeconds(30))) {
-        runtime = M3TableGroupRuntime.open(plan, M3TableGroupRuntimeIT.activation(member), RESOURCES,
+        runtime = M3TableGroupRuntime.open(plan, fullRuntime ? activation(member)
+            : M3TableGroupRuntimeIT.activation(member), RESOURCES,
             runtimeConnections, identity, budgets, scans, startup);
       } catch (M3TableGroupRuntime.StartupException failure) {
         try { failure.cleanup().toCompletableFuture().get(30, TimeUnit.SECONDS); }
         catch (Exception cleanup) { failure.addSuppressed(cleanup); }
         throw failure;
       }
+      bind();
       server = Bootstrap.startConfigured(new RuntimeConfiguration.Listener("j52-physical", "127.0.0.1", 0,
           plan.source().tableGroupId()), RESOURCES, runtime.kvService());
       connect(server.boundListener().port());
+    }
+
+    private static io.etcdhbase.server.config.M3RuntimeConfiguration activation(String member) throws Exception {
+      var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      var tree = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(
+          Files.readAllBytes(Path.of("..", "config", "examples", "m4", "activation.json")));
+      tree.put("member_id", member);
+      return new io.etcdhbase.server.config.M3RuntimeConfigurationLoader(
+          io.etcdhbase.server.config.M3RuntimeConfiguration.ActivationProfile.PUBLIC_TEST)
+          .load(new java.io.ByteArrayInputStream(mapper.writeValueAsBytes(tree)));
     }
 
     int port() { return server.boundListener().port(); }
@@ -496,6 +586,56 @@ class J52PhysicalCompactIT {
 
     private void awaitFullCompletion(long revision) throws Exception {
       awaitCompletion(revision, revision - 1, false);
+      awaitSystemCompletion();
+    }
+
+    private CompactionOperation selectedCompact(RequestScope scope) throws Exception {
+      return CompactionOperation.decode(records.read(SystemRecordType.COMPACTION,
+          ByteKey.copyOf(selectedOperation().bytes()), scope).get(30, TimeUnit.SECONDS).orElseThrow());
+    }
+
+    private void awaitSystemCompletion() throws Exception {
+      try (var scope = RequestScope.withTimeout(Duration.ofSeconds(90))) {
+        var target = selectedCompact(scope);
+        var system = new GcCheckpointStore(records);
+        for (var domain : SystemRecordClosure.Domain.values()) {
+          for (int bucket = 0; bucket < plan.system().saltProfile().bucketCount(); bucket++) {
+            while (system.read(plan.source().tableGroupId(), domain, bucket, scope).join()
+                .filter(value -> value.completion().covers(target.revision(), target.baseSequence())).isEmpty()) {
+              assertFalse(scope.isDeadlineExceeded(), "system domain did not complete: " + domain);
+              Thread.sleep(20);
+            }
+          }
+        }
+      }
+    }
+
+    private void printCompletionProgress() throws Exception {
+      try (var scope = RequestScope.withTimeout(Duration.ofSeconds(30))) {
+        var system = new GcCheckpointStore(records);
+        for (var domain : SystemRecordClosure.Domain.values()) {
+          for (int bucket = 0; bucket < plan.system().saltProfile().bucketCount(); bucket++) {
+            var checkpoint = system.read(plan.source().tableGroupId(), domain, bucket, scope).join();
+            System.err.printf("j52-completion domain=%s bucket=%d progress=%s%n", domain, bucket,
+                checkpoint.map(value -> value.phase() + ":pages=" + value.completedPages()
+                    + ":pending=" + value.pendingRecords() + ":complete=" + value.completion())
+                    .orElse("missing"));
+          }
+        }
+      }
+    }
+
+    private void assertSystemCompletion() throws Exception {
+      try (var scope = RequestScope.withTimeout(Duration.ofSeconds(30))) {
+        var target = selectedCompact(scope);
+        var system = new GcCheckpointStore(records);
+        for (var domain : SystemRecordClosure.Domain.values()) {
+          for (int bucket = 0; bucket < plan.system().saltProfile().bucketCount(); bucket++) {
+            assertTrue(system.read(plan.source().tableGroupId(), domain, bucket, scope).join().orElseThrow()
+                .completion().covers(target.revision(), target.baseSequence()), domain + " receipt must precede RPC success");
+          }
+        }
+      }
     }
 
     private void awaitCompletion(long revision, long sequence, boolean exact) throws Exception {

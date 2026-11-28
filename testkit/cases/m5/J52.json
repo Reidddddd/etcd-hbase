@@ -519,7 +519,9 @@
       "methods": [
         "physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts",
         "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration",
-        "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts"
+        "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts",
+        "eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts",
+        "kvOnlyRuntimeCannotReportFullPhysicalCompletion"
       ]
     },
     {
@@ -572,6 +574,28 @@
         "expiredOrRevokedQueryCannotDeliverMaterializedBytes",
         "cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops",
         "failedProducerDrainKeepsThePinAndSurfacesCleanupFailure"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.PhysicalGcCompletionScanTest",
+      "methods": [
+        "kvCompletionAloneCannotCompleteAnySystemDomain",
+        "everyDomainAndBucketNeedsBothTargetBounds",
+        "eofAndDefaultZeroBoundsAreNotCompletionReceipts",
+        "profileRegistriesNamespaceAndTopologyCannotTransferCompletion",
+        "durableOlderReceiptSurvivesANewerPendingSweepAndOwnerTakeover",
+        "storageFailureAndForeignTargetCannotBecomeCompletion"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.LeaseExpiryWorkerTest",
+      "methods": [
+        "completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain",
+        "cleanupExecutorRejectionStillWaitsForPhysicalProducerDrain"
       ]
     }
   ]

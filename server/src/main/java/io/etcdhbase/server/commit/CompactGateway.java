@@ -33,8 +33,7 @@ import java.util.function.Supplier;
  * with publication or recovery.
  *
  * <p>The logical boundary is the control-row CAS. {@code physical} additionally waits for the
- * selected target's durable KV-history completion receipt outside the mutation lane. This slice does
- * not confirm internal-record reclamation or the complete J52 physical contract. Maintenance
+ * selected target's durable KV and system-record completion receipts outside the mutation lane. Maintenance
  * continues independently when the caller stops waiting; HFile release remains asynchronous.
  */
 public final class CompactGateway

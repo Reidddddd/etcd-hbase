@@ -539,6 +539,8 @@ class M5J52ReportTest(unittest.TestCase):
             "HistoryGcCheckpointStoreTest": "aNewOwnerFencesOldProgressButKeepsTheConfirmedCursor",
             "HistoryGcCycleTest": "unknownDeletionCannotAdvanceTheDurableVersionCursor",
             "HistoryGcCompletionScanTest": "conservativePinBoundsDoNotCompleteTheRequestedTarget",
+            "PhysicalGcCompletionScanTest": "everyDomainAndBucketNeedsBothTargetBounds",
+            "LeaseExpiryWorkerTest": "completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain",
             "PhysicalCompactionWaiterTest": "cancellationDetachesTheRpcButRetainsAdmissionUntilTheRealReadDrains",
             "CompactGatewayTest": "physicalWaitDoesNotHoldTheOwnerLane",
             "J52PhysicalCompactIT": "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration",
@@ -616,7 +618,8 @@ class M5J52ReportTest(unittest.TestCase):
         for class_name, method in (
                 ("HistoryGcCycleTest", "zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket"),
                 ("HistoryGcCycleTest", "ownerLossBeforeZeroRevisionClaimReturnsCannotPublishCompletion"),
-                ("J52PhysicalCompactIT", "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts")):
+                ("J52PhysicalCompactIT", "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts"),
+                ("J52PhysicalCompactIT", "eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts")):
             task = json.loads(json.dumps(original))
             suite = next(test for test in task["tests"] if test["class"].endswith("." + class_name))
             suite["methods"].remove(method)

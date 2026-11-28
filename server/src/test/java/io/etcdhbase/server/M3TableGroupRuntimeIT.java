@@ -243,16 +243,36 @@ class M3TableGroupRuntimeIT {
   }
 
   static M3TableGroupPlan plan(String file, int port) throws Exception {
-    return plan(file, port, "m3_runtime_" + UUID.randomUUID().toString().replace("-", ""));
+    return plan(file, port, 16);
+  }
+
+  static M3TableGroupPlan plan(String file, int port, int buckets) throws Exception {
+    return plan(file, port, "m3_runtime_" + UUID.randomUUID().toString().replace("-", ""), buckets);
   }
 
   static M3TableGroupPlan plan(String file, int port, String namespace) throws Exception {
+    return plan(file, port, namespace, 16);
+  }
+
+  static M3TableGroupPlan plan(String file, int port, String namespace, int buckets) throws Exception {
     var mapper = new ObjectMapper();
     ObjectNode tree = (ObjectNode) mapper.readTree(Files.readAllBytes(
         Path.of("..", "config", "examples", "j05", file)));
     ObjectNode backend = (ObjectNode) tree.withArray("hbase_profiles").get(0);
     backend.put("namespace", namespace).put("quorum", "127.0.0.1").put("client_port", port);
+    ObjectNode salt = (ObjectNode) tree.withArray("salt_profiles").get(0);
+    String saltId = buckets == 16 ? "crc32-sixteen-buckets" : "crc32-" + buckets + "-buckets";
+    salt.put("id", saltId).put("bucket_count", buckets);
+    var splits = salt.putArray("split_keys_hex");
+    for (int bucket = 1; bucket < buckets; bucket++) splits.add(String.format("%04x", bucket));
     ObjectNode group = (ObjectNode) tree.withArray("table_groups").get(0);
+    group.put("salt_profile_id", saltId);
+    ((ObjectNode) group.get("system_table")).set("split_keys_hex", splits.deepCopy());
+    for (var candidate : group.withArray("history_candidates")) {
+      for (var table : candidate.withArray("tables")) {
+        ((ObjectNode) table).set("split_keys_hex", splits.deepCopy());
+      }
+    }
     ((ObjectNode) group.get("system_table")).withArray("record_categories").add("RESULT");
     var config = new InitializationConfigurationLoader()
         .load(new ByteArrayInputStream(mapper.writeValueAsBytes(tree)));
