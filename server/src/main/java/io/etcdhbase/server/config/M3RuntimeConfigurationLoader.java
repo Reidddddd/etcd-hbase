@@ -25,6 +25,11 @@ public final class M3RuntimeConfigurationLoader {
       if (object.has("activation_profile")) {
         throw new IllegalArgumentException("activation_profile is controlled by trusted runtime code");
       }
+      if (!object.has("result_window_retention_ms")) {
+        object.put("result_window_retention_ms", java.time.Duration.ofMinutes(30).toMillis());
+      } else if (!object.path("result_window_retention_ms").isIntegralNumber()) {
+        throw new IllegalArgumentException("result_window_retention_ms must be an integer");
+      }
       if (!object.has("read_cache_enabled")) object.put("read_cache_enabled", false);
       else if (object.path("read_cache_enabled").isBoolean() && object.path("read_cache_enabled").booleanValue()) {
         throw new M3RuntimeConfiguration.CacheActivationUnavailable();

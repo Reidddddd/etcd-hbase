@@ -42,6 +42,20 @@ public final class SystemRecordGcTestFixture {
 
   private SystemRecordGcTestFixture() {}
 
+  static ResultWindowRetention resultWindowRetention() {
+    return new ResultWindowRetention(ResultWindowRetention.DEFAULT_MINIMUM,
+        () -> new io.etcdhbase.core.lease.LeaseTimeObservation(3_600_000, 3_600_000, true));
+  }
+
+  /** Existing close/fence scenarios begin with an already-declared, expired window. */
+  static void prepareExpiredResultWindow(HBaseSystemRecordStore records, ByteKey identity,
+      SystemRecordRetirement.Permit permit, RequestScope scope) {
+    var expected = records.read(SystemRecordType.INVOCATION, identity, scope).join().orElseThrow().bytes();
+    var witness = new InvocationWindowEvidence(ResultWindowRetention.DEFAULT_MINIMUM.toMillis(), 1_800_000);
+    assertTrue(records.persistInvocationWindowEvidence(identity, ByteKey.copyOf(expected), Optional.empty(),
+        witness.encode(), permit, scope).join());
+  }
+
   public static TableDescriptor descriptor(SystemTableBinding binding, TableDescriptor descriptor) {
     return binding.withGcFencingCapability(
         binding.withCompactionCapability(binding.withEventRevisionIndexCapability(descriptor)));

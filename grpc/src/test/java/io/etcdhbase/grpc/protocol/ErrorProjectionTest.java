@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.commit.ResultQueryUnavailable;
 import io.etcdhbase.core.auth.AuthSessionException;
 import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.lease.LeaseFailure;
@@ -19,6 +20,19 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 
 class ErrorProjectionTest {
+  @Test
+  void distinguishesAnUnavailableResultWindowFromAnInternalFailure() {
+    var projected = ErrorProjection.project(new CompletionException(new ResultQueryUnavailable()));
+    assertStatus(projected, Status.Code.FAILED_PRECONDITION,
+        "invocation result is no longer queryable");
+    assertNull(projected.getCause());
+    assertStatus(ErrorProjection.project(new ResultQueryUnavailable(
+        ResultQueryUnavailable.Reason.PROTECTION_UNAVAILABLE)), Status.Code.UNAVAILABLE,
+        "invocation result protection is unavailable");
+    assertEquals(Status.Code.INTERNAL,
+        ErrorProjection.project(new IllegalStateException("corrupt result page")).getStatus().getCode());
+  }
+
   @Test
   void projectsLeaseFailuresWithoutExposingTheirCause() {
     assertStatus(ErrorProjection.project(new LeaseFailure(LeaseFailure.Reason.NOT_FOUND)),

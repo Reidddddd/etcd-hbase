@@ -19,8 +19,11 @@ import io.etcdhbase.core.commit.CommitState;
 import io.etcdhbase.core.commit.ControlSnapshot;
 import io.etcdhbase.core.commit.PublicationSlot;
 import io.etcdhbase.core.commit.SystemRecordStore;
+import io.etcdhbase.core.commit.SystemRecordEntry;
+import io.etcdhbase.core.commit.MutationForwardRequest;
 import io.etcdhbase.core.commit.SystemRecordType;
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.lease.LeaseExpiryCheckpoint;
 import io.etcdhbase.core.lease.LeaseTimeObservation;
 import io.etcdhbase.core.lease.LeaseTimeSource;
 import io.etcdhbase.core.request.RequestScope;
@@ -44,9 +47,68 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.LinkedBlockingQueue;
 import org.junit.jupiter.api.Test;
 
 class LeaseExpiryWorkerTest {
+  @Test
+  void completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain() throws Exception {
+    assertIdleWindowCadence(1_000);
+    assertIdleWindowCadence(1_999);
+  }
+
+  private static void assertIdleWindowCadence(long checkpointTime) throws Exception {
+    var token = new CommitOwnerService.OwnerToken("owner-a", 7);
+    var owner = mock(M3OwnerLease.class);
+    when(owner.currentToken()).thenReturn(Optional.of(token));
+    var control = mock(CommitControlStore.class);
+    var state = checkpointState(1);
+    when(control.read(any())).thenReturn(CompletableFuture.completedFuture(
+        Optional.of(new ControlSnapshot(state, new byte[] {1}))));
+    var records = mock(SystemRecordStore.class);
+    var checkpoint = new LeaseExpiryCheckpoint(7, 1, 4, 0, checkpointTime,
+        LeaseExpiryCheckpoint.idleAt(1_001));
+    when(records.latestAtOrBefore(eq(SystemRecordType.LEASE_EXPIRY_CHECKPOINT), any(), eq(1L), any()))
+        .thenReturn(CompletableFuture.completedFuture(Optional.of(new SystemRecordEntry(
+            LeaseExpiryCheckpoint.versionIdentity(1), checkpoint.encode()))));
+    var relay = mock(MutationRelay.class);
+    when(relay.forward(any(), any())).thenAnswer(call -> CompletableFuture.completedFuture(
+        new MutationRelay.KnownResult(((MutationForwardRequest)
+            call.getArgument(0)).invocationId().bytes())));
+    var timer = mock(ScheduledExecutorService.class);
+    var ticks = new LinkedBlockingQueue<Runnable>();
+    var delays = new LinkedBlockingQueue<Long>();
+    when(timer.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> {
+      ticks.add(call.getArgument(0));
+      delays.add(call.getArgument(1));
+      return mock(ScheduledFuture.class);
+    });
+    var now = new AtomicLong(1_999);
+    var identity = new AuthorizedBackendIdentity("test-provider", "test-subject", "fixture-context",
+        new AuthenticationScope("test-group", "test-profile"), Set.of("test-group"), 0);
+    var worker = new LeaseExpiryWorker("test-group", ByteKey.copyOf(new byte[32]), 4,
+        10_000, control, records, owner, relay, identity,
+        () -> new LeaseTimeObservation(now.get(), now.get(), true), reservedWorkerBudgets(),
+        LeaseBudgetProfile.EXPIRY_WORKER_MEMORY, Runnable::run, timer,
+        Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC), new RequestMetrics());
+    try {
+      worker.start();
+      assertEquals(0L, delays.poll(5, TimeUnit.SECONDS));
+      ticks.poll(5, TimeUnit.SECONDS).run();
+      var next = ticks.poll(5, TimeUnit.SECONDS);
+      assertEquals(1_000L, delays.poll(5, TimeUnit.SECONDS));
+      verify(relay, never()).forward(any(), any());
+      now.set(2_999);
+      next.run();
+      assertTrue(ticks.poll(5, TimeUnit.SECONDS) != null);
+      verify(relay).forward(any(), any());
+    } finally {
+      worker.stop();
+      worker.drained().get(5, TimeUnit.SECONDS);
+    }
+  }
+
   @Test
   void cleanupExecutorRejectionStillWaitsForPhysicalProducerDrain() {
     try (RequestScope scope = RequestScope.withoutDeadline()) {

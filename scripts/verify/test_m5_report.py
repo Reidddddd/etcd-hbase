@@ -539,6 +539,9 @@ class M5J52ReportTest(unittest.TestCase):
             "HistoryGcCheckpointStoreTest": "aNewOwnerFencesOldProgressButKeepsTheConfirmedCursor",
             "HistoryGcCycleTest": "unknownDeletionCannotAdvanceTheDurableVersionCursor",
             "HistoryGcCompletionScanTest": "conservativePinBoundsDoNotCompleteTheRequestedTarget",
+            "PhysicalGcCompletionScanTest": "everyDomainAndBucketNeedsBothTargetBounds",
+            "SystemRecordGcTargetTest": "metadataOnlyDecisionSharesItsPreparedResultWindowRatherThanBlockingThePreviousRevision",
+            "LeaseExpiryWorkerTest": "completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain",
             "PhysicalCompactionWaiterTest": "cancellationDetachesTheRpcButRetainsAdmissionUntilTheRealReadDrains",
             "CompactGatewayTest": "physicalWaitDoesNotHoldTheOwnerLane",
             "J52PhysicalCompactIT": "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration",
@@ -558,6 +561,38 @@ class M5J52ReportTest(unittest.TestCase):
                     with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
                         m5_report._validate_task(task, path, repo)
 
+    def test_system_completion_requires_pending_drain_and_durable_reference_regressions(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        required = {
+            "GcCheckpointStoreTest": "pendingPrefixSurvivesTakeoverAndCleanEofDoesNotPublishCompletion",
+            "GcCheckpointCycleTest": "failedProducerOrCleanupCannotPublishCheckpointProgress",
+            "HBaseSystemRecordClosureTest": "exactRootProtectionCountsAsPendingEvenAboveNumericFloors",
+            "HBaseSystemRecordRetirementIT": "retirementAcknowledgementRequiresStrongTombstoneReadbackBeforeSuccess",
+            "GcCheckpointCycleIT": "durableCompletionNeedsAnotherSweepAfterTheReferenceChainDrains",
+        }
+        m5_report._validate_task(original, path, repo)
+        for class_name, method in required.items():
+            task = json.loads(json.dumps(original))
+            suite = next(test for test in task["tests"] if test["class"].endswith("." + class_name))
+            suite["methods"].remove(method)
+            with self.subTest(missing=method):
+                with self.assertRaisesRegex(m5_report.ReportError, "required test methods are missing"):
+                    m5_report._validate_task(task, path, repo)
+
+    def test_j52_cannot_omit_a_real_backend_adapter_or_completion_scenario(self) -> None:
+        repo = Path(__file__).parents[2]
+        path = repo / "testkit/cases/m5/J52.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for field in ("backend_adapters", "scenarios"):
+            for omitted in original[field]:
+                task = json.loads(json.dumps(original))
+                task[field].remove(omitted)
+                with self.subTest(field=field, missing=omitted):
+                    with self.assertRaises(m5_report.ReportError):
+                        m5_report._validate_task(task, path, repo)
+
     def test_zero_completion_and_real_pin_rpc_cannot_be_omitted(self) -> None:
         repo = Path(__file__).parents[2]
         path = repo / "testkit/cases/m5/J52.json"
@@ -565,7 +600,11 @@ class M5J52ReportTest(unittest.TestCase):
         for class_name, method in (
                 ("HistoryGcCompletionScanTest", "defaultZeroCountersAreNotACompletedZeroRevisionSweep"),
                 ("J52PhysicalCompactIT", "physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts"),
-                ("J52HistoryCollectionIT", "boundsKeyEnumerationToOneDurableBucketInBothLayouts")):
+                ("J52HistoryCollectionIT", "boundsKeyEnumerationToOneDurableBucketInBothLayouts"),
+                ("HBaseSystemRecordClosureTest", "proofBudgetEndsAtTheCompletedPrefixAndTheNextPageRetriesTheUnprovedRecord"),
+                ("HBaseSystemRecordClosureTest", "anUnprovableFirstRecordStillFailsRatherThanPublishingANonadvancingCursor"),
+                ("HBaseSystemRecordClosureTest", "malformedRecordAfterACompletedPrefixStillAbortsThePage"),
+                ("HBaseSystemRecordClosureTest", "resultPageChecksOnlyItsCanonicalDirectoryAndRejectsDifferentOrMalformedPreparations")):
             task = json.loads(json.dumps(original))
             suite = next(test for test in task["tests"] if test["class"].endswith(class_name))
             suite["methods"].remove(method)
@@ -596,7 +635,8 @@ class M5J52ReportTest(unittest.TestCase):
         for class_name, method in (
                 ("HistoryGcCycleTest", "zeroRevisionPersistsCompletionWithoutEnumeratingANonemptyBucket"),
                 ("HistoryGcCycleTest", "ownerLossBeforeZeroRevisionClaimReturnsCannotPublishCompletion"),
-                ("J52PhysicalCompactIT", "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts")):
+                ("J52PhysicalCompactIT", "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts"),
+                ("J52PhysicalCompactIT", "eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts")):
             task = json.loads(json.dumps(original))
             suite = next(test for test in task["tests"] if test["class"].endswith("." + class_name))
             suite["methods"].remove(method)

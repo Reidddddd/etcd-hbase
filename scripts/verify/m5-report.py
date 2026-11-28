@@ -377,6 +377,37 @@ def _validate_j51(task: dict[str, object], repo: Path) -> None:
 
 
 J52_REQUIRED_TESTS = {
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.SystemRecordGcTargetTest'): {
+        'metadataOnlyDecisionSharesItsPreparedResultWindowRatherThanBlockingThePreviousRevision',
+        'keyChangingAndTerminalDecisionsKeepTheirActualPublicationBounds',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.InvocationResultErrorRpcTest'): {
+        'distinguishesClosedWindowsProtectionAdmissionAndCorruptionOverRpc',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.config.M3RuntimeConfigurationTest'): {
+        'resultWindowDefaultsToThirtyMinutesAndAcceptsOnlyBoundedExplicitDurations',
+    },
+    ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.InvocationWindowEvidenceTest'): {
+        'roundTripsOnlyBoundedCompleteEvidenceAndRejectsMissingOrCorruptTime',
+        'absentTrustedClockIsFailClosedAndRetentionIsExplicitlyBounded',
+    },
+    ('core', 'surefire', 'io.etcdhbase.core.commit.InvocationResultResolverTest'): {
+        'closedWindowHasAnExplicitFailureForEveryResolutionEntryPoint',
+        'queryDeadlineMustFitInsideTheDurablePinLease',
+
+        'resultQueryProtectionAcceptsTerminalRevisionAndSequence',
+        'failedProducerDrainKeepsThePinAndSurfacesCleanupFailure',
+        'resolvesLostTransitionAcknowledgementAndReplaysTheSamePersistedBytes',
+        'refusesMissingResultWrongAuthorizationAndClosedQueryWindow',
+        'replaysTheSameNoChangeResultWithoutReadingACommitDecision',
+        'resolvesEitherDurableInvocationOutcomeForProtocolProjection',
+        'noChangeReplayRejectsMissingPagesAndAWindowClosedDuringLoad',
+        'transactionResolutionDistinguishesNoChangeFromMetadataOnlyPublication',
+        'selectedAndNoChangeQueriesHoldDurableFloorsUntilMaterialization',
+        'gcWinningEitherRegistrationFloorPreventsAnyResultRead',
+        'expiredOrRevokedQueryCannotDeliverMaterializedBytes',
+        'cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops',
+    },
     ("hbase", "surefire", "io.etcdhbase.hbase.storage.J52RetentionDescriptorTest"): {
         "rejectsFiniteTtlForEveryLayout",
         "rejectsSingleVersionForNativeLayout",
@@ -485,6 +516,15 @@ J52_REQUIRED_TESTS = {
         'publicStoreApiCannotBypassTheClosureDecision',
     },
     ('hbase', 'surefire', 'io.etcdhbase.hbase.storage.HBaseSystemRecordClosureTest'): {
+        'resultPageChecksOnlyItsCanonicalDirectoryAndRejectsDifferentOrMalformedPreparations',
+        'proofBudgetEndsAtTheCompletedPrefixAndTheNextPageRetriesTheUnprovedRecord',
+        'anUnprovableFirstRecordStillFailsRatherThanPublishingANonadvancingCursor',
+        'malformedRecordAfterACompletedPrefixStillAbortsThePage',
+        'metadataOnlyDecisionStaysOutsideThePreviousWindowAndCollectsAfterItsReferencesDrain',
+        'newerManifestPagesUseRootOrPermanentInvocationBoundsWithoutBlockingOldCompletion',
+        'exactRootProtectionCountsAsPendingEvenAboveNumericFloors',
+        'changedRetirementOutcomeRemainsPending',
+        'terminalPreparedCountersRemainAtTheNonRetireableUpperBound',
         'retainsCandidateReferencedByManifestPage',
         'retainsEventReferencedByEventPage',
         'retainsResultReferencedByManifestRoot',
@@ -498,6 +538,9 @@ J52_REQUIRED_TESTS = {
         'byteLimitedPageDoesNotEndCollectionBeforeTheContinuation',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.HBaseSystemRecordRetirementIT'): {
+        'retirementAcknowledgementRequiresStrongTombstoneReadbackBeforeSuccess',
+        'lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding',
+        'successorRowFenceRejectsAnAlreadyDispatchedWindowClose',
         'descriptorChangesAfterOpenRejectFenceAndRetirementWithoutMutations',
         'legacyCompactTableRejectsGcWithoutAutomaticSchemaMutation',
         'fencePreservesLegacyPayloadGetScanAndConditionalWriteLayouts',
@@ -519,12 +562,22 @@ J52_REQUIRED_TESTS = {
         'manifestPagesAndRootsProtectRealCandidateEventAndResultRecords',
     },
     ('hbase', 'failsafe', 'io.etcdhbase.hbase.storage.InvocationWindowCloserIT'): {
+        'floorAdvanceCannotCloseAnUndeclaredOrUnexpiredWindowAndUnhealthyClockRetainsIt',
+
+        'retainsResolvedWindowsAtTheTerminalCounters',
+        'runtimeClosureWaitsForADurableResultQueryThenKeepsTheNonReplayBinding',
+        'closesAFinalizedSealedInvocationWithoutRequiringAClientReplay',
         'closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay',
         'anUnresolvedInvocationIsRetainedRatherThanClosed',
         'closingAWindowRetainsAResultStillReferencedByAManifest',
     },
 
     ('core', 'surefire', 'io.etcdhbase.core.commit.GcCheckpointStoreTest'): {
+        'rejectsNegativePendingAndInvalidCompletionReceipts',
+        'pendingPrefixSurvivesTakeoverAndCleanEofDoesNotPublishCompletion',
+        'completionSurvivesRestartStrongerCompactAndOwnerTakeover',
+        'zeroBoundsNeedAPositiveCompletedGeneration',
+        'rejectsChangedRegistryBindingAndReusedGeneration',
         'durableScanAndFenceCursorsMustBelongToTheNamedBucket',
         'initialLeaseAndTakeoverRequireTheWholeDurableFencePass',
         'wideningBoundsDuringOneCompactDoesNotResetAnUnfinishedSweep',
@@ -536,6 +589,9 @@ J52_REQUIRED_TESTS = {
         'rejectsRowValueShardMismatchInClaimAndRead',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.GcCheckpointCycleTest'): {
+        'checkpointWaitsForPhysicalProducerAndCleanupBeforeMetadataCas',
+        'failedProducerOrCleanupCannotPublishCheckpointProgress',
+        'durableOwnerChangeDuringDrainCannotAdvanceEvenWithAnUnchangedLocalToken',
         'failedFencePageCannotAdvanceOrStartRetirement',
         'metadataLeaseRunsOnlyTheFencePhaseBeforeCollection',
         'resumedSweepUsesOnlyANarrowerDerivativeOfTheFreshAuthority',
@@ -555,6 +611,7 @@ J52_REQUIRED_TESTS = {
         'schedulerRejectionIsVisibleAndStopBeforeStartCannotResurrectWorker',
     },
     ('server', 'failsafe', 'io.etcdhbase.server.commit.GcCheckpointCycleIT'): {
+        'durableCompletionNeedsAnotherSweepAfterTheReferenceChainDrains',
         'realWorkerProtectsPinnedEventsThenRestartCollectsBothBucketsAndFencesOldCheckpoint',
     },
     ('server', 'surefire', 'io.etcdhbase.server.commit.M3TableGroupRuntimeWorkerLifecycleTest'): {
@@ -602,6 +659,18 @@ J52_REQUIRED_TESTS = {
         'maintenanceAdmissionDoesNotReleaseUntilTheActualProducerDrains',
         'unavailableMaintenanceCapacityStartsNoStorageWork',
     },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.LeaseExpiryWorkerTest'): {
+        'completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain',
+        'cleanupExecutorRejectionStillWaitsForPhysicalProducerDrain',
+    },
+    ('server', 'surefire', 'io.etcdhbase.server.commit.PhysicalGcCompletionScanTest'): {
+        'kvCompletionAloneCannotCompleteAnySystemDomain',
+        'everyDomainAndBucketNeedsBothTargetBounds',
+        'eofAndDefaultZeroBoundsAreNotCompletionReceipts',
+        'profileRegistriesNamespaceAndTopologyCannotTransferCompletion',
+        'durableOlderReceiptSurvivesANewerPendingSweepAndOwnerTakeover',
+        'storageFailureAndForeignTargetCannotBecomeCompletion',
+    },
     ('server', 'surefire', 'io.etcdhbase.server.commit.HistoryGcCompletionScanTest'): {
         'conservativePinBoundsDoNotCompleteTheRequestedTarget',
         'defaultZeroCountersAreNotACompletedZeroRevisionSweep',
@@ -615,6 +684,8 @@ J52_REQUIRED_TESTS = {
         'shutdownRejectsWaitersAndPreventsQueuedPollsFromStartingStorageWork',
     },
     ('server', 'failsafe', 'io.etcdhbase.server.J52PhysicalCompactIT'): {
+        'kvOnlyRuntimeCannotReportFullPhysicalCompletion',
+        'eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts',
         'zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts',
         'physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts',
         'cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration',
@@ -641,7 +712,7 @@ J52_REQUIRED_TESTS = {
 
 
 def _validate_j52(task: dict[str, object], repo: Path) -> None:
-    if task.get("backend_adapters") != ["minicluster-simple"] or task.get("layouts") != ["HISTORY", "NATIVE"]:
+    if task.get("backend_adapters") != ["minicluster-simple", "minicluster-kerberos"] or task.get("layouts") != ["HISTORY", "NATIVE"]:
         raise ReportError("J52 storage gate must cover both real MiniCluster layouts")
     expected_scenarios = {
         "logical-selection-and-unknown-outcome", "independent-pin-floors",
@@ -650,9 +721,12 @@ def _validate_j52(task: dict[str, object], repo: Path) -> None:
         "durable-system-retirement-and-reference-closure",
         "invocation-window-close-before-result-retirement",
         "bucket-checkpoint-restart-pin-retention-and-physical-drain",
+        "durable-system-domain-completion-and-drained-checkpoint",
         "durable-kv-bucket-version-progress-and-target-completion",
         "physical-rpc-old-pin-owner-lane-and-exact-delete",
         "cancelled-rpc-owner-process-death-and-logical-only-resume",
+        "complete-kv-and-system-receipts-with-event-pin-blocking",
+        "bounded-proof-prefix-and-canonical-result-directory",
     }
     scenarios = task.get("scenarios", [])
     if (not isinstance(scenarios, list) or any(not isinstance(value, str) for value in scenarios)

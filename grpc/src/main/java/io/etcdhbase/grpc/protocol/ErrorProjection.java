@@ -1,6 +1,7 @@
 package io.etcdhbase.grpc.protocol;
 
 import io.etcdhbase.core.error.BackendFailure;
+import io.etcdhbase.core.commit.ResultQueryUnavailable;
 import io.etcdhbase.core.auth.AuthSessionException;
 import io.etcdhbase.core.kv.KvFailure;
 import io.etcdhbase.core.lease.LeaseFailure;
@@ -26,6 +27,10 @@ public final class ErrorProjection {
 
   public static StatusRuntimeException project(Throwable failure) {
     Throwable cause = unwrap(Objects.requireNonNull(failure, "failure"));
+    if (cause instanceof ResultQueryUnavailable unavailable) {
+      return status(unavailable.reason() == ResultQueryUnavailable.Reason.WINDOW_CLOSED
+          ? Status.FAILED_PRECONDITION : Status.UNAVAILABLE, unavailable.getMessage());
+    }
     if (cause instanceof BackendFailure backendFailure) {
       return projectBackendFailure(backendFailure);
     }

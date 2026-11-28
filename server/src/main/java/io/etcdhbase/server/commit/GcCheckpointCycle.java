@@ -24,6 +24,8 @@ import java.util.function.Supplier;
 final class GcCheckpointCycle {
   static final BudgetManager.Reservation MEMORY = new BudgetManager.Reservation(64L << 10, 16L << 20,
       2 * ManifestCatalog.maximumProofReadPageBytes(), 16L << 20, 16L << 20);
+  private static final BudgetManager.Reservation CHECKPOINT_MEMORY =
+      new BudgetManager.Reservation(64L << 10, 1L << 20, 1L << 20, 1L << 20, 1L << 20);
   private static final SystemRecordClosure.Domain[] DOMAINS = SystemRecordClosure.Domain.values();
   private final String group;
   private final Supplier<Optional<CommitOwnerService.OwnerToken>> owner;
@@ -39,6 +41,11 @@ final class GcCheckpointCycle {
   private final int pageRecords;
   private final RequestMetrics metrics;
   private int shard;
+
+  private sealed interface PageWork permits Deferred, Collected {}
+  private record Deferred(Outcome outcome) implements PageWork {}
+  private record Collected(CommitOwnerService.OwnerToken owner, GcCheckpointStore.Held acquired,
+      SystemRecordClosure.Page page) implements PageWork {}
 
   GcCheckpointCycle(String group, Supplier<Optional<CommitOwnerService.OwnerToken>> owner,
       CommitControlStore control, GcCoordinator coordinator, EventHistoryRetention retention,
@@ -65,6 +72,15 @@ final class GcCheckpointCycle {
   CompletableFuture<Outcome> run(RequestScope scope) {
     var token = owner.get();
     if (token.isEmpty()) return CompletableFuture.completedFuture(Outcome.IDLE);
+    var page = new GcPageScope(scope);
+    CompletableFuture<PageWork> work;
+    try { work = runPage(token.orElseThrow(), page.scope()); }
+    catch (RuntimeException | Error failure) { work = CompletableFuture.failedFuture(failure); }
+    return page.finish(work).thenCompose(completed -> completed instanceof Deferred deferred
+        ? CompletableFuture.completedFuture(deferred.outcome()) : persist((Collected) completed, scope));
+  }
+
+  private CompletableFuture<PageWork> runPage(CommitOwnerService.OwnerToken token, RequestScope scope) {
     BudgetManager.Account account;
     try {
       account = GcPageAdmission.admit(budgets, group, scope, reservation,
@@ -74,7 +90,7 @@ final class GcCheckpointCycle {
         return CompletableFuture.failedFuture(rejected);
       }
       metrics.recordGcBacklog();
-      return CompletableFuture.completedFuture(Outcome.BACKLOG);
+      return CompletableFuture.completedFuture(new Deferred(Outcome.BACKLOG));
     }
     var proof = new ManifestCatalog.ProofReadBudget(scope, account, 16_384, 256L << 20);
     return control.read(scope).thenCompose(found -> {
@@ -82,15 +98,15 @@ final class GcCheckpointCycle {
       // No selected Compact and a publication in flight are healthy waiting states. Authorization
       // failures after this observation remain failures; the coordinator independently fences them.
       if (state.compactOperationId().isEmpty() || state.publication().isPresent()) {
-        return CompletableFuture.completedFuture(Outcome.IDLE);
+        return CompletableFuture.completedFuture(new Deferred(Outcome.IDLE));
       }
-      requireOwner(token.orElseThrow(), scope);
-      return coordinator.authorizeSystemRecords(token.orElseThrow(), retention, authorization, proof, scope)
-          .thenCompose(permit -> collect(token.orElseThrow(), permit, scope));
+      requireOwner(token, scope);
+      return coordinator.authorizeSystemRecords(token, retention, authorization, proof, scope)
+          .thenCompose(permit -> collect(token, permit, scope));
     });
   }
 
-  private CompletableFuture<Outcome> collect(CommitOwnerService.OwnerToken token,
+  private CompletableFuture<PageWork> collect(CommitOwnerService.OwnerToken token,
       SystemRecordRetirement.Permit permit, RequestScope scope) {
     requireOwner(token, scope);
     int bucket = shard % buckets;
@@ -98,7 +114,7 @@ final class GcCheckpointCycle {
     var proposed = GcCheckpoint.start(group, domain, token.epoch(), bucket, buckets, permit);
     return checkpoints.claim(proposed, scope).thenCompose(claim -> {
       requireOwner(token, scope);
-      if (claim instanceof GcCheckpointStore.Superseded) return CompletableFuture.completedFuture(nextShard());
+      if (claim instanceof GcCheckpointStore.Superseded) return CompletableFuture.completedFuture(new Deferred(nextShard()));
       var acquired = (GcCheckpointStore.Held) claim;
       var sweep = acquired.checkpoint().plan();
       var pagePermit = sweep.equals(GcCheckpoint.Plan.from(permit)) ? permit
@@ -107,15 +123,38 @@ final class GcCheckpointCycle {
       var page = fencing
           ? closure.fence(domain, bucket, acquired.checkpoint().fencePosition().afterIdentity(), pageRecords, pagePermit, scope)
           : closure.collect(domain, bucket, acquired.checkpoint().position().afterIdentity(), pageRecords, pagePermit, scope);
-      return page.thenCompose(completed -> {
-            requireOwner(token, scope);
-            return checkpoints.advance(acquired, completed, scope).thenApply(updated -> {
-              if (!updated) return Outcome.IDLE;
-              metrics.recordGcPage(completed.examined(), completed.retired());
-              var next = nextShard();
-              return !fencing && completed.exhausted() ? next : Outcome.PROGRESSED;
-            });
-          });
+      return page.thenApply(completed -> new Collected(token, acquired, completed));
+    });
+  }
+
+  private CompletableFuture<Outcome> persist(Collected collected, RequestScope scope) {
+    requireOwner(collected.owner(), scope);
+    try {
+      GcPageAdmission.admit(budgets, group, scope, CHECKPOINT_MEMORY,
+          new BudgetManager.ReadLimits(16, 1L << 20, 16, 1, 16), new BudgetManager.Work(0, 1, 0, 1, 0));
+    } catch (BackendFailure rejected) {
+      if (rejected.category() != BackendFailure.Category.RESOURCE_LIMIT) return CompletableFuture.failedFuture(rejected);
+      metrics.recordGcBacklog();
+      return CompletableFuture.completedFuture(Outcome.BACKLOG);
+    }
+    return control.read(scope).thenCompose(found -> {
+      var state = found.orElseThrow(() -> new IllegalStateException("missing GC control")).state();
+      var plan = collected.acquired().checkpoint().plan();
+      requireOwner(collected.owner(), scope);
+      if (state.ownerEpoch() != collected.owner().epoch()
+          || !state.ownerInstance().equals(Optional.of(collected.owner().instance()))
+          || state.ownerLeaseExpired(System.currentTimeMillis())
+          || !state.profileFingerprint().equals(plan.registries().profile())
+          || !state.compactOperationId().equals(Optional.of(plan.operationId()))) {
+        return CompletableFuture.failedFuture(new BackendFailure(BackendFailure.Category.UNAVAILABLE));
+      }
+      return checkpoints.advance(collected.acquired(), collected.page(), scope).thenApply(updated -> {
+        if (!updated) return Outcome.IDLE;
+        metrics.recordGcPage(collected.page().examined(), collected.page().retired());
+        var next = nextShard();
+        return collected.acquired().checkpoint().phase() == GcCheckpoint.Phase.SCANNING
+            && collected.page().exhausted() ? next : Outcome.PROGRESSED;
+      });
     });
   }
 
