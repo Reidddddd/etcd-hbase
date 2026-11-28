@@ -186,6 +186,33 @@ public final class TemporaryHBaseClusterProcess implements AutoCloseable {
     return observed.get();
   }
 
+  /** Reads the RegionServer's active HStoreFile set, excluding compacted files awaiting archival. */
+  public synchronized java.util.Map<String, Long> activeStoreFiles(
+      org.apache.hadoop.hbase.TableName table, byte[] family) throws Exception {
+    String token = java.util.UUID.randomUUID().toString().replace("-", "");
+    String encodedTable = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(table.getName());
+    String command = "STOREFILES " + token + " " + encodedTable + " " + java.util.HexFormat.of().formatHex(family) + "\n";
+    Path response = directory.resolve("store-files.txt");
+    process.getOutputStream().write(command.getBytes(StandardCharsets.US_ASCII));
+    process.getOutputStream().flush();
+    var observed = new java.util.HashMap<String, Long>();
+    org.apache.hadoop.hbase.Waiter.waitFor(clientConfiguration(), 5000, 20, () -> {
+      if (!process.isAlive()) throw new IOException("fixture stopped before StoreFile observation");
+      if (!Files.isRegularFile(response)) return false;
+      var lines = Files.readAllLines(response, StandardCharsets.US_ASCII);
+      if (lines.isEmpty() || !token.equals(lines.getFirst())) return false;
+      for (int index = 1; index < lines.size(); index++) {
+        String[] fields = lines.get(index).split("\t", -1);
+        if (fields.length != 2) throw new IOException("invalid fixture StoreFile observation");
+        String path = new String(java.util.Base64.getUrlDecoder().decode(fields[0]), StandardCharsets.UTF_8);
+        long size = Long.parseLong(fields[1]);
+        if (size < 0 || observed.put(path, size) != null) throw new IOException("invalid fixture StoreFile size or identity");
+      }
+      return true;
+    });
+    return java.util.Map.copyOf(observed);
+  }
+
   private void waitForClientReadiness(HBaseUserContext user)
       throws IOException, InterruptedException {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(CLIENT_READY_TIMEOUT_SECONDS);

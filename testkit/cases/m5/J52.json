@@ -16,7 +16,8 @@
     }
   ],
   "backend_adapters": [
-    "minicluster-simple"
+    "minicluster-simple",
+    "minicluster-kerberos"
   ],
   "layouts": [
     "HISTORY",
@@ -33,7 +34,14 @@
     "bucket-checkpoint-restart-pin-retention-and-physical-drain",
     "durable-kv-bucket-version-progress-and-target-completion",
     "physical-rpc-old-pin-owner-lane-and-exact-delete",
-    "cancelled-rpc-owner-process-death-and-logical-only-resume"
+    "cancelled-rpc-owner-process-death-and-logical-only-resume",
+    "durable-system-domain-completion-and-drained-checkpoint",
+    "complete-kv-and-system-receipts-with-event-pin-blocking",
+    "bounded-proof-prefix-and-canonical-result-directory",
+    "mtls-compact-forwarding-owner-takeover-and-drained-identity",
+    "native-capacity-admission-and-raw-pinned-version-eviction",
+    "finite-ttl-wall-clock-and-revision-timestamp-expiry",
+    "actual-major-compaction-active-hfiles-and-late-put-guards"
   ],
   "tests": [
     {
@@ -226,7 +234,10 @@
         "doesNotEndEnumerationInsideAHighChurnKey",
         "resumesAcrossSaltBucketsWithoutComparingGlobalLogicalOrder",
         "boundsKeyEnumerationToOneDurableBucketInBothLayouts",
-        "activeReadPinPreventsDeletionUntilReleaseInBothLayouts"
+        "activeReadPinPreventsDeletionUntilReleaseInBothLayouts",
+        "nativeAdmissionPreservesPinnedHistoryWhileRawVersionEvictionIgnoresPins",
+        "finiteTtlExpiresWallClockCellsAndImmediatelyHidesRevisionTimestampsInBothLayouts",
+        "unfencedLatePutCanReappearAfterItsDeleteMarkerIsCompacted"
       ]
     },
     {
@@ -298,7 +309,16 @@
         "closedInvocationDoesNotRetainItsTransactionForever",
         "unselectedInvocationDoesNotProtectAbandonedTransactionRecords",
         "lookaheadRowsDoNotMakeTheRemainingPageBudgetNegative",
-        "byteLimitedPageDoesNotEndCollectionBeforeTheContinuation"
+        "byteLimitedPageDoesNotEndCollectionBeforeTheContinuation",
+        "newerManifestPagesUseRootOrPermanentInvocationBoundsWithoutBlockingOldCompletion",
+        "exactRootProtectionCountsAsPendingEvenAboveNumericFloors",
+        "changedRetirementOutcomeRemainsPending",
+        "terminalPreparedCountersRemainAtTheNonRetireableUpperBound",
+        "metadataOnlyDecisionStaysOutsideThePreviousWindowAndCollectsAfterItsReferencesDrain",
+        "proofBudgetEndsAtTheCompletedPrefixAndTheNextPageRetriesTheUnprovedRecord",
+        "anUnprovableFirstRecordStillFailsRatherThanPublishingANonadvancingCursor",
+        "malformedRecordAfterACompletedPrefixStillAbortsThePage",
+        "resultPageChecksOnlyItsCanonicalDirectoryAndRejectsDifferentOrMalformedPreparations"
       ]
     },
     {
@@ -319,7 +339,10 @@
         "bucketScanAdvancesAcrossTombstonesAndReturnsFollowingLiveRecord",
         "permitIsUnusableAfterItsScopeClosesAndForAnotherProfile",
         "staleOwnerCannotRetireOrCloseAnInvocationWindow",
-        "durableRegistryDamageRejectsAnAlreadyIssuedPermit"
+        "durableRegistryDamageRejectsAnAlreadyIssuedPermit",
+        "successorRowFenceRejectsAnAlreadyDispatchedWindowClose",
+        "lostWindowCloseAcknowledgementIsConfirmedByTheDurableClosedBinding",
+        "retirementAcknowledgementRequiresStrongTombstoneReadbackBeforeSuccess"
       ]
     },
     {
@@ -339,7 +362,11 @@
       "methods": [
         "closesTheWindowFirstAndKeepsTheDigestsNeededToRejectAReplay",
         "anUnresolvedInvocationIsRetainedRatherThanClosed",
-        "closingAWindowRetainsAResultStillReferencedByAManifest"
+        "retainsResolvedWindowsAtTheTerminalCounters",
+        "closingAWindowRetainsAResultStillReferencedByAManifest",
+        "runtimeClosureWaitsForADurableResultQueryThenKeepsTheNonReplayBinding",
+        "closesAFinalizedSealedInvocationWithoutRequiringAClientReplay",
+        "floorAdvanceCannotCloseAnUndeclaredOrUnexpiredWindowAndUnhealthyClockRetainsIt"
       ]
     },
     {
@@ -354,7 +381,12 @@
         "rejectsTopologyChangesOnResumeAndTakeover",
         "sameEpochResumesAndTakeoverPreservesProgressWhileStaleCasLoses",
         "exhaustedSweepAndNewOperationRevisitPrefixesWhileWiderBoundsWait",
-        "rejectsRowValueShardMismatchInClaimAndRead"
+        "rejectsRowValueShardMismatchInClaimAndRead",
+        "pendingPrefixSurvivesTakeoverAndCleanEofDoesNotPublishCompletion",
+        "completionSurvivesRestartStrongerCompactAndOwnerTakeover",
+        "zeroBoundsNeedAPositiveCompletedGeneration",
+        "rejectsChangedRegistryBindingAndReusedGeneration",
+        "rejectsNegativePendingAndInvalidCompletionReceipts"
       ],
       "kind": "surefire"
     },
@@ -370,7 +402,10 @@
         "absentCompactWaitsWithoutCallingAuthorityOrCreatingCheckpoints",
         "regularAdmissionFailureYieldsAndRecordsGcBacklogWithoutUsingReserve",
         "authorizationFailureCannotCreateOrAdvanceACheckpoint",
-        "ownerLossAfterCollectionCannotAdvanceDurableProgressAndAdmissionWaitsForProducer"
+        "ownerLossAfterCollectionCannotAdvanceDurableProgressAndAdmissionWaitsForProducer",
+        "checkpointWaitsForPhysicalProducerAndCleanupBeforeMetadataCas",
+        "failedProducerOrCleanupCannotPublishCheckpointProgress",
+        "durableOwnerChangeDuringDrainCannotAdvanceEvenWithAnUnchangedLocalToken"
       ],
       "kind": "surefire"
     },
@@ -391,7 +426,8 @@
       "module": "server",
       "class": "io.etcdhbase.server.commit.GcCheckpointCycleIT",
       "methods": [
-        "realWorkerProtectsPinnedEventsThenRestartCollectsBothBucketsAndFencesOldCheckpoint"
+        "realWorkerProtectsPinnedEventsThenRestartCollectsBothBucketsAndFencesOldCheckpoint",
+        "durableCompletionNeedsAnotherSweepAfterTheReferenceChainDrains"
       ],
       "kind": "failsafe"
     },
@@ -435,7 +471,8 @@
         "sessionRevokedBeforeSelectionCannotAdvanceControl",
         "cancellationRetainsUserBorrowUntilLateConnectionDrains",
         "cancellationRetainsUserBorrowUntilLatePermissionRpcDrains",
-        "rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity"
+        "rpcMetadataSelectsTheRequestSessionInsteadOfTheBackgroundIdentity",
+        "forwardedCompactResolvesTheSessionAndRechecksUserAdminBeforeBothWrites"
       ]
     },
     {
@@ -499,7 +536,10 @@
       "methods": [
         "physicalRpcWaitsForAnOldPinThenConfirmsEveryEligibleVersionInBothLayouts",
         "cancelledPhysicalRpcResumesAfterOwnerProcessDeathAndLogicalOnlyRegistration",
-        "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts"
+        "zeroRevisionOnANonemptyTablePersistsCompletionWithoutBusinessScansInBothLayouts",
+        "eventProtectionKeepsPhysicalRpcWaitingAfterKvCompletionInBothLayouts",
+        "kvOnlyRuntimeCannotReportFullPhysicalCompletion",
+        "standbyForwardsCompactOverMtlsAndKeepsWaitingAcrossOwnerTakeoverInBothLayouts"
       ]
     },
     {
@@ -521,7 +561,8 @@
         "repeatedCompactIsReportedAsCompactedRatherThanSucceeding",
         "futureCompactIsRejectedWithoutAdvancingTheBoundary",
         "missingOwnerFailsClosedWithoutAttemptingAControlWrite",
-        "cancelledRequestDoesNotSendAResponse"
+        "cancelledRequestDoesNotSendAResponse",
+        "nonOwnerForwardsOutsideTheLocalLaneAndWaitsForItsOwnReceipts"
       ]
     },
     {
@@ -533,6 +574,104 @@
         "rejectsSingleVersionForNativeLayout",
         "historyDescriptorDefaultsToOneVersionAndForeverTtl",
         "nativeDescriptorDefaultsTo64AndAccepts128Versions"
+      ]
+    },
+    {
+      "module": "core",
+      "kind": "surefire",
+      "class": "io.etcdhbase.core.commit.InvocationResultResolverTest",
+      "methods": [
+        "resolvesLostTransitionAcknowledgementAndReplaysTheSamePersistedBytes",
+        "refusesMissingResultWrongAuthorizationAndClosedQueryWindow",
+        "replaysTheSameNoChangeResultWithoutReadingACommitDecision",
+        "resolvesEitherDurableInvocationOutcomeForProtocolProjection",
+        "noChangeReplayRejectsMissingPagesAndAWindowClosedDuringLoad",
+        "transactionResolutionDistinguishesNoChangeFromMetadataOnlyPublication",
+        "selectedAndNoChangeQueriesHoldDurableFloorsUntilMaterialization",
+        "gcWinningEitherRegistrationFloorPreventsAnyResultRead",
+        "resultQueryProtectionAcceptsTerminalRevisionAndSequence",
+        "expiredOrRevokedQueryCannotDeliverMaterializedBytes",
+        "cancelledQueryKeepsDurableProtectionUntilTheActualProducerStops",
+        "failedProducerDrainKeepsThePinAndSurfacesCleanupFailure",
+        "closedWindowHasAnExplicitFailureForEveryResolutionEntryPoint",
+        "queryDeadlineMustFitInsideTheDurablePinLease"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.InvocationWindowEvidenceTest",
+      "methods": [
+        "roundTripsOnlyBoundedCompleteEvidenceAndRejectsMissingOrCorruptTime",
+        "absentTrustedClockIsFailClosedAndRetentionIsExplicitlyBounded"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.config.M3RuntimeConfigurationTest",
+      "methods": [
+        "resultWindowDefaultsToThirtyMinutesAndAcceptsOnlyBoundedExplicitDurations"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.InvocationResultErrorRpcTest",
+      "methods": [
+        "distinguishesClosedWindowsProtectionAdmissionAndCorruptionOverRpc"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.PhysicalGcCompletionScanTest",
+      "methods": [
+        "kvCompletionAloneCannotCompleteAnySystemDomain",
+        "everyDomainAndBucketNeedsBothTargetBounds",
+        "eofAndDefaultZeroBoundsAreNotCompletionReceipts",
+        "profileRegistriesNamespaceAndTopologyCannotTransferCompletion",
+        "durableOlderReceiptSurvivesANewerPendingSweepAndOwnerTakeover",
+        "storageFailureAndForeignTargetCannotBecomeCompletion"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.LeaseExpiryWorkerTest",
+      "methods": [
+        "completedEmptyWindowWaitsForTheIdleIntervalBeforePublishingAgain",
+        "cleanupExecutorRejectionStillWaitsForPhysicalProducerDrain"
+      ]
+    },
+    {
+      "module": "hbase",
+      "kind": "surefire",
+      "class": "io.etcdhbase.hbase.storage.SystemRecordGcTargetTest",
+      "methods": [
+        "metadataOnlyDecisionSharesItsPreparedResultWindowRatherThanBlockingThePreviousRevision",
+        "keyChangingAndTerminalDecisionsKeepTheirActualPublicationBounds"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.CompactForwarderTest",
+      "methods": [
+        "boundedCommandPreservesNegativeZeroAndPhysicalWithoutProtoUnknownFields",
+        "returnedOperationMustMatchInvocationRequestAuthorizationProfileRevisionAndTerminalStage",
+        "unknownSendOutcomeNeverAllocatesAnotherAttempt",
+        "logicalReceiptWaitsForPhysicalDrainAndCannotHideCleanupFailure"
+      ]
+    },
+    {
+      "module": "server",
+      "kind": "surefire",
+      "class": "io.etcdhbase.server.commit.CompactOwnerLaneTest",
+      "methods": [
+        "compactUsesItsOwnOperationReceiptAndNeverCreatesAnInvocationBinding",
+        "peerContextGroupHopAndEpochAreCheckedBeforeSelection",
+        "queuedCompactRechecksOwnerAndCancellationCannotDispatchIt"
       ]
     }
   ]

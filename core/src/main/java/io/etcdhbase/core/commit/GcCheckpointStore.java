@@ -50,7 +50,8 @@ public final class GcCheckpointStore {
     Objects.requireNonNull(scope, "scope");
     if (proposed.phase() != GcCheckpoint.Phase.FENCING || proposed.exhausted()
         || proposed.position().afterIdentity().isPresent() || proposed.fencePosition().afterIdentity().isPresent()
-        || proposed.completedPages() != 0 || proposed.sweep() != 0) {
+        || proposed.completedPages() != 0 || proposed.sweep() != 0 || proposed.pendingRecords() != 0
+        || !proposed.completion().equals(GcCheckpoint.Completion.none())) {
       throw new IllegalArgumentException("a GC lease proposal must start with an empty fence pass");
     }
     return claim(proposed, scope, 0);
@@ -93,7 +94,8 @@ public final class GcCheckpointStore {
   }
 
   /**
-   * Advances one shard only if the exact bytes this worker read are still current. A {@code false}
+   * Advances after the page's physical producers and cleanup have succeeded, only if the exact
+   * bytes this worker read are still current. A {@code false}
    * result means another worker moved the shard first; the caller must re-claim rather than retry
    * with stale text.
    */

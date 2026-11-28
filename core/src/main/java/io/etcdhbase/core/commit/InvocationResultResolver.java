@@ -6,6 +6,7 @@ import io.etcdhbase.core.request.RequestScope;
 import io.etcdhbase.core.scan.BudgetManager;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 
 /** Resolves a finalized invocation's original result without rereading current business data. */
 public final class InvocationResultResolver {
@@ -72,21 +73,24 @@ public final class InvocationResultResolver {
   private final CommitOutcomeResolver outcomes;
   private final ManifestCatalog manifests;
   private final ResultCatalog results;
+  private final SnapshotPinManager pins;
 
   public InvocationResultResolver(InvocationRepository repository, CommitOutcomeResolver outcomes,
-      ManifestCatalog manifests, ResultCatalog results) {
+      ManifestCatalog manifests, ResultCatalog results, SnapshotPinManager pins) {
     this.repository = Objects.requireNonNull(repository, "repository");
     this.invocations = new InvocationService(repository);
     this.outcomes = Objects.requireNonNull(outcomes, "outcomes");
     this.manifests = Objects.requireNonNull(manifests, "manifests");
     this.results = Objects.requireNonNull(results, "results");
+    this.pins = Objects.requireNonNull(pins, "pins");
   }
 
   public CompletableFuture<ResolvedResult> resolve(
       InvocationId id, ByteKey requestDigest, ByteKey authorizationDigest,
       RequestScope scope, BudgetManager.Account account) {
     return readSelectedBinding(id, requestDigest, authorizationDigest, scope, account)
-        .thenCompose(binding -> resolveSelectedBinding(binding, scope, account));
+        .thenCompose(binding -> protect(binding, scope,
+            current -> resolveSelectedBinding(current, scope, account)));
   }
 
   /** Resolves either kind of durable invocation outcome without consulting current KV data. */
@@ -94,19 +98,40 @@ public final class InvocationResultResolver {
       InvocationId id, ByteKey requestDigest, ByteKey authorizationDigest,
       RequestScope scope, BudgetManager.Account account) {
     return readMatching(id, requestDigest, authorizationDigest, scope, account)
-        .thenCompose(binding -> {
-          if (binding.state() == InvocationBinding.State.NO_CHANGES) {
-            return loadNoChanges(binding, scope, account)
-                .thenApply(result -> (ResolvedInvocation) result);
-          }
-          if (binding.state() != InvocationBinding.State.SEALED
-              && binding.state() != InvocationBinding.State.SELECTED) {
-            return CompletableFuture.failedFuture(
-                new IllegalStateException("invocation result is not queryable"));
-          }
-          return resolveSelectedBinding(binding, scope, account)
-              .thenApply(result -> (ResolvedInvocation) result);
-        });
+        .thenCompose(binding -> protect(binding, scope, current -> resolveBinding(current, scope, account)));
+  }
+
+  private CompletableFuture<ResolvedInvocation> resolveBinding(
+      InvocationBinding binding, RequestScope scope, BudgetManager.Account account) {
+    if (binding.state() == InvocationBinding.State.NO_CHANGES) {
+      return loadNoChanges(binding, scope, account).thenApply(result -> result);
+    }
+    return resolveSelectedBinding(binding, scope, account).thenApply(result -> result);
+  }
+
+  private <T extends ResolvedInvocation> CompletableFuture<T> protect(
+      InvocationBinding binding, RequestScope scope, Function<InvocationBinding, CompletableFuture<T>> load) {
+    if (binding.state() != InvocationBinding.State.NO_CHANGES
+        && binding.state() != InvocationBinding.State.SEALED
+        && binding.state() != InvocationBinding.State.SELECTED) {
+      return CompletableFuture.failedFuture(new ResultQueryUnavailable());
+    }
+    return pins.registerResultQuery(binding, scope).exceptionallyCompose(failure -> {
+      Throwable cause = io.etcdhbase.core.error.CompletionFailures.unwrapCompletion(failure);
+      return CompletableFuture.failedFuture(cause instanceof SnapshotPinManager.RegistrationFloorExceeded
+          ? new ResultQueryUnavailable() : cause);
+    }).thenCompose(pin -> {
+      var protection = new ResultQueryProtection(pin, scope);
+      // Registration races the GC floors. Recheck the binding before touching collectable data.
+      return repository.read(binding.invocationId(), scope).thenCompose(found -> {
+        var current = found.orElseThrow(() -> new IllegalStateException("invocation disappeared"));
+        if (!current.sameAttempt(binding) || current.state() == InvocationBinding.State.WINDOW_CLOSED) {
+          return CompletableFuture.failedFuture(new ResultQueryUnavailable());
+        }
+        return load.apply(current);
+      }).thenCompose(result -> protection.complete().thenApply(ignored -> result)
+          .whenComplete((ignored, failure) -> { if (failure != null) result.close(); }));
+    });
   }
 
   private CompletableFuture<InvocationBinding> readSelectedBinding(InvocationId id, ByteKey requestDigest,
@@ -114,7 +139,7 @@ public final class InvocationResultResolver {
     return readMatching(id, requestDigest, authorizationDigest, scope, account).thenCompose(binding -> {
       if (binding.state() != InvocationBinding.State.SEALED
           && binding.state() != InvocationBinding.State.SELECTED) {
-        return CompletableFuture.failedFuture(new IllegalStateException("invocation result is not queryable"));
+        return CompletableFuture.failedFuture(new ResultQueryUnavailable());
       }
       return CompletableFuture.completedFuture(binding);
     });
@@ -167,7 +192,7 @@ public final class InvocationResultResolver {
       InvocationId id, ByteKey requestDigest, ByteKey authorizationDigest,
       RequestScope scope, BudgetManager.Account account) {
     return readMatching(id, requestDigest, authorizationDigest, scope, account)
-        .thenCompose(binding -> loadNoChanges(binding, scope, account));
+        .thenCompose(binding -> protect(binding, scope, current -> loadNoChanges(current, scope, account)));
   }
 
   private CompletableFuture<ResolvedNoChanges> loadNoChanges(
@@ -199,7 +224,7 @@ public final class InvocationResultResolver {
     InvocationBinding latest = current.orElseThrow(() -> new IllegalStateException("invocation disappeared"));
     if (!latest.sameAttempt(binding) || latest.state() != InvocationBinding.State.NO_CHANGES
         || latest.resultReference().filter(reference.token()::equals).isEmpty()) {
-      throw new IllegalStateException("no-change result window changed during query");
+      throw new ResultQueryUnavailable();
     }
     if (scope.isClosed() || scope.isDeadlineExceeded()) {
       throw new java.util.concurrent.CompletionException(new BackendFailure(scope.isDeadlineExceeded()
@@ -219,7 +244,7 @@ public final class InvocationResultResolver {
       }
       if (binding.state() != InvocationBinding.State.SEALED
           && binding.state() != InvocationBinding.State.SELECTED) {
-        return CompletableFuture.failedFuture(new IllegalStateException("transaction result is not queryable"));
+        return CompletableFuture.failedFuture(new ResultQueryUnavailable());
       }
       return resolve(id, requestDigest, authorizationDigest, scope, account).thenApply(result -> {
         if (!result.decision().containsKeyChanges()) {
@@ -268,7 +293,7 @@ public final class InvocationResultResolver {
               InvocationBinding latest = current.orElseThrow(() -> new IllegalStateException("invocation disappeared"));
               if (!latest.sameAttempt(binding) || latest.state() != InvocationBinding.State.SELECTED
                   || latest.resultReference().filter(reference.token()::equals).isEmpty()) {
-                throw new IllegalStateException("invocation result window changed during query");
+                throw new ResultQueryUnavailable();
               }
               return new ResolvedResult(decision, result);
             }).whenComplete((ignored, failure) -> {

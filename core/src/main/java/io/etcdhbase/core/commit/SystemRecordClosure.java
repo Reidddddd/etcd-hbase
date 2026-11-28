@@ -40,13 +40,16 @@ public interface SystemRecordClosure {
     public SystemRecordType recordType() { return recordType; }
   }
 
-  /** What one bounded closure page did, so a caller can resume without guessing. */
+  /**
+   * A bounded page and its remaining obligations under the frozen permit bounds. Pending counts
+   * eligible protected, referenced or unconfirmed records; newer retained records are not pending.
+   */
   public record Page(Domain domain, int examined, int retired, Optional<ByteKey> lastIdentity,
-      boolean exhausted) {
+      boolean exhausted, int pending) {
     public Page {
       Objects.requireNonNull(domain, "domain");
       Objects.requireNonNull(lastIdentity, "lastIdentity");
-      if (examined < 0 || retired < 0 || retired > examined) {
+      if (examined < 0 || retired < 0 || pending < 0 || retired > examined || pending > examined - retired) {
         throw new IllegalArgumentException("invalid closure page counters");
       }
       if (!exhausted && lastIdentity.isEmpty()) {

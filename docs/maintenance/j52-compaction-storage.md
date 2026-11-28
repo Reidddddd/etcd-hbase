@@ -4,9 +4,9 @@
 
 本次提供内部逻辑 Compact 选择器、KV 历史回收许可、系统记录引用闭包和 HBase 精确退休原语。`CompactionService` 复用现有控制行与 system 记录，`GcCoordinator` 复用持久 snapshot pin 注册表。`KV.Compact` 的授权及逻辑选择通过 `CompactGateway` 装配到既有 owner lane，与发布和恢复串行执行；完成等待在离开该 lane 后执行。独立后台 worker 持续回收 KV 历史，J52 保持进行中。
 
-本 PR 按[范围评审结论](https://github.com/Reidddddd/etcd-hbase/pull/68#issuecomment-7210841766)交付 KV 历史实现切片。当前 `physical=true` RPC 的受限投影只确认本次目标所需的 KV 历史回收及 KV/辅助 pin 保护排空，不等待事件、决定、结果等内部记录域完成。因此，该成功响应不满足[完整设计 §6.1](../specs/2026-11-20-m5-auth-gc-lifecycle-design.md#61-逻辑确认与物理完成)，也不代表整个后端物理完成或 J52 完成。HFile 空间归还仍由 HBase compaction 异步执行。
+既有 KV 历史切片的范围见[评审结论](https://github.com/Reidddddd/etcd-hbase/pull/68#issuecomment-7210841766)。J52.2c 将 `physical=true` 扩展为等待 KV 和全部七个系统记录域的持久完成回执，对应[设计 §6.1](../specs/2026-11-20-m5-auth-gc-lifecycle-design.md#61-逻辑压缩与物理任务)中的精确删除投影。HFile 空间归还仍由 HBase compaction 异步执行；实现和定向测试不等于正式 review 或真实目标环境验收。
 
-`physical=false` 在逻辑边界与选定操作身份持久化后返回；`COMPACTION` 记录和控制行的选定身份共同登记可恢复工作，各 bucket 检查点由后台延迟创建。`physical=true` 在请求自己的目标 revision 和 baseSequence 均被所有 KV bucket 的持久完成水位覆盖后返回。取消或超时只结束本次等待，不撤销逻辑边界或后台任务；原操作继续执行，同一 revision 重试仍返回 `ErrCompacted`。更强的后续 Compact 任务可以覆盖旧目标，但不能仅凭更高逻辑边界报告旧目标物理完成。
+`physical=false` 在逻辑边界与选定操作身份持久化后返回；`COMPACTION` 记录和控制行的选定身份共同登记可恢复工作，各 bucket 检查点由后台延迟创建。`physical=true` 在请求自己的目标 revision 和 baseSequence 均被所有 KV bucket 及 INVOCATION、EVENT_INDEX、RESULT、CANDIDATE、MANIFEST、DECISION、EVENT 的所有 bucket 持久完成回执覆盖后返回。取消或超时只结束本次等待，不撤销逻辑边界或后台任务；原操作继续执行，同一 revision 重试仍返回 `ErrCompacted`。更强的后续 Compact 任务可以覆盖旧目标，但不能仅凭更高逻辑边界报告旧目标物理完成。
 
 启用会话认证时，网关从当前 RPC 的 token 解析用户身份。创建 COMPACTION 记录前和逻辑边界 CAS 前，均复核同一会话及授权代次，并使用该用户的真实 HBase 连接检查表组内 system、history/native 和 current 表的 `ADMIN` 权限。缺失、无效或已撤销的会话，以及管理权限不足的请求，在准入时不创建操作记录，也不改变控制行；权限检查不受支持或不可用时同样拒绝执行。会话认证关闭时，配置的后端身份仍须通过相同的 `ADMIN` 检查，不因使用服务身份而豁免。
 
@@ -40,9 +40,23 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 `GcCoordinator.authorizeSystemRecords` 先确认事件及 backfill 保护，再推进 KV 注册 floor。签发的不可变许可绑定 profile、两个 sealed 注册表及配置、event namespace、owner 与授权屏障、选定 Compact 操作、独立 revision/sequence 边界、确切根保护和本轮带 deadline 的 scope。普通调用方不能自行构造许可。消费端从目标 HBase 表重新读取控制行、LOGICAL 操作、实际注册表与已收尾 backfill checkpoint；缺失、损坏或身份变化均停止本页，不把原调用方提供的端口当作持久权威。
 
-`HBaseSystemRecordClosure` 绑定实际 store 及其路由，保留 invocation 的不可重放证明。其余域按真实身份解码，检查存活 invocation、decision、事件 revision 索引、manifest root/directory/page 和 result directory 的引用；PREPARING/SEALED 事务在后续引用写出前也受保护。确切 pin 根和事务独立于两个 floor 保留。证明扫描完整分页，损坏或超出扫描、行数及字节预算时返回失败，不发布可恢复的成功游标。分页沿实际 HBase 行序推进，墓碑与 lookahead 仍计入物理工作量。
+`HBaseSystemRecordClosure` 绑定实际 store 及其路由，保留 invocation 的不可重放证明。其余域按真实身份解码，检查存活 invocation、decision、事件 revision 索引、manifest root/directory/page 和 result directory 的引用；PREPARING/SEALED 事务在后续引用写出前也受保护。确切 pin 根和事务独立于两个 floor 保留。事件索引只检查其格式确实能引用的 decision 和 manifest；manifest 不会引用 decision 或事件索引，不为这些域扫描无效入边。result page 只强读同一 preparation 的规范 directory；directory 格式只允许引用其自身的有序 pages，身份不符或损坏仍终止本页。其余可能的入边继续完整分页扫描；扫描、行数或字节预算耗尽时，仅保存本页已完整核验的前缀，未证明的记录留待下一页，不把部分证明解释为 EOF。首条记录就超出预算时仍返回失败，不能发布不前进的游标；损坏、权限或其他存储错误也仍使整页失败。分页沿实际 HBase 行序推进，墓碑与 lookahead 仍计入物理工作量。
 
-`InvocationWindowCloser` 使用同一 store 的实际 invocation repository。它先核验许可、边界及确切保护，再用 CAS 关闭结果窗口；保留摘要及不可重放绑定，随后通过引用闭包处理 RESULT。仍被 manifest 或其他目录引用的结果继续保留，不能因窗口已关闭就直接删除。
+`InvocationResultResolver` 在读取可回收的决定、manifest 或结果前，先通过同一 `SnapshotPinManager` 注册持久查询保护，再重读绑定。保护使用独立的 `baseRevision + 1` 和 `baseSequence + 1` 下界（到达计数上限时取 `Long.MAX_VALUE`），阻止 GC 在查询期间关闭该窗口；不引入另一套 pin 格式。注册与 GC floor 推进竞争同一分片 CAS，GC 先推进时，低于任一 floor 的新查询即不能进入可保护窗口，即使后台尚未写入 `WINDOW_CLOSED`，也拒绝读取旧结果。
+
+不增加 KV revision 的辅助提交，其 decision 也按 `baseRevision + 1` 判断结果窗口，与 invocation、manifest 和 result 保持一致；计数上限饱和为 `Long.MAX_VALUE`。该保守下界避免将仍处于合法结果窗口的 decision 计入前一 revision 的待回收范围，不提前关闭查询窗口。真正增加 KV revision 的 decision 仍使用其发布 revision。
+结果查询的 deadline 必须严格短于配置的 `pin_lease_ms`；过长或无 deadline 的查询在结果读取前返回 `UNAVAILABLE`，不会在没有续租保证时继续读取。注册 floor 已先推进或窗口已关闭时，返回 `FAILED_PRECONDITION: invocation result is no longer queryable`；缺页和损坏仍属于内部错误。请求不可把这类查询失败解释为原写未执行。
+
+完整结果加载到受预算约束的内存后，查询用 pin 完成 CAS 核实该代次仍有效，再交付字节；已过期或被撤销的查询不能返回成功。此后传输只依赖内存，不再持有存储视图。失败查询的保护归请求 scope 所有；取消后等实际后端 producer 排空才释放，不能以可取消 future 已结束代替物理排空。
+
+`HBaseSystemRecordClosure` 的 INVOCATION 页调用 `InvocationWindowCloser`，先核验许可、边界及确切保护，再以完整绑定值、墓碑缺失和当前 `gc:g` 的同行条件关闭结果窗口。仍处于 PREPARING 或无法确认提交结果的绑定继续保留；已收尾但仍停在 SEALED 的绑定先从实际决定及 manifest 确认结果。关闭保留摘要及不可重放绑定，未知 ACK 可在下一次扫描重读确认。该页只推进窗口，RESULT 页另行通过引用闭包回收正文；仍被 manifest 或其他目录引用的结果继续保留。
+
+最短结果保留期由激活配置 `result_window_retention_ms` 指定，默认 `1800000`（30 分钟），允许 1 毫秒至 30 天。首次满足回收的逻辑边界、终态与引用条件后，GC 先以同行 fence 和完整绑定 CAS 在 `gc:w` 登记版本化的保留时长及 `notBefore`，本轮不关窗。期限从该次健康可信时间的上界开始计算，因此它是从首次回收准入观察起至少保留一段时间，不承诺从业务响应恰好 30 分钟后立即删除。旧记录没有证据时同样先获得完整新窗口，不把 revision/sequence floor 当作时间证据。
+
+后续必须取得健康可信时间，且下界达到持久 `notBefore`，才能在比较同一窗口证据、完整绑定和当前 `gc:g` 的同行 CAS 中关闭。时钟不可信、时间溢出或证据缺失都不能作为已到期；损坏证据使该页失败。增加配置时长会先持久扩展不足的旧证据；减少配置不会缩短已声明窗口。生产复用 Lease 的有界可信时间源；未装配可信时间源的独立 closure 不自动关窗。
+
+完整物理回收等待必须包含结果保留窗口，故 `physical=true` 可能等待 30 分钟或更久；到达请求 deadline 返回超时，后台按原操作继续，不能为了及时回复而提前回收结果。这里不将等待结束称为 HFile 磁盘空间归还。窗口证据写在既有单版本、FOREVER 的维护 family 内；旧维护实现拒绝新增列，不支持混跑或直接回退 writer，受控迁移仍遵循第 4 节要求。
+
 
 退休用同一 `CheckAndMutate(RowMutations)` 比较完整旧值和墓碑缺失，移除旧 value，并保留 `r={0}` guard 与严格编码的 `t` 墓碑。两者使用保留的内部 timestamp `Long.MAX_VALUE - 1`，使迟到的旧 absent-CAS 不能让记录复活；它不是 KV revision 或应用墙钟。目标 HBase 的 future timestamp 策略必须允许该保留值；拒绝时退休失败，不声明已删除。MiniCluster 覆盖此协议，真实目标环境的 timestamp 配置尚未验收。
 
@@ -50,7 +64,13 @@ NATIVE 同样保留基线和更高版本。删除明确 timestamp 的 `m/v/f`，
 
 启用 Lease/事件运行时后，系统记录 GC 在独立的常规准入中运行；它不占用恢复、续约和到期处理的 reserve。没有选定 Compact 或正在发布时等待；授权、证明和存储失败会记录 GC failure 并有界重试，准入不足记录 GC backlog。页计数、已检查记录数和退休记录数与 Lease expiry 指标分开统计。
 
-每次调度最多处理一个 `recordDomain + bucket` 页，随后轮转到下一分片；游标沿各 bucket 的物理行序独立推进。检查点绑定实际 Compact operation/generation、owner epoch、盐桶拓扑和本轮 revision/sequence 边界；同一许可下接管保留进度，拓扑变化或行值身份不一致则拒绝恢复。整页成功后才用精确值 CAS 推进。旧 worker 持有的字节不能覆盖接管后的检查点，未知结果可以有界重做。
+每次调度最多处理一个 `recordDomain + bucket` 页，随后轮转到下一分片；游标沿各 bucket 的物理行序独立推进。检查点绑定实际 Compact operation/generation、owner epoch、盐桶拓扑、本轮 revision/sequence 边界，以及 profile、KV 注册表身份、事件注册表身份和 namespace；同一许可下接管保留进度，绑定变化或行值身份不一致则拒绝恢复。整页成功后才用精确值 CAS 推进。旧 worker 持有的字节不能覆盖接管后的检查点，未知结果可以有界重做。
+
+检查点分别保存本轮累计 `pendingRecords` 和最近一次已完成的 revision、sequence、generation。冻结边界内仍受精确保护或存活引用约束、窗口尚未关闭，以及退休条件未命中的记录均计为 pending；冻结边界之外的较新记录合法保留，不计 pending。manifest 子页没有独立计数，使用同事务 root 或永久 invocation 的计数判断范围；两者都不存在时按保守下界处理，并继续核对全部存活引用。尚未决出的 PREPARING/SEALED 不会因扫描结束变成已完成，陈旧准备的后续处理仍属于 J53。
+
+只有 `SCANNING` 到达 EOF 且整轮 pending 为零，才写入正 generation 的完成回执；前页 pending 不会被后页的空 EOF 清除。未完成 sweep 的接管保留累计 pending，重扫才清零；既有完成回执在重扫、较强 Compact 和 owner 接管期间保留。初始 `0/0/0` 不证明 `Compact(0)` 已完成。域之间存在引用链时，需要多轮 sweep 逐步解除依赖，再确认每个域和 bucket。
+
+每页读写使用独立子 scope，先关闭并等待实际 producer 和清理均成功，再用父 scope 重新准入检查点操作、重读当前 owner/profile/Compact 身份并执行精确值 CAS；producer 或清理失败不会推进 fence、扫描游标或完成回执。退休 mutation 获得成功 ACK 后，仍须强一致读回并核验退休 guard/墓碑，不能仅以 ACK 作为删除证明。
 
 首次领取、owner 接管或 Compact 操作切换先持久进入 `FENCING`，此时只持有元数据租约，不能开始退休。fence 游标与原扫描游标分别保存；同 owner 中断可继续 fence 游标，新 owner 必须重新覆盖整个目标分片。全部有界物理页确认并 CAS 转为 `SCANNING` 后，才激活新的回收者。
 
@@ -66,21 +86,23 @@ GC 要求持久 descriptor 声明 `etcdhbase.m5.gc-fence-format=1`，并存在�
 
 完整 sweep 结束，或真实许可的操作、代次变化后，持久增加 sweep 编号并重新检查该 bucket。同一 Compact 的安全边界扩大时，当前 sweep 保留原保守边界，从新取得的真实许可派生更窄许可继续分页；下一 sweep 再采用新边界，避免前台 sequence 增长反复重置游标。派生许可保留全部权威、根保护及 scope，拒绝放宽边界。这样，前一轮因 pin 或引用而保留的前缀不会永久跳过；`completedPages` 保持累计，避免重置游标造成检查点 ABA。记录退休仍由后端独立复核实际授权。
 
-每页有记录数、扫描字节、引用证明及总时长上限，并保留整轮粗粒度 I/O、scanner、清理和内存额度。取消后额度继续占用到实际 producer 排空，调度器还等待清理结果；排队任务在停止后不再启动回收。当前不是逐条 HBase RPC 的完整费用核算，也未交付 GC 导致的前台尾延迟和长期空间收敛验收。
+系统记录页最多读取 64 条物理记录；引用证明保持每页 8,192 次扫描、65,536 条物理行和 64 MiB 的上限，不扩大预算来容纳高更新量页。已完成前缀可在证明预算耗尽时单独确认，避免同一未完成大页阻止后续调度。每页另有扫描字节及总时长上限，并保留整轮粗粒度 I/O、scanner、清理和内存额度。取消后额度继续占用到实际 producer 排空，调度器还等待清理结果；排队任务在停止后不再启动回收。当前不是逐条 HBase RPC 的完整费用核算，也未交付 GC 导致的前台尾延迟和长期空间收敛验收。
 
-## 5. 尚未交付的完整 Compact 能力
+J52.2a 的运行时结果窗口保护与关闭、J52.2b 的系统记录分域完成回执已实现，仍待各自 PR 的当前版本 CI 和正式 review。
 
-以下内容属于已批准的 J52，当前仍需实现：
+## 5. 完整物理等待与剩余能力
 
-- 跨副本 Compact owner RPC 转发、完整记录域的调度生命周期，以及真实目标环境的管理权限验收。
-- invocation 结果窗口的运行时关闭、在途结果查询的持久保护，以及不可重放的最小证明。
-- 把事件、决定、结果等内部记录的精确删除、引用解除及保护排空纳入同一目标的持久完成证明。现有系统 GC sweep EOF 不能独立证明该闭包已排空。
+`PhysicalGcCompletionScan` 为每个等待者保留独立游标，每次轮询最多读取一个完成回执。先核对 KV，再遍历全部系统域和 bucket；缺失或任一目标下界不足时继续等待。系统回执必须匹配实际 profile、KV 注册表身份、事件注册表身份及 namespace、bucket 拓扑，且完成代次为正。EOF、本轮较高的安全边界及默认零计数均不构成完成证明。更强 Compact 或 owner 接管保留的旧回执可以完成原目标，即使当前新 sweep 仍有 pending。
 
-本次只设置 KV 历史完成水位，不将它解释为完整 physical 完成，也不宣称 J52 验收通过。完整设计仍要求全部应回收记录完成精确删除和强读确认；本 PR 的受限 RPC 行为及其偏差见第 1 节。
+完整证明依赖已装配的事件注册表、回填和系统记录 GC。只启用 KV 的旧装配仍可登记逻辑 Compact 并运行 KV worker，但 `physical=true` 返回 `UNAVAILABLE`；已登记的逻辑工作保留，不以 KV 完成响应冒充完整证明。启用 Lease/事件运行时与 GC 格式的公开临时环境用于正向验证。该装配要求不等于已解除生产 Lease/身份能力门禁。
+
+J52.2d 复用既有 mTLS owner 通道，将 Compact 的有界 revision/physical 命令送至权威 owner。接收端在同一 mutation lane 中复查表组、hop、deadline、owner epoch、可信 peer 和安全身份引用，并在准备记录及控制行 CAS 前复查实际用户的会话与 ADMIN 权限。Compact 使用独立 COMPACTION 回执，不创建普通提交的 INVOCATION 绑定；返回值严格匹配操作身份、请求、授权范围、profile、revision 和终态。物理等待留在入口副本，响应 header 使用入口 member；转发选择使用独立子 scope，成功或失败都等待入口侧身份借用、在途传输和清理实际排空，清理失败不能发布成功回执。发送结果未知时不换 invocation 重发。发送前的 owner 变更由既有 relay 最多重新定位一次，发送后的取消、未知结果及 owner 接管保留已登记的持久任务。
+
+真实目标环境的管理权限验收仍待补齐。未决旧准备记录继续按引用与保护保留，可能阻止物理完成；J53 负责其判定与清理，不以本轮扫描结束跳过。
 
 ## 6. 格式与验证入口
 
-系统记录 GC 检查点值使用格式 2，分别编码 fence/扫描游标及明确的 phase；格式 1 会被严格拒绝，不自动回退或丢弃旧进度。新旧维护格式的受控升级仍待 J55。KV 历史检查点使用独立的 `RECOVERY_CHECKPOINT` 身份 `HGC/1` 和值 `HGV/1`，不复用系统记录扫描游标；编码绑定 profile、16 字节 pin 注册表身份、owner epoch、操作代次、bucket 拓扑和完成回执。
+系统记录 GC 检查点值使用格式 3，编码 fence/扫描游标、phase、profile 与两个注册表绑定、本轮累计 pending 及独立完成回执；格式 1、2 会被严格拒绝，不自动回退或丢弃旧进度。身份仍为 `GCC/1`；部署前须停止并排空旧维护 writer，已有格式 2 检查点不能由新 writer 直接恢复。新旧维护格式的受控升级仍待 J55。KV 历史检查点使用独立的 `RECOVERY_CHECKPOINT` 身份 `HGC/1` 和值 `HGV/1`，不复用系统记录扫描游标；编码绑定 profile、16 字节 pin 注册表身份、owner epoch、操作代次、bucket 拓扑和完成回执。
 
 system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compaction-format=1`。没有该能力的 store 拒绝读写 Compact 记录或安装控制身份。系统记录 GC 还要求第 4 节的独立维护 family 和持久 fence 能力；不将原 Compact 标记解释为可直接写入新的维护布局。已有控制格式增加 optional `compact_operation_id`；旧版严格解码器会拒绝该字段，不能把启用后的 writer 回退称为兼容。J55 仍需接入受控升级与启动能力校验。
 
@@ -90,7 +112,7 @@ system descriptor 需显式包含 `COMPACTION` 类别和 `etcdhbase.m5.compactio
 scripts/verify/m5.sh --scope public --task J52 --artifact-root .artifacts/m5/j52-storage-run
 ```
 
-入口运行确定性逻辑/pin/许可及扫描单测、HISTORY/NATIVE MiniCluster、系统记录与结果窗口 MiniCluster，以及固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。门禁构建至 `server`，保留原有 HBase 集成套件，并覆盖 GC 生命周期、KV 与系统记录检查点及真实双 bucket 重启回收。`J52PhysicalCompactIT` 使用实际管理身份、生产 runtime 和 gRPC，分别验证两种布局下旧 pin 阻塞、owner lane 可继续写入、全部目标版本精确删除及基线保留，以及取消后强杀 owner JVM、接管继续原任务和逻辑请求登记后台工作。测试门禁要求这些方法实际执行，且 Kerberos 测试按 JVM 隔离。它登记在 M5 CI 中，运行报告明确保留第 5 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
+入口运行确定性逻辑/pin/许可及扫描单测、HISTORY/NATIVE MiniCluster、系统记录与结果窗口 MiniCluster，以及固定 v3.5.23 原生 oracle，校验当前测试报告无失败、错误或跳过。门禁构建至 `server`，保留原有 HBase 集成套件，并覆盖 GC 生命周期、KV 与系统记录检查点及真实双 bucket 重启回收。`J52PhysicalCompactIT` 使用实际管理身份、生产 runtime 和 gRPC，分别验证两种布局下旧 pin 阻塞、owner lane 可继续写入、全部目标版本精确删除及基线保留，以及取消后强杀 owner JVM、接管继续原任务和逻辑请求登记后台工作。另有事件 pin 在 KV 已完成后继续阻塞的反例，并逐域逐桶核对系统回执；只启用 KV 的装配必须返回 UNAVAILABLE。跨副本用例以实际双副本 mTLS 通道验证入口 header、逻辑选择、物理等待不占 owner lane、取消后接管继续原任务，以及新 owner 的后续 Compact。测试采用两桶配置和真实 Lease 时钟。Lease worker 在完整空窗口结束后按既有 1 秒 idle 间隔调度，未完成窗口仍持续推进；回归同时覆盖 Lease mutation 推进时间水位的情况。此前实时钟探针暴露了空 Lease 窗口的密集发布、辅助 decision 窗口边界及闭包证明预算耗尽问题，分别由 idle 调度、统一结果窗口和已证明前缀推进处理。早期 16 桶探针超过 90 秒，两桶高更新量探针也曾在 300 秒内未取得全量回执；当前定向功能结果不构成 16 桶完成延迟或生产尾延迟承诺。测试门禁要求这些方法实际执行，且 Kerberos 测试按 JVM 隔离。它登记在 M5 CI 中，运行报告明确保留第 5 节缺口。真实目标环境、HFile 空间收敛、完整 Java Go 对照和正式 review 不由这个存储门禁替代。
 
 J52 专属门禁在实际执行的 `server` reactor 中登记 `CompactGatewayAuthorizationTest`，覆盖请求身份、每张目标表的 `ADMIN` 权限、真实 gRPC token 传递、CAS 前失效及取消排空；任一授权套件或关键方法缺失均不能通过报告校验。J09 仍执行完整 server 构建，J52 同时保留 GC worker 的真实执行套件。真实 Kerberos/HBase 的 `ADMIN` 授予与撤销反例属于 J04 的安全后端集成测试；替身网关测试和实际后端 ACL 测试各自保留验证范围。
 

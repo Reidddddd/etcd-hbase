@@ -72,6 +72,53 @@ class CompactGatewayAuthorizationTest {
       TableName.valueOf("compact-history"), TableName.valueOf("compact-current"));
 
   @Test
+  void forwardedCompactResolvesTheSessionAndRechecksUserAdminBeforeBothWrites() throws Exception {
+    for (int scenario = 0; scenario < 4; scenario++) {
+      var fixture = new Fixture();
+      int selected = scenario;
+      fixture.permissions = attempt -> CompletableFuture.completedFuture(
+          List.of(selected != 1 && (selected != 2 || attempt == 1), true, true));
+      if (scenario == 3) fixture.revalidation = attempt -> attempt < 3
+          ? CompletableFuture.completedFuture(fixture.resolved())
+          : CompletableFuture.failedFuture(invalidToken());
+      var authorization = new CompactRequestAuthorization(GROUP, SERVICE,
+          AuthorizationScopeDigest.fromIdentity(SERVICE), fixture.sessions, fixture.connections, TABLES);
+      var queue = new SerialMutationQueue(8, 64L << 10, java.time.Duration.ofSeconds(5));
+      try (var scope = RequestScope.withTimeout(java.time.Duration.ofSeconds(5))) {
+        var command = io.etcdhbase.core.commit.MutationOperationEnvelope.compact(
+            ByteBuffer.allocate(9).putLong(5).put((byte) 1).array());
+        var request = new io.etcdhbase.core.commit.MutationForwardRequest(GROUP,
+            io.etcdhbase.core.commit.InvocationId.create(),
+            io.etcdhbase.core.commit.MutationForwardRequest.digest(GROUP, command),
+            AuthorizationScopeDigest.fromIdentity(USER),
+            SessionAuthorizationContextReference.fromSession(fixture.held.session()).encode(),
+            4, TimeUnit.SECONDS.toNanos(5), 1, command);
+        var lane = new CompactOwnerLane(GROUP, queue, fixture.control,
+            () -> Optional.of(new CommitOwnerService.OwnerToken("owner", 4)),
+            new CompactionService(fixture.control, fixture.records, Clock.systemUTC()),
+            new SessionAuthorizationResolver(GROUP, fixture.sessions, "trusted"::equals), authorization);
+        var reply = lane.receive("trusted", request, scope).get(5, TimeUnit.SECONDS);
+        if (scenario == 0) {
+          var completed = assertInstanceOf(io.etcdhbase.core.commit.OwnerForwarding.Completed.class, reply);
+          assertEquals(AuthorizationScopeDigest.fromIdentity(USER),
+              CompactionOperation.decode(ByteKey.copyOf(completed.operationResult())).authorizationDigest());
+          assertEquals(5, fixture.state.get().compactRevision());
+          assertEquals(2, fixture.permissionChecks.get());
+        } else {
+          assertInstanceOf(io.etcdhbase.core.commit.OwnerForwarding.Unknown.class, reply);
+          if (scenario == 1) fixture.requireUnchanged();
+          else fixture.requirePreparedWithoutSelection();
+        }
+        verify(fixture.connections, never()).connectionFor(SERVICE);
+      } finally {
+        queue.close();
+        queue.drained().get(5, TimeUnit.SECONDS);
+        assertTrue(queue.awaitTermination(java.time.Duration.ofSeconds(5)));
+      }
+    }
+  }
+
+  @Test
   void missingAndInvalidTokensCannotCreateOperationsOrAdvanceControl() {
     for (Optional<String> token : List.of(Optional.<String>empty(), Optional.of("invalid"))) {
       var fixture = new Fixture();
@@ -335,7 +382,7 @@ class CompactGatewayAuthorizationTest {
       return new CompactGateway(authorization, 7, 9, new CompactionService(control, records, Clock.systemUTC()),
           (bytes, scope, work) -> work.apply(scope),
           () -> Optional.of(new CommitOwnerService.OwnerToken("owner", 4)),
-          scope -> CompletableFuture.completedFuture(state.get()), Optional.empty());
+          scope -> CompletableFuture.completedFuture(state.get()), Optional.empty(), Optional.empty());
     }
 
     private RecordingObserver call(Optional<String> token, boolean physical, RequestScope scope) {

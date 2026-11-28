@@ -69,6 +69,7 @@ public final class LeaseExpiryWorker {
   private RequestScope activeScope;
   private boolean cycleOutstanding;
   private boolean running;
+  private long lastIdleWindowStart = -1;
 
   public LeaseExpiryWorker(String tableGroup, ByteKey authorizationDigest, int bucketCount,
       long timeoutMillis, CommitControlStore control, SystemRecordStore records,
@@ -469,8 +470,15 @@ public final class LeaseExpiryWorker {
     clockHealthy.set(observation.healthy());
     markCheckpointHealthy(token.epoch());
     if (!checkpoint.position().idle()) return new CheckpointStatus(sequence, true);
+    long windowStart = checkpoint.position().windowStartInclusive();
+    if (lastIdleWindowStart != windowStart) {
+      // Pause between completed expiry windows to leave time for other maintenance.
+      // Lease mutations may advance the clock watermark without advancing this scan cursor.
+      lastIdleWindowStart = windowStart;
+      return new CheckpointStatus(sequence, false);
+    }
     long closeStop = LeaseExpiryCheckpoint.closedWindowStopExclusive(observation.nowLowerEpochMillis());
-    return new CheckpointStatus(sequence, closeStop > checkpoint.position().windowStartInclusive());
+    return new CheckpointStatus(sequence, closeStop > windowStart);
   }
 
   private void markCheckpointHealthy(long ownerEpoch) {
