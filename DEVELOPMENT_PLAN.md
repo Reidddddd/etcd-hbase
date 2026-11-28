@@ -939,7 +939,7 @@ J02/J03/J07 等基础交付按所需工程输入推进，不能等待 J00 的全
       - [ ] **J52.2a** 结果窗口：运行时有界关闭、在途结果查询持久保护及不可重放绑定。状态=实现完成，待当前 head 的 CI 和正式 review；分支=`codex/j52-result-window`；独立 PR。
       - [ ] **J52.2b** 系统记录完成证明：持久记录目标范围内的精确删除、引用解除及保护排空；状态=实现及定向验证完成，待当前 head 的 CI 和正式 review；分支=`codex/j52-system-completion`；依赖 J52.2a 的堆叠 PR。格式 3 绑定两个注册表并区分 pending、EOF 和正代次完成回执；完整 RPC 等待由 J52.2c 接入。
       - [ ] **J52.2c** 完整物理完成等待：组合 KV 与系统记录完成证明，实现完整 `physical=true` 契约；状态=实现及双布局 RPC、进程恢复定向验证完成，待当前 head 的 CI 和正式 review；分支=`codex/j52-full-physical`；[PR #73](https://github.com/Reidddddd/etcd-hbase/pull/73)，依赖 J52.2b 的堆叠 PR。
-      - [ ] **J52.2d** 跨副本 Compact：转发至当前 owner，覆盖接管、取消及身份校验；状态=实现完成，定向验证中；分支=`codex/j52-compact-forwarding`；依赖 J52.2c 的堆叠 PR。
+      - [ ] **J52.2d** 跨副本 Compact：转发至当前 owner，覆盖接管、取消及身份校验；状态=实现及双布局 mTLS 定向验证完成，待当前 head 的 CI 和正式 review；分支=`codex/j52-compact-forwarding`；依赖 J52.2c 的堆叠 PR。
       - 交付顺序：J52.2a → J52.2b → J52.2c → J52.2d → J52.1 实验补齐，每项独立 PR；正式 review 与目标环境验收分别记录。
   - 验证层次：L1 内核/生命周期 + L2 协议；运行/制品另记工程验收。
   - 跟踪：状态=进行中；负责人=Codex；完成日期=—；PR/commit=当前 J52 开发分支；验证报告=[逻辑压缩与存储回收边界](docs/maintenance/j52-compaction-storage.md)；评审人/结论=待正式评审。逻辑 Compact 网关、两布局 KV 持久分页回收与目标完成等待，以及系统记录闭包与持久分片调度已有实现；J52.2c 已组合 KV 与七个系统记录域的逐桶持久完成回执；缺少事件运行时无法建立完整证明时返回 UNAVAILABLE，详见设计 §6.1 和维护说明。结果窗口运行时保护与关闭由 J52.2a 实现，系统记录分域完成回执由 J52.2b 实现，均待各自 CI 和正式 review；完整物理等待组合由 J52.2c 实现，待当前版本 CI 和正式 review；跨副本转发由 J52.2d 实现并完成公开双布局 mTLS、取消及接管定向验证，待当前版本 CI 和正式 review；真实目标环境验收仍未完成。
